@@ -3,12 +3,19 @@
 cmake_minimum_required(VERSION 3.18)
 project(tide_backend LANGUAGES C CXX)
 
-# Detect and enable CUDA if present
-find_package(CUDAToolkit)
-if(CUDAToolkit_FOUND)
-    enable_language(CUDA)
+option(TIDE_ENABLE_CUDA "Enable CUDA backend" ON)
+
+# Detect and enable CUDA if present and enabled
+if(TIDE_ENABLE_CUDA)
+    find_package(CUDAToolkit)
+    if(CUDAToolkit_FOUND)
+        enable_language(CUDA)
+    else()
+        message(WARNING "CUDA not found. Building without CUDA support.")
+    endif()
 else()
-    message(WARNING "CUDA not found. Building without CUDA support.")
+    message(STATUS "CUDA disabled (TIDE_ENABLE_CUDA=OFF).")
+    set(CUDAToolkit_FOUND FALSE)
 endif()
 
 # Default build type
@@ -151,6 +158,10 @@ set(CPU_TARGETS)
 set(ACCURACIES 2 4 6 8)
 set(DTYPES float double)
 
+# --- Storage utilities ---
+set(STORAGE_UTILS_CPU_SRC ${CMAKE_CURRENT_SOURCE_DIR}/storage_utils.c)
+set(STORAGE_UTILS_CUDA_SRC "")
+
 # --- CPU object libraries ---
 foreach(ACCURACY ${ACCURACIES})
     foreach(DTYPE ${DTYPES})
@@ -184,7 +195,6 @@ if(CUDAToolkit_FOUND)
     # --- Storage utilities ---
     set(STORAGE_UTILS_CUDA_SRC ${CMAKE_CURRENT_SOURCE_DIR}/storage_utils.cu)
     set_source_files_properties(${STORAGE_UTILS_CUDA_SRC} PROPERTIES CUDA_ARCHITECTURES "89")
-    set(STORAGE_UTILS_CPU_SRC ${CMAKE_CURRENT_SOURCE_DIR}/storage_utils.c)
 endif()
 
 # --- Final Library Build ---

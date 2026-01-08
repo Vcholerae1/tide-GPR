@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest, macos-13, macos-14]
+        os: [ubuntu-22.04, windows-latest, macos-14]
         python-version: ["3.12"]
 
     steps:
@@ -52,9 +52,13 @@ jobs:
           # Download and install CUDA
           Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/12.4.0/network_installers/cuda_12.4.0_windows_network.exe" -OutFile "cuda_installer.exe"
           Start-Process -Wait -FilePath ".\cuda_installer.exe" -ArgumentList "-s", "nvcc_12.4", "cudart_12.4", "visual_studio_integration_12.4"
-          echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" >> $env:GITHUB_ENV
-          echo "CUDA_HOME=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" >> $env:GITHUB_ENV
-          echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin" >> $env:GITHUB_PATH
+          $cudaPath = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
+          "CUDA_PATH=$cudaPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CUDA_HOME=$cudaPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CUDA_PATH_V12_4=$cudaPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CudaToolkitDir=$cudaPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CUDAToolkit_ROOT=$cudaPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$cudaPath\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       # macOS: No CUDA, CPU only
       - name: Setup macOS
@@ -62,8 +66,21 @@ jobs:
         run: |
           echo "Building CPU-only version for macOS"
 
-      # Build wheel using uv
-      - name: Build wheel
+      # Build wheel using uv (Linux/Windows use CUDA, macOS CPU-only)
+      - name: Build wheel (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          uv build --wheel
+        shell: bash
+      - name: Build wheel (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          uv build --wheel
+        shell: bash
+      - name: Build wheel (macOS CPU-only)
+        if: runner.os == 'macOS'
+        env:
+          CMAKE_ARGS: -DTIDE_ENABLE_CUDA=OFF
         run: |
           uv build --wheel
         shell: bash
@@ -81,7 +98,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest, macos-13, macos-14]
+        os: [ubuntu-22.04, windows-latest, macos-14]
         python-version: ["3.12"]
 
     steps:
@@ -174,6 +191,8 @@ jobs:
           path: dist/
 
       - name: Install from sdist
+        env:
+          CMAKE_ARGS: -DTIDE_ENABLE_CUDA=OFF
         run: |
           uv pip install --system --torch-backend cpu dist/*.tar.gz
           python -c "import tide; print(f'tide version: {tide.__version__}')"
