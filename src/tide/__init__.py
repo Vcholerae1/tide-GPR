@@ -25,7 +25,7 @@ from .common import (
     reverse_pad,
     IGNORE_LOCATION,
 )
-from .maxwell import MaxwellTM, maxwelltm
+from .maxwell import MaxwellTM, Maxwell3D, maxwelltm, maxwell3d
 from .wavelets import ricker
 
 __all__ = [
@@ -37,11 +37,13 @@ __all__ = [
     "wavelets",
     # Classes
     "MaxwellTM",
+    "Maxwell3D",
     "CallbackState",
     # Type aliases
     "Callback",
     # Functions
     "maxwelltm",
+    "maxwell3d",
     "create_callback_state",
     # Signal processing
     "upsample",

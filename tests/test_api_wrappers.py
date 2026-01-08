@@ -9,8 +9,8 @@ def test_maxwelltm_module_matches_functional_cpu():
 
     ny, nx = 6, 6
     nt = 8
-    dx = 1.0
-    dt = 1e-10
+    dx = 0.02
+    dt = 4e-11
 
     epsilon = torch.ones((ny, nx), device=device, dtype=dtype)
     sigma = torch.zeros_like(epsilon)

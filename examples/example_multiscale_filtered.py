@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 import time
@@ -16,19 +17,32 @@ import tide
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-dx = 0.02
-dt = 4e-11
-nt = 1500
-pml_width = 10
-air_layer = 3
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    return default if value is None or value == "" else int(value)
 
-n_shots = 100
-d_source = 4
-first_source = 0
-n_batch = 7
-model_gradient_sampling_interval = 5
-storage_mode = "device"
-storage_compression = True  # BF16 boundary storage can reduce memory/bandwidth for rwii/boundary
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    return default if value is None or value == "" else float(value)
+
+
+dx = _env_float("TIDE_DX", 0.02)
+dt = _env_float("TIDE_DT", 4e-11)
+nt = _env_int("TIDE_NT", 1500)
+pml_width = _env_int("TIDE_PML_WIDTH", 10)
+air_layer = _env_int("TIDE_AIR_LAYER", 3)
+
+n_shots = _env_int("TIDE_N_SHOTS", 100)
+d_source = _env_int("TIDE_D_SOURCE", 4)
+first_source = _env_int("TIDE_FIRST_SOURCE", 0)
+n_batch = _env_int("TIDE_N_BATCH", 4)
+model_gradient_sampling_interval = _env_int("TIDE_GRAD_INTERVAL", 10)
+storage_mode = os.getenv("TIDE_STORAGE_MODE", "device")
+storage_compression = os.getenv("TIDE_STORAGE_COMPRESSION", "fp8")
+profile_enabled = _env_int("TIDE_PROFILE", 0) > 0
+
+n_batch = max(1, min(n_batch, n_shots))
 
 model_path = "examples/data/OverThrust.npy"
 epsilon_true_raw = np.load(model_path)
@@ -71,7 +85,21 @@ inversion_schedule = [
     {"data_key": "lp700", "adamw_epochs": 10, "lbfgs_epochs": 6},
 ]
 
+stages_limit = _env_int("TIDE_STAGES", 0)
+if stages_limit > 0:
+    inversion_schedule = inversion_schedule[:stages_limit]
+
+adamw_override = os.getenv("TIDE_ADAMW_EPOCHS")
+lbfgs_override = os.getenv("TIDE_LBFGS_EPOCHS")
+if adamw_override is not None or lbfgs_override is not None:
+    for entry in inversion_schedule:
+        if adamw_override is not None and adamw_override != "":
+            entry["adamw_epochs"] = int(adamw_override)
+        if lbfgs_override is not None and lbfgs_override != "":
+            entry["lbfgs_epochs"] = int(lbfgs_override)
+
 print(f"Base forward frequency: {base_forward_freq/1e6:.0f} MHz")
+print(f"Shots: {n_shots}, batches: {n_batch}, shots per batch: {n_shots_per_batch}")
 print("FIR low-pass schedule on observed data:")
 for key, spec in filter_specs.items():
     print(f"  {key}: {spec['desc']} (cutoff {spec['lowpass_mhz']} MHz)")
@@ -91,6 +119,12 @@ print(f"Saving figures to: {output_dir}")
 
 
 pde_counts = {"forward": 0.0, "adjoint": 0.0}
+timers = {"forward": 0.0, "adjoint": 0.0, "filter": 0.0}
+
+
+def _sync_if_cuda() -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize()
 
 
 def add_pde_counts(batch_size: int, forward: bool = False, adjoint: bool = False) -> None:
@@ -118,8 +152,32 @@ def report_pde_delta(prefix: str, forward_start: float, adjoint_start: float) ->
     print(f"{prefix}PDE solves: {format_pde_counts(forward, adjoint)}")
 
 
+def _time_block(name: str, fn):
+    if not profile_enabled:
+        return fn()
+    _sync_if_cuda()
+    start = time.perf_counter()
+    result = fn()
+    _sync_if_cuda()
+    timers[name] += time.perf_counter() - start
+    return result
+
+
+def report_profile_times() -> None:
+    if not profile_enabled:
+        return
+    total = sum(timers.values())
+    if total <= 0:
+        return
+    print("\n=== Profiling Summary ===")
+    for key in ("forward", "adjoint", "filter"):
+        value = timers[key]
+        pct = value / total * 100.0
+        print(f"{key.capitalize():>8}: {value:.2f}s ({pct:4.1f}%)")
+
+
 def design_fir_filter(cutoff_hz: float, fs: float, numtaps: int) -> torch.Tensor:
-    """Design a Hamming-windowed low-pass FIR filter (adapted from Fast-GPR-FWI)."""
+    """Design a Hamming-windowed low-pass FIR filter."""
     n = torch.arange(numtaps, dtype=torch.float32)
     window = 0.54 - 0.46 * torch.cos(2 * torch.pi * n / (numtaps - 1))
     sinc = torch.sin(2 * torch.pi * (cutoff_hz / fs) * (n - (numtaps - 1) / 2)) / (
@@ -131,31 +189,94 @@ def design_fir_filter(cutoff_hz: float, fs: float, numtaps: int) -> torch.Tensor
     return h / h.sum()
 
 
+# Cache for FIR filter coefficients to avoid recomputation
+_fir_cache: dict[tuple[float, float, str, str], torch.Tensor] = {}
+
+
+def fast_percentile_clip(grad: torch.Tensor, mask: torch.Tensor, percentile: float = 0.98) -> float:
+    """Approximate percentile-based gradient clipping using sampling.
+
+    Much faster than torch.quantile for large tensors by using random sampling.
+    """
+    valid_grads = grad[~mask].abs()
+    n = valid_grads.numel()
+    if n == 0:
+        return float("inf")
+
+    # For small tensors, use exact computation
+    if n < 10000:
+        return torch.quantile(valid_grads, percentile).item()
+
+    # For large tensors, sample and estimate percentile
+    sample_size = min(5000, n)
+    indices = torch.randperm(n, device=valid_grads.device)[:sample_size]
+    sampled = valid_grads[indices]
+    return torch.quantile(sampled, percentile).item()
+
+
+def get_cached_fir_filter(
+    cutoff_hz: float, dt: float, device: torch.device, dtype: torch.dtype
+) -> tuple[torch.Tensor, int]:
+    """Get cached FIR filter coefficients or compute and cache them."""
+    cache_key = (cutoff_hz, dt, str(device), str(dtype))
+    if cache_key not in _fir_cache:
+        fs = 1.0 / dt
+        numtaps = max(3, int(fs / cutoff_hz))
+        if numtaps % 2 == 0:
+            numtaps += 1
+        fir_coeff = design_fir_filter(cutoff_hz, fs, numtaps).to(device=device, dtype=dtype)
+        _fir_cache[cache_key] = fir_coeff
+    fir_coeff = _fir_cache[cache_key]
+    return fir_coeff, len(fir_coeff)
+
+
+def _apply_fir_3d(data: torch.Tensor, kernel: torch.Tensor, numtaps: int) -> torch.Tensor:
+    """Core FIR filtering for 3D tensors [nt, n_shots, n_rx]."""
+    nt_local, n_shots_local, n_rx_local = data.shape
+    reshaped = data.permute(1, 2, 0).reshape(-1, 1, nt_local)
+    padded = F.pad(reshaped, (numtaps - 1, 0), mode="reflect")
+    filtered = F.conv1d(padded, kernel, padding=0)
+    return filtered.view(n_shots_local, n_rx_local, nt_local).permute(2, 0, 1)
+
+
+# Note: torch.compile is not used for FIR filtering because F.pad with
+# mode="reflect" has issues when padding > input size (common for FIR filters)
+_apply_fir_3d_compiled = _apply_fir_3d
+
+
 def apply_fir_lowpass(data: torch.Tensor, dt: float, cutoff_hz: float) -> torch.Tensor:
     """Apply FIR low-pass filter along the time axis to observed/synthetic data."""
     if cutoff_hz <= 0:
         return data
 
-    fs = 1.0 / dt
-    numtaps = max(3, int(fs / cutoff_hz))
-    if numtaps % 2 == 0:
-        numtaps += 1
-    fir_coeff = design_fir_filter(cutoff_hz, fs, numtaps).to(device=data.device, dtype=data.dtype)
+    fir_coeff, numtaps = get_cached_fir_filter(cutoff_hz, dt, data.device, data.dtype)
+    kernel = fir_coeff.view(1, 1, -1)
 
     if data.ndim == 1:
         data_2d = data.view(1, 1, -1)
         padded = F.pad(data_2d, (numtaps - 1, 0), mode="reflect")
-        filtered = F.conv1d(padded, fir_coeff.view(1, 1, -1), padding=0)
+        filtered = F.conv1d(padded, kernel, padding=0)
         return filtered.view(-1)
 
     if data.ndim == 3:
-        # Expect [nt, n_shots, n_rx], filter along time.
-        nt_local, n_shots_local, n_rx_local = data.shape
-        reshaped = data.permute(1, 2, 0).reshape(-1, 1, nt_local)
-        padded = F.pad(reshaped, (numtaps - 1, 0), mode="reflect")
-        filtered = F.conv1d(padded, fir_coeff.view(1, 1, -1), padding=0)
-        return filtered.view(n_shots_local, n_rx_local, nt_local).permute(2, 0, 1)
+        return _apply_fir_3d_compiled(data, kernel, numtaps)
 
+    raise ValueError(f"Unsupported data dimension: {data.ndim}. Expected 1D or 3D tensor.")
+
+
+def apply_fir_lowpass_kernel(
+    data: torch.Tensor, kernel: torch.Tensor | None, numtaps: int
+) -> torch.Tensor:
+    """Apply a precomputed FIR kernel; skips filtering if kernel is None."""
+    if kernel is None:
+        return data
+    if data.ndim == 1:
+        data_2d = data.view(1, 1, -1)
+        padded = F.pad(data_2d, (numtaps - 1, 0), mode="reflect")
+        filtered = F.conv1d(padded, kernel, padding=0)
+        return filtered.view(-1)
+    if data.ndim == 3:
+        return _apply_fir_3d_compiled(data, kernel, numtaps)
     raise ValueError(f"Unsupported data dimension: {data.ndim}. Expected 1D or 3D tensor.")
 
 
@@ -205,23 +326,24 @@ def save_model_snapshot(eps_array: np.ndarray, title: str, filename: Path, vmin:
     print(f"Saved model snapshot to '{filename}'")
 
 
-def forward_batch(epsilon, sigma, mu, batch_idx, source_amplitude_full, requires_grad=True):
-    batch_start = batch_idx * n_shots_per_batch
-    batch_end = min(batch_start + n_shots_per_batch, n_shots)
-
-    src_amp = source_amplitude_full[batch_start:batch_end]
-    src_loc = source_locations[batch_start:batch_end]
-    rec_loc = receiver_locations[batch_start:batch_end]
-
+def forward_batch(
+    epsilon,
+    sigma,
+    mu,
+    source_amplitude,
+    source_location,
+    receiver_location,
+    requires_grad=True,
+):
     out = tide.maxwelltm(
         epsilon,
         sigma,
         mu,
         grid_spacing=dx,
         dt=dt,
-        source_amplitude=src_amp,
-        source_location=src_loc,
-        receiver_location=rec_loc,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
         pml_width=pml_width,
         save_snapshots=requires_grad,
         model_gradient_sampling_interval=model_gradient_sampling_interval if requires_grad else 1,
@@ -231,30 +353,55 @@ def forward_batch(epsilon, sigma, mu, batch_idx, source_amplitude_full, requires
     return out[-1]  # [nt, n_batch_shots, 1]
 
 
-def generate_base_and_filtered_observed():
-    with torch.no_grad():
-        wavelet = tide.ricker(base_forward_freq, nt, dt, peak_time=1.0 / base_forward_freq).to(device)
-        src_amp_full = wavelet.view(1, 1, nt).repeat(n_shots, 1, 1)
+def build_batch_meta(source_amplitude_full: torch.Tensor) -> list[dict]:
+    batches = []
+    for b in range(n_batch):
+        start = b * n_shots_per_batch
+        end = min(start + n_shots_per_batch, n_shots)
+        batches.append(
+            {
+                "start": start,
+                "end": end,
+                "size": end - start,
+                "src_amp": source_amplitude_full[start:end],
+                "src_loc": source_locations[start:end],
+                "rec_loc": receiver_locations[start:end],
+            }
+        )
+    return batches
 
+
+def generate_base_and_filtered_observed(batch_meta: list[dict]):
+    with torch.no_grad():
         obs_list = []
-        for b in range(n_batch):
-            b0 = b * n_shots_per_batch
-            b1 = min(b0 + n_shots_per_batch, n_shots)
+        for batch in batch_meta:
             obs_list.append(
-                forward_batch(
-                    epsilon_true, sigma_true, mu_true,
-                    b, src_amp_full, requires_grad=False
+                _time_block(
+                    "forward",
+                    lambda: forward_batch(
+                        epsilon_true,
+                        sigma_true,
+                        mu_true,
+                        batch["src_amp"],
+                        batch["src_loc"],
+                        batch["rec_loc"],
+                        requires_grad=False,
+                    ),
                 )
             )
-            add_pde_counts(b1 - b0, forward=True)
+            add_pde_counts(batch["size"], forward=True)
         observed_base = torch.cat(obs_list, dim=1)
 
         observed_sets = {}
         for key, spec in filter_specs.items():
             lowpass_hz = spec["lowpass_mhz"] * 1e6
             data_filtered = (
-                apply_fir_lowpass(observed_base, dt=dt, cutoff_hz=lowpass_hz)
-                if lowpass_hz > 0 else observed_base
+                _time_block(
+                    "filter",
+                    lambda: apply_fir_lowpass(observed_base, dt=dt, cutoff_hz=lowpass_hz),
+                )
+                if lowpass_hz > 0
+                else observed_base
             )
             observed_sets[key] = {
                 "data": data_filtered,
@@ -262,7 +409,7 @@ def generate_base_and_filtered_observed():
                 "desc": spec["desc"],
             }
 
-    return observed_base, observed_sets, src_amp_full
+    return observed_base, observed_sets
 
 
 sigma_smooth = 8
@@ -293,7 +440,10 @@ print("Starting multiscale filtered inversion")
 time_start_all = time.time()
 
 print("Generating base observed data once, then FIR filtering...")
-observed_raw, observed_sets, src_amp_full = generate_base_and_filtered_observed()
+wavelet = tide.ricker(base_forward_freq, nt, dt, peak_time=1.0 / base_forward_freq).to(device)
+src_amp_full = wavelet.view(1, 1, nt).repeat(n_shots, 1, 1)
+batch_meta = build_batch_meta(src_amp_full)
+observed_raw, observed_sets = generate_base_and_filtered_observed(batch_meta)
 print(f"Base forward modeled at {base_forward_freq/1e6:.0f} MHz.")
 report_pde_totals("After observed generation: ")
 save_filter_comparison(observed_raw, observed_sets, output_dir)
@@ -310,6 +460,20 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
 
     print(f"\n==== Stage {stage_idx}: {obs_cfg['desc']} ====")
     observed_filtered = obs_cfg["data"]
+
+    # Pre-slice observed data for each batch to avoid repeated slicing in loops
+    obs_batches = [
+        observed_filtered[:, batch["start"]:batch["end"], :]
+        for batch in batch_meta
+    ]
+    if lowpass_hz > 0:
+        fir_coeff, numtaps = get_cached_fir_filter(
+            lowpass_hz, dt, device, epsilon_inv.dtype
+        )
+        fir_kernel = fir_coeff.view(1, 1, -1)
+    else:
+        fir_kernel = None
+        numtaps = 0
     stage_forward_start = pde_counts["forward"]
     stage_adjoint_start = pde_counts["adjoint"]
 
@@ -319,31 +483,47 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
     )
     for epoch in range(n_epochs_adamw):
         optimizer_adamw.zero_grad()
-        epoch_loss = 0.0
+        epoch_loss = torch.zeros((), device=device)
 
-        for b in range(n_batch):
-            b0 = b * n_shots_per_batch
-            b1 = min(b0 + n_shots_per_batch, n_shots)
-
-            syn = forward_batch(
-                epsilon_inv, sigma_fixed, mu_fixed,
-                b, src_amp_full, requires_grad=True
+        for batch, obs in zip(batch_meta, obs_batches):
+            syn = _time_block(
+                "forward",
+                lambda: forward_batch(
+                    epsilon_inv,
+                    sigma_fixed,
+                    mu_fixed,
+                    batch["src_amp"],
+                    batch["src_loc"],
+                    batch["rec_loc"],
+                    requires_grad=True,
+                ),
             )
-            add_pde_counts(b1 - b0, forward=True)
-            syn_filtered = apply_fir_lowpass(syn, dt=dt, cutoff_hz=lowpass_hz)
-            obs_batch = observed_filtered[:, b0:b1, :]
+            add_pde_counts(batch["size"], forward=True)
+            if fir_kernel is None:
+                syn_filtered = syn
+            else:
+                syn_filtered = _time_block(
+                    "filter",
+                    lambda: apply_fir_lowpass_kernel(syn, fir_kernel, numtaps),
+                )
 
-            loss = loss_fn(syn_filtered, obs_batch)
-            loss.backward()
-            add_pde_counts(b1 - b0, adjoint=True)
-            epoch_loss += loss.item()
+            loss = loss_fn(syn_filtered, obs)
+            if profile_enabled:
+                _sync_if_cuda()
+                start = time.perf_counter()
+                loss.backward()
+                _sync_if_cuda()
+                timers["adjoint"] += time.perf_counter() - start
+            else:
+                loss.backward()
+            add_pde_counts(batch["size"], adjoint=True)
+            epoch_loss = epoch_loss + loss.detach()
 
         if epsilon_inv.grad is not None:
             epsilon_inv.grad[air_mask] = 0.0
-            valid_grads = epsilon_inv.grad[~air_mask].abs()
-            if valid_grads.numel() > 0:
-                clip_val = torch.quantile(valid_grads, 0.98)
-                torch.nn.utils.clip_grad_value_([epsilon_inv], clip_val.item())
+            clip_val = fast_percentile_clip(epsilon_inv.grad, air_mask, 0.98)
+            if clip_val < float("inf"):
+                torch.nn.utils.clip_grad_value_([epsilon_inv], clip_val)
 
         optimizer_adamw.step()
 
@@ -351,10 +531,11 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
             epsilon_inv.clamp_(1.0, 9.0)
             epsilon_inv[air_mask] = 1.0
 
-        all_losses.append(epoch_loss)
+        epoch_loss_value = epoch_loss.item()
+        all_losses.append(epoch_loss_value)
         if (epoch + 1) % 1 == 0 or epoch == 0:
             print(f"  AdamW epoch {epoch + 1}/{n_epochs_adamw}  "
-                  f"Loss={epoch_loss:.6e}")
+                  f"Loss={epoch_loss_value:.6e}")
 
     # Stage 2: L-BFGS
     optimizer_lbfgs = torch.optim.LBFGS(
@@ -367,37 +548,55 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
 
     def closure():
         optimizer_lbfgs.zero_grad()
-        total_loss = 0.0
-        for b in range(n_batch):
-            b0 = b * n_shots_per_batch
-            b1 = min(b0 + n_shots_per_batch, n_shots)
-            syn = forward_batch(
-                epsilon_inv, sigma_fixed, mu_fixed,
-                b, src_amp_full, requires_grad=True
+        total_loss = torch.zeros((), device=device)
+        for batch, obs in zip(batch_meta, obs_batches):
+            syn = _time_block(
+                "forward",
+                lambda: forward_batch(
+                    epsilon_inv,
+                    sigma_fixed,
+                    mu_fixed,
+                    batch["src_amp"],
+                    batch["src_loc"],
+                    batch["rec_loc"],
+                    requires_grad=True,
+                ),
             )
-            add_pde_counts(b1 - b0, forward=True)
-            syn_filtered = apply_fir_lowpass(syn, dt=dt, cutoff_hz=lowpass_hz)
-            obs_batch = observed_filtered[:, b0:b1, :]
-            loss = loss_fn(syn_filtered, obs_batch)
-            loss.backward()
-            add_pde_counts(b1 - b0, adjoint=True)
-            total_loss += loss.item()
+            add_pde_counts(batch["size"], forward=True)
+            if fir_kernel is None:
+                syn_filtered = syn
+            else:
+                syn_filtered = _time_block(
+                    "filter",
+                    lambda: apply_fir_lowpass_kernel(syn, fir_kernel, numtaps),
+                )
+            loss = loss_fn(syn_filtered, obs)
+            if profile_enabled:
+                _sync_if_cuda()
+                start = time.perf_counter()
+                loss.backward()
+                _sync_if_cuda()
+                timers["adjoint"] += time.perf_counter() - start
+            else:
+                loss.backward()
+            add_pde_counts(batch["size"], adjoint=True)
+            total_loss = total_loss + loss.detach()
 
         if epsilon_inv.grad is not None:
             epsilon_inv.grad[air_mask] = 0.0
-            valid_grads = epsilon_inv.grad[~air_mask].abs()
-            if valid_grads.numel() > 0:
-                clip_val = torch.quantile(valid_grads, 0.98)
-                torch.nn.utils.clip_grad_value_([epsilon_inv], clip_val.item())
-        return torch.tensor(total_loss, device=device)
+            clip_val = fast_percentile_clip(epsilon_inv.grad, air_mask, 0.98)
+            if clip_val < float("inf"):
+                torch.nn.utils.clip_grad_value_([epsilon_inv], clip_val)
+        return total_loss
 
     for epoch in range(n_epochs_lbfgs):
         loss = optimizer_lbfgs.step(closure)
         with torch.no_grad():
             epsilon_inv.clamp_(1.0, 9.0)
             epsilon_inv[air_mask] = 1.0
-        all_losses.append(loss.item())
-        print(f"  LBFGS epoch {epoch + 1}/{n_epochs_lbfgs}  Loss={loss.item():.6e}")
+        loss_value = loss.item()
+        all_losses.append(loss_value)
+        print(f"  LBFGS epoch {epoch + 1}/{n_epochs_lbfgs}  Loss={loss_value:.6e}")
 
     stage_breaks.append(len(all_losses) - 1)
     report_pde_delta(f"Stage {stage_idx} ", stage_forward_start, stage_adjoint_start)
@@ -465,3 +664,4 @@ print(f"Improvement: {(1 - rms_result / rms_init) * 100:.1f}%")
 
 print("\n=== Timing Summary ===")
 print(f"Total inversion time: {time_all:.2f}s")
+report_profile_times()

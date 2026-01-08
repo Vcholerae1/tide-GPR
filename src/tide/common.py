@@ -610,9 +610,9 @@ def cfl_condition(
     grid_spacing: Union[float, List[float]],
     dt: float,
     max_vel: float,
-    c_max: float = 0.6,
+    c_max: float = 1,
     eps: float = 1e-15,
-) -> Tuple[float, int]:
+) -> tuple[float, int]:
     """Calculate time step interval to satisfy CFL condition.
 
     The CFL (Courant-Friedrichs-Lewy) condition ensures numerical stability
@@ -832,7 +832,7 @@ def create_or_pad(
         result = result.squeeze(0)
 
     # PyTorch's autograd system automatically tracks gradients through operations.
-    # Explicitly calling requires_grad_() is incompatible with torch.func transforms (jvp, etc).
+    # Explicitly calling requires_grad_() is incompatible with torch.func transforms.
     # Simply return the result; gradient tracking is handled automatically.
     return result
 

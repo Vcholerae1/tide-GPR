@@ -87,49 +87,6 @@ def get_maxwell_tm_forward_template() -> List[Any]:
     return args
 
 
-def get_maxwell_tm_forward_jvp_template() -> List[Any]:
-    """Returns the argtype template for the Maxwell TM forward JVP propagator."""
-    args: List[Any] = []
-    # Material parameters
-    args += [c_void_p] * 3  # ca, cb, cq
-    args += [c_void_p] * 3  # dca, dcb, dcq
-    # Source
-    args += [c_void_p] * 2  # f, df
-    # Fields
-    args += [c_void_p] * 3  # ey, hx, hz
-    args += [c_void_p] * 3  # dey, dhx, dhz
-    # PML memory variables
-    args += [c_void_p] * 4  # m_ey_x, m_ey_z, m_hx_z, m_hz_x
-    args += [c_void_p] * 4  # dm_ey_x, dm_ey_z, dm_hx_z, dm_hz_x
-    # Recorded data
-    args += [c_void_p] * 2  # r, dr
-    # PML profiles
-    args += [c_void_p] * 8  # ay, by, ayh, byh, ax, bx, axh, bxh
-    # Kappa profiles
-    args += [c_void_p] * 4  # ky, kyh, kx, kxh
-    # Source and receiver indices
-    args += [c_void_p] * 2  # sources_i, receivers_i
-    # Grid spacing
-    args += [FLOAT_TYPE] * 2  # rdy, rdx
-    # Time step
-    args += [FLOAT_TYPE]  # dt
-    # Sizes
-    args += [c_int64]  # nt
-    args += [c_int64]  # n_shots
-    args += [c_int64] * 2  # ny, nx
-    args += [c_int64] * 2  # n_sources_per_shot, n_receivers_per_shot
-    args += [c_int64]  # step_ratio
-    # Batched flags
-    args += [c_bool] * 3  # ca_batched, cb_batched, cq_batched
-    # Start time
-    args += [c_int64]  # start_t
-    # PML boundaries
-    args += [c_int64] * 4  # pml_y0, pml_x0, pml_y1, pml_x1
-    # Device (for CUDA)
-    args += [c_int64]  # device
-    return args
-
-
 def get_maxwell_tm_backward_template() -> List[Any]:
     """Returns the argtype template for the Maxwell TM backward propagator (v2 with ASM)."""
     args: List[Any] = []
@@ -320,99 +277,143 @@ def get_maxwell_tm_backward_with_boundary_template() -> List[Any]:
     return args
 
 
-def get_maxwell_tm_forward_with_boundary_storage_rwii_template() -> List[Any]:
-    """Returns the argtype template for Maxwell TM forward with boundary storage + RWII accumulators."""
+def get_maxwell_3d_forward_template() -> List[Any]:
+    """Returns the argtype template for the 3D Maxwell forward propagator."""
     args: List[Any] = []
     # Material parameters
     args += [c_void_p] * 3  # ca, cb, cq
     # Source
-    args += [c_void_p]  # f
+    args += [c_void_p]  # f (source amplitudes)
     # Fields
-    args += [c_void_p] * 3  # ey, hx, hz
+    args += [c_void_p] * 6  # ex, ey, ez, hx, hy, hz
     # PML memory variables
-    args += [c_void_p] * 4  # m_ey_x, m_ey_z, m_hx_z, m_hz_x
+    args += [c_void_p] * 12  # m_hz_y, m_hy_z, m_hx_z, m_hz_x, m_hy_x, m_hx_y, m_ey_z, m_ez_y, m_ez_x, m_ex_z, m_ex_y, m_ey_x
     # Recorded data
     args += [c_void_p]  # r
-    # Boundary storage: Ey, Hx, Hz (store_1, store_3, filenames)
-    args += [c_void_p] * 9
-    # Boundary indices + size
-    args += [c_void_p]  # boundary_indices
-    args += [c_int64]  # boundary_numel
-    # RWII forward self-correlation accumulators (per-shot)
-    args += [c_void_p] * 2  # gamma_u_ey, gamma_u_curl
-    # RWII forward source traces (Ey at sources, per step)
-    args += [c_void_p]  # u_src
     # PML profiles
-    args += [c_void_p] * 8  # ay, by, ayh, byh, ax, bx, axh, bxh
+    args += [c_void_p] * 12  # az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh
     # Kappa profiles
-    args += [c_void_p] * 4  # ky, kyh, kx, kxh
+    args += [c_void_p] * 6  # kz, kzh, ky, kyh, kx, kxh
     # Source and receiver indices
     args += [c_void_p] * 2  # sources_i, receivers_i
     # Grid spacing
-    args += [FLOAT_TYPE] * 2  # rdy, rdx
+    args += [FLOAT_TYPE] * 3  # rdz, rdy, rdx
     # Time step
     args += [FLOAT_TYPE]  # dt
     # Sizes
     args += [c_int64]  # nt
     args += [c_int64]  # n_shots
-    args += [c_int64] * 2  # ny, nx
+    args += [c_int64] * 3  # nz, ny, nx
     args += [c_int64] * 2  # n_sources_per_shot, n_receivers_per_shot
-    # Storage mode
-    args += [c_int64] * 2  # storage_mode, shot_bytes_uncomp
-    # RWII accumulator flags
-    args += [c_bool] * 2  # accum_ey, accum_curl
+    args += [c_int64]  # step_ratio
     # Batched flags
     args += [c_bool] * 3  # ca_batched, cb_batched, cq_batched
+    # Start time
+    args += [c_int64]  # start_t
     # PML boundaries
-    args += [c_int64] * 4  # pml_y0, pml_x0, pml_y1, pml_x1
+    args += [c_int64] * 6  # pml_z0, pml_y0, pml_x0, pml_z1, pml_y1, pml_x1
+    # Source/receiver component
+    args += [c_int64] * 2  # source_component, receiver_component
     # Device (for CUDA)
     args += [c_int64]  # device
     return args
 
 
-def get_maxwell_tm_backward_rwii_template() -> List[Any]:
-    """Returns the argtype template for Maxwell TM RWII backward (single-wavefield) pass."""
+def get_maxwell_3d_forward_with_storage_template() -> List[Any]:
+    """Returns the argtype template for 3D Maxwell forward with storage (ASM)."""
     args: List[Any] = []
     # Material parameters
     args += [c_void_p] * 3  # ca, cb, cq
-    # Source (scaled) and grad_r
-    args += [c_void_p] * 2  # f, grad_r
-    # RWII backprop fields and curl(H) workspace
-    args += [c_void_p] * 4  # ey, hx, hz, curl_h
-    # Boundary storage: Ey, Hx, Hz (store_1, store_3, filenames)
-    args += [c_void_p] * 9
-    # Boundary indices + size
-    args += [c_void_p]  # boundary_indices
-    args += [c_int64]  # boundary_numel
-    # RWII forward source traces (Ey at sources, per step)
-    args += [c_void_p]  # u_src
-    # RWII forward self-correlation accumulators (per-shot)
-    args += [c_void_p] * 2  # gamma_u_ey, gamma_u_curl
-    # Gradient outputs
-    args += [c_void_p]  # grad_f
-    args += [c_void_p] * 4  # grad_ca, grad_cb, grad_eps, grad_sigma
-    args += [c_void_p] * 2  # grad_ca_shot, grad_cb_shot
+    # Source
+    args += [c_void_p]  # f (source amplitudes)
+    # Fields
+    args += [c_void_p] * 6  # ex, ey, ez, hx, hy, hz
+    # PML memory variables
+    args += [c_void_p] * 12  # m_hz_y, m_hy_z, m_hx_z, m_hz_x, m_hy_x, m_hx_y, m_ey_z, m_ez_y, m_ez_x, m_ex_z, m_ex_y, m_ey_x
+    # Recorded data
+    args += [c_void_p]  # r
+    # Storage for backward (Ex/Ey/Ez and curl(H) components)
+    # For each: store_1, store_3, filenames (char**)
+    args += [c_void_p] * 18
+    # PML profiles
+    args += [c_void_p] * 12  # az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh
+    # Kappa profiles
+    args += [c_void_p] * 6  # kz, kzh, ky, kyh, kx, kxh
     # Source and receiver indices
     args += [c_void_p] * 2  # sources_i, receivers_i
     # Grid spacing
-    args += [FLOAT_TYPE] * 2  # rdy, rdx
+    args += [FLOAT_TYPE] * 3  # rdz, rdy, rdx
     # Time step
     args += [FLOAT_TYPE]  # dt
     # Sizes
     args += [c_int64]  # nt
     args += [c_int64]  # n_shots
-    args += [c_int64] * 2  # ny, nx
+    args += [c_int64] * 3  # nz, ny, nx
     args += [c_int64] * 2  # n_sources_per_shot, n_receivers_per_shot
+    args += [c_int64]  # step_ratio
     # Storage mode
     args += [c_int64] * 2  # storage_mode, shot_bytes_uncomp
     # Requires grad flags
     args += [c_bool] * 2  # ca_requires_grad, cb_requires_grad
     # Batched flags
     args += [c_bool] * 3  # ca_batched, cb_batched, cq_batched
+    # Start time
+    args += [c_int64]  # start_t
     # PML boundaries
-    args += [c_int64] * 4  # pml_y0, pml_x0, pml_y1, pml_x1
-    # RWII scaling parameter
-    args += [FLOAT_TYPE]  # alpha_rwii
+    args += [c_int64] * 6  # pml_z0, pml_y0, pml_x0, pml_z1, pml_y1, pml_x1
+    # Source/receiver component
+    args += [c_int64] * 2  # source_component, receiver_component
+    # Device (for CUDA)
+    args += [c_int64]  # device
+    return args
+
+
+def get_maxwell_3d_backward_template() -> List[Any]:
+    """Returns the argtype template for 3D Maxwell backward propagator (ASM)."""
+    args: List[Any] = []
+    # Material parameters
+    args += [c_void_p] * 3  # ca, cb, cq
+    # Gradient of receiver data
+    args += [c_void_p]  # grad_r
+    # Adjoint fields (lambda)
+    args += [c_void_p] * 6  # lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz
+    # Adjoint PML memory variables
+    args += [c_void_p] * 12  # m_lambda_ey_z, m_lambda_ez_y, m_lambda_ez_x, m_lambda_ex_z, m_lambda_ex_y, m_lambda_ey_x, m_lambda_hz_y, m_lambda_hy_z, m_lambda_hx_z, m_lambda_hz_x, m_lambda_hy_x, m_lambda_hx_y
+    # Stored forward values (Ex/Ey/Ez and curl(H) components)
+    # For each: store_1, store_3, filenames (char**)
+    args += [c_void_p] * 18
+    # Gradient outputs
+    args += [c_void_p]  # grad_f
+    args += [c_void_p] * 4  # grad_ca, grad_cb, grad_eps, grad_sigma
+    args += [c_void_p] * 2  # grad_ca_shot, grad_cb_shot
+    # PML profiles
+    args += [c_void_p] * 12  # az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh
+    # Kappa profiles
+    args += [c_void_p] * 6  # kz, kzh, ky, kyh, kx, kxh
+    # Source and receiver indices
+    args += [c_void_p] * 2  # sources_i, receivers_i
+    # Grid spacing
+    args += [FLOAT_TYPE] * 3  # rdz, rdy, rdx
+    # Time step
+    args += [FLOAT_TYPE]  # dt
+    # Sizes
+    args += [c_int64]  # nt
+    args += [c_int64]  # n_shots
+    args += [c_int64] * 3  # nz, ny, nx
+    args += [c_int64] * 2  # n_sources_per_shot, n_receivers_per_shot
+    args += [c_int64]  # step_ratio
+    # Storage mode
+    args += [c_int64] * 2  # storage_mode, shot_bytes_uncomp
+    # Requires grad flags
+    args += [c_bool] * 2  # ca_requires_grad, cb_requires_grad
+    # Batched flags
+    args += [c_bool] * 3  # ca_batched, cb_batched, cq_batched
+    # Start time
+    args += [c_int64]  # start_t
+    # PML boundaries
+    args += [c_int64] * 6  # pml_z0, pml_y0, pml_x0, pml_z1, pml_y1, pml_x1
+    # Source/receiver component
+    args += [c_int64] * 2  # source_component, receiver_component
     # Device (for CUDA)
     args += [c_int64]  # device
     return args
@@ -421,13 +422,13 @@ def get_maxwell_tm_backward_rwii_template() -> List[Any]:
 # Template registry
 templates: dict[str, Callable[[], List[Any]]] = {
     "maxwell_tm_forward": get_maxwell_tm_forward_template,
-    "maxwell_tm_forward_jvp": get_maxwell_tm_forward_jvp_template,
     "maxwell_tm_forward_with_storage": get_maxwell_tm_forward_with_storage_template,
     "maxwell_tm_forward_with_boundary_storage": get_maxwell_tm_forward_with_boundary_storage_template,
-    "maxwell_tm_forward_with_boundary_storage_rwii": get_maxwell_tm_forward_with_boundary_storage_rwii_template,
     "maxwell_tm_backward": get_maxwell_tm_backward_template,
     "maxwell_tm_backward_with_boundary": get_maxwell_tm_backward_with_boundary_template,
-    "maxwell_tm_backward_rwii": get_maxwell_tm_backward_rwii_template,
+    "maxwell_3d_forward": get_maxwell_3d_forward_template,
+    "maxwell_3d_forward_with_storage": get_maxwell_3d_forward_with_storage_template,
+    "maxwell_3d_backward": get_maxwell_3d_backward_template,
 }
 
 
@@ -561,7 +562,6 @@ if _dll is not None:
     for current_accuracy in [2, 4, 6, 8]:
         for current_dtype in ["float", "double"]:
             _assign_argtypes("maxwell_tm", current_accuracy, current_dtype, "forward")
-            _assign_argtypes("maxwell_tm", current_accuracy, current_dtype, "forward_jvp")
             _assign_argtypes("maxwell_tm", current_accuracy, current_dtype, "forward_with_storage")
             _assign_argtypes(
                 "maxwell_tm",
@@ -569,12 +569,8 @@ if _dll is not None:
                 current_dtype,
                 "forward_with_boundary_storage",
             )
-            _assign_argtypes(
-                "maxwell_tm",
-                current_accuracy,
-                current_dtype,
-                "forward_with_boundary_storage_rwii",
-            )
             _assign_argtypes("maxwell_tm", current_accuracy, current_dtype, "backward")
             _assign_argtypes("maxwell_tm", current_accuracy, current_dtype, "backward_with_boundary")
-            _assign_argtypes("maxwell_tm", current_accuracy, current_dtype, "backward_rwii")
+            _assign_argtypes("maxwell_3d", current_accuracy, current_dtype, "forward")
+            _assign_argtypes("maxwell_3d", current_accuracy, current_dtype, "forward_with_storage")
+            _assign_argtypes("maxwell_3d", current_accuracy, current_dtype, "backward")

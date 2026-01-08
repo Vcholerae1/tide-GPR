@@ -30,7 +30,7 @@ random_source_batches = True
 random_seed = 7
 model_gradient_sampling_interval = 5
 storage_mode = "device"
-storage_compression = True  # BF16 boundary storage can reduce memory/bandwidth for rwii/boundary
+storage_compression = "fp8"  
 
 model_path = "examples/data/OverThrust.npy"
 epsilon_true_raw = np.load(model_path)

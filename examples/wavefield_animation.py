@@ -1,6 +1,3 @@
-import sys
-sys.path.insert(0, '../src')
-
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,6 +8,7 @@ from tide import CallbackState
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # device = torch.device("cpu") 
+
 print(f"使用设备: {device}")
 
 

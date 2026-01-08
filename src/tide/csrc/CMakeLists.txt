@@ -127,7 +127,7 @@ if(CUDAToolkit_FOUND)
         
         # Use "all" or specific architectures
         if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-            set_target_properties(${TARGET_NAME} PROPERTIES CUDA_ARCHITECTURES "52;60;70;75;80;86")
+            set_target_properties(${TARGET_NAME} PROPERTIES CUDA_ARCHITECTURES "89")
         else()
             set_target_properties(${TARGET_NAME} PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
         endif()
@@ -155,6 +155,7 @@ set(DTYPES float double)
 foreach(ACCURACY ${ACCURACIES})
     foreach(DTYPE ${DTYPES})
         add_tide_cpu_object_library(maxwell ${ACCURACY} ${DTYPE})
+        add_tide_cpu_object_library(maxwell3d ${ACCURACY} ${DTYPE})
     endforeach()
 endforeach()
 
@@ -176,12 +177,13 @@ if(CUDAToolkit_FOUND)
     foreach(ACCURACY ${ACCURACIES})
         foreach(DTYPE ${DTYPES})
             add_tide_cuda_object_library(maxwell ${ACCURACY} ${DTYPE})
+            add_tide_cuda_object_library(maxwell3d ${ACCURACY} ${DTYPE})
         endforeach()
     endforeach()
 
     # --- Storage utilities ---
     set(STORAGE_UTILS_CUDA_SRC ${CMAKE_CURRENT_SOURCE_DIR}/storage_utils.cu)
-    set_source_files_properties(${STORAGE_UTILS_CUDA_SRC} PROPERTIES CUDA_ARCHITECTURES "52;60;70;75;80;86")
+    set_source_files_properties(${STORAGE_UTILS_CUDA_SRC} PROPERTIES CUDA_ARCHITECTURES "89")
     set(STORAGE_UTILS_CPU_SRC ${CMAKE_CURRENT_SOURCE_DIR}/storage_utils.c)
 endif()
 
