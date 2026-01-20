@@ -6,10 +6,10 @@ readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.12"
 authors = [
-    {name = "Pu Yang", email = "your.email@example.com"}
+    {name = "V.cholerae", email = "v.cholerae1@gmail.com"}
 ]
 maintainers = [
-    {name = "Pu Yang", email = "your.email@example.com"}
+    {name = "V.cholerae", email = "v.cholerae1@gmail.com"}
 ]
 keywords = [
     "pytorch",
@@ -43,11 +43,6 @@ dependencies = [
     "scipy>=1.16.3",
     "torch>=2.9.1",
 ]
-
-[project.urls]
-Homepage = "https://github.com/yourusername/tide"
-Repository = "https://github.com/yourusername/tide"
-Issues = "https://github.com/yourusername/tide/issues"
 
 [project.optional-dependencies]
 dev = [

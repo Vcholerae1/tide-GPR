@@ -3,36 +3,37 @@
 A PyTorch-based library for electromagnetic wave propagation and inversion.
 """
 
-from . import common
+from . import callbacks
+from . import cfl
 from . import maxwell
+from . import padding
+from . import resampling
 from . import staggered
 from . import utils
+from . import validation
 from . import wavelets
 
-from .common import (
-    CallbackState,
-    Callback,
-    create_callback_state,
-    upsample,
-    downsample,
-    downsample_and_movedim,
-    cfl_condition,
+from .callbacks import CallbackState, Callback, create_callback_state
+from .cfl import cfl_condition
+from .padding import create_or_pad, zero_interior, reverse_pad
+from .resampling import upsample, downsample, downsample_and_movedim
+from .validation import (
     validate_model_gradient_sampling_interval,
     validate_freq_taper_frac,
     validate_time_pad_frac,
-    create_or_pad,
-    zero_interior,
-    reverse_pad,
-    IGNORE_LOCATION,
 )
 from .maxwell import MaxwellTM, Maxwell3D, maxwelltm, maxwell3d
 from .wavelets import ricker
 
 __all__ = [
     # Modules
-    "common",
+    "callbacks",
+    "cfl",
     "maxwell",
+    "padding",
+    "resampling",
     "staggered",
+    "validation",
     "utils",
     "wavelets",
     # Classes
@@ -58,8 +59,6 @@ __all__ = [
     "create_or_pad",
     "zero_interior",
     "reverse_pad",
-    # Constants
-    "IGNORE_LOCATION",
     # Wavelets
     "ricker",
 ]

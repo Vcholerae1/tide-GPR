@@ -4,7 +4,11 @@ Top-level exports from `src/tide/__init__.py`.
 TODO: Add signatures and usage examples for each item.
 
 ## Modules
-- common
+- callbacks
+- resampling
+- cfl
+- padding
+- validation
 - maxwell
 - staggered
 - utils
@@ -12,6 +16,7 @@ TODO: Add signatures and usage examples for each item.
 
 ## Classes
 - MaxwellTM
+- Maxwell3D
 - CallbackState
 
 ## Types
@@ -19,6 +24,7 @@ TODO: Add signatures and usage examples for each item.
 
 ## Functions
 - maxwelltm
+- maxwell3d
 - create_callback_state
 - upsample
 - downsample
@@ -31,6 +37,3 @@ TODO: Add signatures and usage examples for each item.
 - zero_interior
 - reverse_pad
 - ricker
-
-## Constants
-- IGNORE_LOCATION

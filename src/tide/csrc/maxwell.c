@@ -195,12 +195,12 @@ static inline float tide_fp8_e4m3_to_float(tide_fp8_e4m3 value) {
 #define M_LAMBDA_HZ_X(dy, dx) m_lambda_hz_x[IDX_SHOT(shot_idx, y + (dy), x + (dx))]
 
 static void convert_grad_ca_cb_to_eps_sigma(
-    TIDE_DTYPE const *const ca,
-    TIDE_DTYPE const *const cb,
-    TIDE_DTYPE const *const grad_ca,
-    TIDE_DTYPE const *const grad_cb,
-    TIDE_DTYPE *const grad_eps,
-    TIDE_DTYPE *const grad_sigma,
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const grad_ca,
+    TIDE_DTYPE const *__restrict const grad_cb,
+    TIDE_DTYPE *__restrict const grad_eps,
+    TIDE_DTYPE *__restrict const grad_sigma,
     TIDE_DTYPE const dt,
     int64_t const n_shots,
     int64_t const ny,
@@ -220,15 +220,20 @@ static void convert_grad_ca_cb_to_eps_sigma(
   TIDE_OMP_INDEX shot_idx;
 TIDE_OMP_PARALLEL_FOR
   for (shot_idx = 0; shot_idx < out_shots; ++shot_idx) {
+    int64_t const shot_offset = shot_idx * shot_numel;
+    int64_t const out_offset = ca_batched ? shot_offset : 0;
+    int64_t const ca_offset = ca_batched ? shot_offset : 0;
+    int64_t const cb_offset = cb_batched ? shot_offset : 0;
+    TIDE_DTYPE const *__restrict const ca_ptr = ca + ca_offset;
+    TIDE_DTYPE const *__restrict const cb_ptr = cb + cb_offset;
 TIDE_OMP_SIMD_COLLAPSE2
     for (int64_t y = 0; y < ny; ++y) {
       for (int64_t x = 0; x < nx; ++x) {
-        int64_t const out_idx = ca_batched ? IDX_SHOT(shot_idx, y, x) : IDX(y, x);
-        int64_t const ca_idx = ca_batched ? IDX_SHOT(shot_idx, y, x) : IDX(y, x);
-        int64_t const cb_idx = cb_batched ? IDX_SHOT(shot_idx, y, x) : IDX(y, x);
+        int64_t const idx = IDX(y, x);
+        int64_t const out_idx = out_offset + idx;
 
-        TIDE_DTYPE const ca_val = ca[ca_idx];
-        TIDE_DTYPE const cb_val = cb[cb_idx];
+        TIDE_DTYPE const ca_val = ca_ptr[idx];
+        TIDE_DTYPE const cb_val = cb_ptr[idx];
 
         TIDE_DTYPE const grad_ca_val =
             (ca_requires_grad && grad_ca != NULL) ? grad_ca[out_idx] : (TIDE_DTYPE)0;
@@ -255,9 +260,9 @@ TIDE_OMP_SIMD_COLLAPSE2
 
 
 static void add_sources_ey(
-    TIDE_DTYPE *const ey,
-    TIDE_DTYPE const *const f,
-    int64_t const *const sources_i,
+    TIDE_DTYPE *__restrict const ey,
+    TIDE_DTYPE const *__restrict const f,
+    int64_t const *__restrict const sources_i,
     int64_t const n_shots,
     int64_t const shot_numel,
     int64_t const n_sources_per_shot) {
@@ -276,9 +281,9 @@ TIDE_OMP_SIMD
 }
 
 static void subtract_sources_ey(
-    TIDE_DTYPE *const ey,
-    TIDE_DTYPE const *const f,
-    int64_t const *const sources_i,
+    TIDE_DTYPE *__restrict const ey,
+    TIDE_DTYPE const *__restrict const f,
+    int64_t const *__restrict const sources_i,
     int64_t const n_shots,
     int64_t const shot_numel,
     int64_t const n_sources_per_shot) {
@@ -298,9 +303,9 @@ TIDE_OMP_SIMD
 
 
 static void record_receivers_ey(
-    TIDE_DTYPE *const r,
-    TIDE_DTYPE const *const ey,
-    int64_t const *const receivers_i,
+    TIDE_DTYPE *__restrict const r,
+    TIDE_DTYPE const *__restrict const ey,
+    int64_t const *__restrict const receivers_i,
     int64_t const n_shots,
     int64_t const shot_numel,
     int64_t const n_receivers_per_shot) {
@@ -319,13 +324,13 @@ TIDE_OMP_SIMD
 }
 
 static void gather_boundary_3_cpu(
-    TIDE_DTYPE const *const ey,
-    TIDE_DTYPE const *const hx,
-    TIDE_DTYPE const *const hz,
-    TIDE_DTYPE *const bey,
-    TIDE_DTYPE *const bhx,
-    TIDE_DTYPE *const bhz,
-    int64_t const *const boundary_indices,
+    TIDE_DTYPE const *__restrict const ey,
+    TIDE_DTYPE const *__restrict const hx,
+    TIDE_DTYPE const *__restrict const hz,
+    TIDE_DTYPE *__restrict const bey,
+    TIDE_DTYPE *__restrict const bhx,
+    TIDE_DTYPE *__restrict const bhz,
+    int64_t const *__restrict const boundary_indices,
     int64_t const boundary_numel,
     int64_t const n_shots,
     int64_t const shot_numel) {
@@ -346,9 +351,9 @@ TIDE_OMP_SIMD
 }
 
 static void scatter_boundary_cpu(
-    TIDE_DTYPE *const field,
-    TIDE_DTYPE const *const store,
-    int64_t const *const boundary_indices,
+    TIDE_DTYPE *__restrict const field,
+    TIDE_DTYPE const *__restrict const store,
+    int64_t const *__restrict const boundary_indices,
     int64_t const boundary_numel,
     int64_t const n_shots,
     int64_t const shot_numel) {
@@ -367,11 +372,11 @@ TIDE_OMP_SIMD
 }
 
 static void scatter_boundary_2_cpu(
-    TIDE_DTYPE *const hx,
-    TIDE_DTYPE *const hz,
-    TIDE_DTYPE const *const bhx,
-    TIDE_DTYPE const *const bhz,
-    int64_t const *const boundary_indices,
+    TIDE_DTYPE *__restrict const hx,
+    TIDE_DTYPE *__restrict const hz,
+    TIDE_DTYPE const *__restrict const bhx,
+    TIDE_DTYPE const *__restrict const bhz,
+    int64_t const *__restrict const boundary_indices,
     int64_t const boundary_numel,
     int64_t const n_shots,
     int64_t const shot_numel) {
@@ -391,13 +396,13 @@ TIDE_OMP_SIMD
 }
 
 static void gather_boundary_3_cpu_bf16(
-    TIDE_DTYPE const *const ey,
-    TIDE_DTYPE const *const hx,
-    TIDE_DTYPE const *const hz,
-    tide_bfloat16 *const bey,
-    tide_bfloat16 *const bhx,
-    tide_bfloat16 *const bhz,
-    int64_t const *const boundary_indices,
+    TIDE_DTYPE const *__restrict const ey,
+    TIDE_DTYPE const *__restrict const hx,
+    TIDE_DTYPE const *__restrict const hz,
+    tide_bfloat16 *__restrict const bey,
+    tide_bfloat16 *__restrict const bhx,
+    tide_bfloat16 *__restrict const bhz,
+    int64_t const *__restrict const boundary_indices,
     int64_t const boundary_numel,
     int64_t const n_shots,
     int64_t const shot_numel) {
@@ -418,9 +423,9 @@ TIDE_OMP_SIMD
 }
 
 static void scatter_boundary_cpu_bf16(
-    TIDE_DTYPE *const field,
-    tide_bfloat16 const *const store,
-    int64_t const *const boundary_indices,
+    TIDE_DTYPE *__restrict const field,
+    tide_bfloat16 const *__restrict const store,
+    int64_t const *__restrict const boundary_indices,
     int64_t const boundary_numel,
     int64_t const n_shots,
     int64_t const shot_numel) {
@@ -439,11 +444,11 @@ TIDE_OMP_SIMD
 }
 
 static void scatter_boundary_2_cpu_bf16(
-    TIDE_DTYPE *const hx,
-    TIDE_DTYPE *const hz,
-    tide_bfloat16 const *const bhx,
-    tide_bfloat16 const *const bhz,
-    int64_t const *const boundary_indices,
+    TIDE_DTYPE *__restrict const hx,
+    TIDE_DTYPE *__restrict const hz,
+    tide_bfloat16 const *__restrict const bhx,
+    tide_bfloat16 const *__restrict const bhz,
+    int64_t const *__restrict const boundary_indices,
     int64_t const boundary_numel,
     int64_t const n_shots,
     int64_t const shot_numel) {
@@ -464,13 +469,13 @@ TIDE_OMP_SIMD
 
 // FP8 boundary storage functions
 static void gather_boundary_3_cpu_fp8(
-    TIDE_DTYPE const *const ey,
-    TIDE_DTYPE const *const hx,
-    TIDE_DTYPE const *const hz,
-    tide_fp8_e4m3 *const bey,
-    tide_fp8_e4m3 *const bhx,
-    tide_fp8_e4m3 *const bhz,
-    int64_t const *const boundary_indices,
+    TIDE_DTYPE const *__restrict const ey,
+    TIDE_DTYPE const *__restrict const hx,
+    TIDE_DTYPE const *__restrict const hz,
+    tide_fp8_e4m3 *__restrict const bey,
+    tide_fp8_e4m3 *__restrict const bhx,
+    tide_fp8_e4m3 *__restrict const bhz,
+    int64_t const *__restrict const boundary_indices,
     int64_t const boundary_numel,
     int64_t const n_shots,
     int64_t const shot_numel) {
@@ -491,9 +496,9 @@ TIDE_OMP_SIMD
 }
 
 static void scatter_boundary_cpu_fp8(
-    TIDE_DTYPE *const field,
-    tide_fp8_e4m3 const *const store,
-    int64_t const *const boundary_indices,
+    TIDE_DTYPE *__restrict const field,
+    tide_fp8_e4m3 const *__restrict const store,
+    int64_t const *__restrict const boundary_indices,
     int64_t const boundary_numel,
     int64_t const n_shots,
     int64_t const shot_numel) {
@@ -512,11 +517,11 @@ TIDE_OMP_SIMD
 }
 
 static void scatter_boundary_2_cpu_fp8(
-    TIDE_DTYPE *const hx,
-    TIDE_DTYPE *const hz,
-    tide_fp8_e4m3 const *const bhx,
-    tide_fp8_e4m3 const *const bhz,
-    int64_t const *const boundary_indices,
+    TIDE_DTYPE *__restrict const hx,
+    TIDE_DTYPE *__restrict const hz,
+    tide_fp8_e4m3 const *__restrict const bhx,
+    tide_fp8_e4m3 const *__restrict const bhz,
+    int64_t const *__restrict const boundary_indices,
     int64_t const boundary_numel,
     int64_t const n_shots,
     int64_t const shot_numel) {
@@ -555,24 +560,24 @@ static inline void *boundary_store_ptr(
 
 
 static void forward_kernel_h(
-    TIDE_DTYPE const *const cq,
-    TIDE_DTYPE const *const ey,
-    TIDE_DTYPE *const hx,
-    TIDE_DTYPE *const hz,
-    TIDE_DTYPE *const m_ey_x,
-    TIDE_DTYPE *const m_ey_z,
-    TIDE_DTYPE const *const ay,
-    TIDE_DTYPE const *const ayh,
-    TIDE_DTYPE const *const ax,
-    TIDE_DTYPE const *const axh,
-    TIDE_DTYPE const *const by,
-    TIDE_DTYPE const *const byh,
-    TIDE_DTYPE const *const bx,
-    TIDE_DTYPE const *const bxh,
-    TIDE_DTYPE const *const ky,
-    TIDE_DTYPE const *const kyh,
-    TIDE_DTYPE const *const kx,
-    TIDE_DTYPE const *const kxh,
+    TIDE_DTYPE const *__restrict const cq,
+    TIDE_DTYPE const *__restrict const ey,
+    TIDE_DTYPE *__restrict const hx,
+    TIDE_DTYPE *__restrict const hz,
+    TIDE_DTYPE *__restrict const m_ey_x,
+    TIDE_DTYPE *__restrict const m_ey_z,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh,
     TIDE_DTYPE const rdy,
     TIDE_DTYPE const rdx,
     int64_t const n_shots,
@@ -589,41 +594,45 @@ static void forward_kernel_h(
   int64_t const pml_y1h = MAX(pml_y0, pml_y1 - 1);
   int64_t const pml_x0h = pml_x0;
   int64_t const pml_x1h = MAX(pml_x0, pml_x1 - 1);
+  int64_t const pml_bounds_yh[] = {FD_PAD, pml_y0h, pml_y1h, ny - FD_PAD + 1};
+  int64_t const pml_bounds_xh[] = {FD_PAD, pml_x0h, pml_x1h, nx - FD_PAD + 1};
 
   TIDE_OMP_INDEX shot_idx;
 TIDE_OMP_PARALLEL_FOR
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    int64_t const shot_offset = shot_idx * shot_numel;
+    TIDE_DTYPE const *__restrict const cq_ptr =
+        cq_batched ? (cq + shot_offset) : cq;
+    for (int pml_y = 0; pml_y < 3; ++pml_y) {
+      for (int pml_x = 0; pml_x < 3; ++pml_x) {
 TIDE_OMP_SIMD_COLLAPSE2
-    for (int64_t y = FD_PAD; y < ny - FD_PAD + 1; ++y) {
-      for (int64_t x = FD_PAD; x < nx - FD_PAD + 1; ++x) {
-        TIDE_DTYPE const cq_val = CQ(0, 0);
+        for (int64_t y = pml_bounds_yh[pml_y]; y < pml_bounds_yh[pml_y + 1]; ++y) {
+          for (int64_t x = pml_bounds_xh[pml_x]; x < pml_bounds_xh[pml_x + 1]; ++x) {
+            int64_t const idx = IDX(y, x);
+            TIDE_DTYPE const cq_val = cq_ptr[idx];
 
-        // Update Hx: Hx = Hx - cq * dEy/dz
-        if (y < ny - FD_PAD) {
-          bool pml_y = y < pml_y0h || y >= pml_y1h;
-          
-          TIDE_DTYPE dey_dz = DIFFYH1(EY);
+            if (y < ny - FD_PAD) {
+              TIDE_DTYPE dey_dz = DIFFYH1(EY);
 
-          if (pml_y) {
-            M_EY_Z(0, 0) = byh[y] * M_EY_Z(0, 0) + ayh[y] * dey_dz;
-            dey_dz = dey_dz / kyh[y] + M_EY_Z(0, 0);
+              if (pml_y != 1) {
+                M_EY_Z(0, 0) = byh[y] * M_EY_Z(0, 0) + ayh[y] * dey_dz;
+                dey_dz = dey_dz / kyh[y] + M_EY_Z(0, 0);
+              }
+
+              HX(0, 0) -= cq_val * dey_dz;
+            }
+
+            if (x < nx - FD_PAD) {
+              TIDE_DTYPE dey_dx = DIFFXH1(EY);
+
+              if (pml_x != 1) {
+                M_EY_X(0, 0) = bxh[x] * M_EY_X(0, 0) + axh[x] * dey_dx;
+                dey_dx = dey_dx / kxh[x] + M_EY_X(0, 0);
+              }
+
+              HZ(0, 0) += cq_val * dey_dx;
+            }
           }
-
-          HX(0, 0) -= cq_val * dey_dz;
-        }
-
-        // Update Hz: Hz = Hz + cq * dEy/dx
-        if (x < nx - FD_PAD) {
-          bool pml_x = x < pml_x0h || x >= pml_x1h;
-
-          TIDE_DTYPE dey_dx = DIFFXH1(EY);
-
-          if (pml_x) {
-            M_EY_X(0, 0) = bxh[x] * M_EY_X(0, 0) + axh[x] * dey_dx;
-            dey_dx = dey_dx / kxh[x] + M_EY_X(0, 0);
-          }
-
-          HZ(0, 0) += cq_val * dey_dx;
         }
       }
     }
@@ -639,25 +648,25 @@ TIDE_OMP_SIMD_COLLAPSE2
  *   - curl_h_store: (dHz/dx - dHx/dz) (needed for grad_cb)
  */
 static void forward_kernel_e_with_storage(
-    TIDE_DTYPE const *const ca,
-    TIDE_DTYPE const *const cb,
-    TIDE_DTYPE const *const hx,
-    TIDE_DTYPE const *const hz,
-    TIDE_DTYPE *const ey,
-    TIDE_DTYPE *const m_hx_z,
-    TIDE_DTYPE *const m_hz_x,
-    TIDE_DTYPE const *const ay,
-    TIDE_DTYPE const *const ayh,
-    TIDE_DTYPE const *const ax,
-    TIDE_DTYPE const *const axh,
-    TIDE_DTYPE const *const by,
-    TIDE_DTYPE const *const byh,
-    TIDE_DTYPE const *const bx,
-    TIDE_DTYPE const *const bxh,
-    TIDE_DTYPE const *const ky,
-    TIDE_DTYPE const *const kyh,
-    TIDE_DTYPE const *const kx,
-    TIDE_DTYPE const *const kxh,
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const hx,
+    TIDE_DTYPE const *__restrict const hz,
+    TIDE_DTYPE *__restrict const ey,
+    TIDE_DTYPE *__restrict const m_hx_z,
+    TIDE_DTYPE *__restrict const m_hz_x,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh,
     TIDE_DTYPE const rdy,
     TIDE_DTYPE const rdx,
     int64_t const n_shots,
@@ -672,76 +681,80 @@ static void forward_kernel_e_with_storage(
     bool const cb_batched,
     bool const ca_requires_grad,
     bool const cb_requires_grad,
-    TIDE_DTYPE *const ey_store,
-    TIDE_DTYPE *const curl_h_store) {
+    TIDE_DTYPE *__restrict const ey_store,
+    TIDE_DTYPE *__restrict const curl_h_store) {
+
+  int64_t const pml_bounds_y[] = {FD_PAD, pml_y0, pml_y1, ny - FD_PAD + 1};
+  int64_t const pml_bounds_x[] = {FD_PAD, pml_x0, pml_x1, nx - FD_PAD + 1};
 
   TIDE_OMP_INDEX shot_idx;
 TIDE_OMP_PARALLEL_FOR
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    int64_t const shot_offset = shot_idx * shot_numel;
+    TIDE_DTYPE const *__restrict const ca_ptr =
+        ca_batched ? (ca + shot_offset) : ca;
+    TIDE_DTYPE const *__restrict const cb_ptr =
+        cb_batched ? (cb + shot_offset) : cb;
+    for (int pml_y = 0; pml_y < 3; ++pml_y) {
+      for (int pml_x = 0; pml_x < 3; ++pml_x) {
 TIDE_OMP_SIMD_COLLAPSE2
-    for (int64_t y = FD_PAD; y < ny - FD_PAD + 1; ++y) {
-      for (int64_t x = FD_PAD; x < nx - FD_PAD + 1; ++x) {
-        TIDE_DTYPE const ca_val = CA(0, 0);
-        TIDE_DTYPE const cb_val = CB(0, 0);
+        for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
+          for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
+            int64_t const idx = IDX(y, x);
+            int64_t const store_idx = shot_offset + idx;
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const cb_val = cb_ptr[idx];
 
-        bool pml_y = y < pml_y0 || y >= pml_y1;
-        bool pml_x = x < pml_x0 || x >= pml_x1;
+            TIDE_DTYPE dhz_dx = DIFFX1(HZ);
+            TIDE_DTYPE dhx_dz = DIFFY1(HX);
 
-        // Compute dHz/dx at integer grid points
-        TIDE_DTYPE dhz_dx = DIFFX1(HZ);
-        // Compute dHx/dz at integer grid points
-        TIDE_DTYPE dhx_dz = DIFFY1(HX);
+            if (pml_x != 1) {
+              M_HZ_X(0, 0) = bx[x] * M_HZ_X(0, 0) + ax[x] * dhz_dx;
+              dhz_dx = dhz_dx / kx[x] + M_HZ_X(0, 0);
+            }
 
-        // Apply CPML for dHz/dx
-        if (pml_x) {
-          M_HZ_X(0, 0) = bx[x] * M_HZ_X(0, 0) + ax[x] * dhz_dx;
-          dhz_dx = dhz_dx / kx[x] + M_HZ_X(0, 0);
+            if (pml_y != 1) {
+              M_HX_Z(0, 0) = by[y] * M_HX_Z(0, 0) + ay[y] * dhx_dz;
+              dhx_dz = dhx_dz / ky[y] + M_HX_Z(0, 0);
+            }
+
+            TIDE_DTYPE curl_h = dhz_dx - dhx_dz;
+
+            if (ca_requires_grad && ey_store != NULL) {
+              ey_store[store_idx] = EY(0, 0);
+            }
+            if (cb_requires_grad && curl_h_store != NULL) {
+              curl_h_store[store_idx] = curl_h;
+            }
+
+            EY(0, 0) = ca_val * EY(0, 0) + cb_val * curl_h;
+          }
         }
-
-        // Apply CPML for dHx/dz
-        if (pml_y) {
-          M_HX_Z(0, 0) = by[y] * M_HX_Z(0, 0) + ay[y] * dhx_dz;
-          dhx_dz = dhx_dz / ky[y] + M_HX_Z(0, 0);
-        }
-
-        // curl_H = dHz/dx - dHx/dz
-        TIDE_DTYPE curl_h = dhz_dx - dhx_dz;
-
-        // Store values for gradient computation (before E update)
-        if (ca_requires_grad && ey_store != NULL) {
-          ey_store[IDX_SHOT(shot_idx, y, x)] = EY(0, 0);
-        }
-        if (cb_requires_grad && curl_h_store != NULL) {
-          curl_h_store[IDX_SHOT(shot_idx, y, x)] = curl_h;
-        }
-
-        // Update Ey: Ey = ca * Ey + cb * curl_H
-        EY(0, 0) = ca_val * EY(0, 0) + cb_val * curl_h;
       }
     }
   }
 }
 
 static void forward_kernel_e_with_storage_bf16(
-    TIDE_DTYPE const *const ca,
-    TIDE_DTYPE const *const cb,
-    TIDE_DTYPE const *const hx,
-    TIDE_DTYPE const *const hz,
-    TIDE_DTYPE *const ey,
-    TIDE_DTYPE *const m_hx_z,
-    TIDE_DTYPE *const m_hz_x,
-    TIDE_DTYPE const *const ay,
-    TIDE_DTYPE const *const ayh,
-    TIDE_DTYPE const *const ax,
-    TIDE_DTYPE const *const axh,
-    TIDE_DTYPE const *const by,
-    TIDE_DTYPE const *const byh,
-    TIDE_DTYPE const *const bx,
-    TIDE_DTYPE const *const bxh,
-    TIDE_DTYPE const *const ky,
-    TIDE_DTYPE const *const kyh,
-    TIDE_DTYPE const *const kx,
-    TIDE_DTYPE const *const kxh,
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const hx,
+    TIDE_DTYPE const *__restrict const hz,
+    TIDE_DTYPE *__restrict const ey,
+    TIDE_DTYPE *__restrict const m_hx_z,
+    TIDE_DTYPE *__restrict const m_hz_x,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh,
     TIDE_DTYPE const rdy,
     TIDE_DTYPE const rdx,
     int64_t const n_shots,
@@ -756,70 +769,79 @@ static void forward_kernel_e_with_storage_bf16(
     bool const cb_batched,
     bool const ca_requires_grad,
     bool const cb_requires_grad,
-    tide_bfloat16 *const ey_store,
-    tide_bfloat16 *const curl_h_store) {
+    tide_bfloat16 *__restrict const ey_store,
+    tide_bfloat16 *__restrict const curl_h_store) {
+
+  int64_t const pml_bounds_y[] = {FD_PAD, pml_y0, pml_y1, ny - FD_PAD + 1};
+  int64_t const pml_bounds_x[] = {FD_PAD, pml_x0, pml_x1, nx - FD_PAD + 1};
 
   TIDE_OMP_INDEX shot_idx;
 TIDE_OMP_PARALLEL_FOR
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    int64_t const shot_offset = shot_idx * shot_numel;
+    TIDE_DTYPE const *__restrict const ca_ptr =
+        ca_batched ? (ca + shot_offset) : ca;
+    TIDE_DTYPE const *__restrict const cb_ptr =
+        cb_batched ? (cb + shot_offset) : cb;
+    for (int pml_y = 0; pml_y < 3; ++pml_y) {
+      for (int pml_x = 0; pml_x < 3; ++pml_x) {
 TIDE_OMP_SIMD_COLLAPSE2
-    for (int64_t y = FD_PAD; y < ny - FD_PAD + 1; ++y) {
-      for (int64_t x = FD_PAD; x < nx - FD_PAD + 1; ++x) {
-        TIDE_DTYPE const ca_val = CA(0, 0);
-        TIDE_DTYPE const cb_val = CB(0, 0);
+        for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
+          for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
+            int64_t const idx = IDX(y, x);
+            int64_t const store_idx = shot_offset + idx;
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const cb_val = cb_ptr[idx];
 
-        bool pml_y = y < pml_y0 || y >= pml_y1;
-        bool pml_x = x < pml_x0 || x >= pml_x1;
+            TIDE_DTYPE dhz_dx = DIFFX1(HZ);
+            TIDE_DTYPE dhx_dz = DIFFY1(HX);
 
-        TIDE_DTYPE dhz_dx = DIFFX1(HZ);
-        TIDE_DTYPE dhx_dz = DIFFY1(HX);
+            if (pml_x != 1) {
+              M_HZ_X(0, 0) = bx[x] * M_HZ_X(0, 0) + ax[x] * dhz_dx;
+              dhz_dx = dhz_dx / kx[x] + M_HZ_X(0, 0);
+            }
 
-        if (pml_x) {
-          M_HZ_X(0, 0) = bx[x] * M_HZ_X(0, 0) + ax[x] * dhz_dx;
-          dhz_dx = dhz_dx / kx[x] + M_HZ_X(0, 0);
+            if (pml_y != 1) {
+              M_HX_Z(0, 0) = by[y] * M_HX_Z(0, 0) + ay[y] * dhx_dz;
+              dhx_dz = dhx_dz / ky[y] + M_HX_Z(0, 0);
+            }
+
+            TIDE_DTYPE curl_h = dhz_dx - dhx_dz;
+            if (ca_requires_grad && ey_store != NULL) {
+              ey_store[store_idx] = tide_float_to_bf16((float)EY(0, 0));
+            }
+            if (cb_requires_grad && curl_h_store != NULL) {
+              curl_h_store[store_idx] = tide_float_to_bf16((float)curl_h);
+            }
+
+            EY(0, 0) = ca_val * EY(0, 0) + cb_val * curl_h;
+          }
         }
-
-        if (pml_y) {
-          M_HX_Z(0, 0) = by[y] * M_HX_Z(0, 0) + ay[y] * dhx_dz;
-          dhx_dz = dhx_dz / ky[y] + M_HX_Z(0, 0);
-        }
-
-        TIDE_DTYPE curl_h = dhz_dx - dhx_dz;
-        int64_t const store_idx = IDX_SHOT(shot_idx, y, x);
-
-        if (ca_requires_grad && ey_store != NULL) {
-          ey_store[store_idx] = tide_float_to_bf16((float)EY(0, 0));
-        }
-        if (cb_requires_grad && curl_h_store != NULL) {
-          curl_h_store[store_idx] = tide_float_to_bf16((float)curl_h);
-        }
-
-        EY(0, 0) = ca_val * EY(0, 0) + cb_val * curl_h;
       }
     }
   }
 }
 
 static void forward_kernel_e_with_storage_fp8(
-    TIDE_DTYPE const *const ca,
-    TIDE_DTYPE const *const cb,
-    TIDE_DTYPE const *const hx,
-    TIDE_DTYPE const *const hz,
-    TIDE_DTYPE *const ey,
-    TIDE_DTYPE *const m_hx_z,
-    TIDE_DTYPE *const m_hz_x,
-    TIDE_DTYPE const *const ay,
-    TIDE_DTYPE const *const ayh,
-    TIDE_DTYPE const *const ax,
-    TIDE_DTYPE const *const axh,
-    TIDE_DTYPE const *const by,
-    TIDE_DTYPE const *const byh,
-    TIDE_DTYPE const *const bx,
-    TIDE_DTYPE const *const bxh,
-    TIDE_DTYPE const *const ky,
-    TIDE_DTYPE const *const kyh,
-    TIDE_DTYPE const *const kx,
-    TIDE_DTYPE const *const kxh,
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const hx,
+    TIDE_DTYPE const *__restrict const hz,
+    TIDE_DTYPE *__restrict const ey,
+    TIDE_DTYPE *__restrict const m_hx_z,
+    TIDE_DTYPE *__restrict const m_hz_x,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh,
     TIDE_DTYPE const rdy,
     TIDE_DTYPE const rdx,
     int64_t const n_shots,
@@ -834,45 +856,54 @@ static void forward_kernel_e_with_storage_fp8(
     bool const cb_batched,
     bool const ca_requires_grad,
     bool const cb_requires_grad,
-    tide_fp8_e4m3 *const ey_store,
-    tide_fp8_e4m3 *const curl_h_store) {
+    tide_fp8_e4m3 *__restrict const ey_store,
+    tide_fp8_e4m3 *__restrict const curl_h_store) {
+
+  int64_t const pml_bounds_y[] = {FD_PAD, pml_y0, pml_y1, ny - FD_PAD + 1};
+  int64_t const pml_bounds_x[] = {FD_PAD, pml_x0, pml_x1, nx - FD_PAD + 1};
 
   TIDE_OMP_INDEX shot_idx;
 TIDE_OMP_PARALLEL_FOR
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    int64_t const shot_offset = shot_idx * shot_numel;
+    TIDE_DTYPE const *__restrict const ca_ptr =
+        ca_batched ? (ca + shot_offset) : ca;
+    TIDE_DTYPE const *__restrict const cb_ptr =
+        cb_batched ? (cb + shot_offset) : cb;
+    for (int pml_y = 0; pml_y < 3; ++pml_y) {
+      for (int pml_x = 0; pml_x < 3; ++pml_x) {
 TIDE_OMP_SIMD_COLLAPSE2
-    for (int64_t y = FD_PAD; y < ny - FD_PAD + 1; ++y) {
-      for (int64_t x = FD_PAD; x < nx - FD_PAD + 1; ++x) {
-        TIDE_DTYPE const ca_val = CA(0, 0);
-        TIDE_DTYPE const cb_val = CB(0, 0);
+        for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
+          for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
+            int64_t const idx = IDX(y, x);
+            int64_t const store_idx = shot_offset + idx;
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const cb_val = cb_ptr[idx];
 
-        bool pml_y = y < pml_y0 || y >= pml_y1;
-        bool pml_x = x < pml_x0 || x >= pml_x1;
+            TIDE_DTYPE dhz_dx = DIFFX1(HZ);
+            TIDE_DTYPE dhx_dz = DIFFY1(HX);
 
-        TIDE_DTYPE dhz_dx = DIFFX1(HZ);
-        TIDE_DTYPE dhx_dz = DIFFY1(HX);
+            if (pml_x != 1) {
+              M_HZ_X(0, 0) = bx[x] * M_HZ_X(0, 0) + ax[x] * dhz_dx;
+              dhz_dx = dhz_dx / kx[x] + M_HZ_X(0, 0);
+            }
 
-        if (pml_x) {
-          M_HZ_X(0, 0) = bx[x] * M_HZ_X(0, 0) + ax[x] * dhz_dx;
-          dhz_dx = dhz_dx / kx[x] + M_HZ_X(0, 0);
+            if (pml_y != 1) {
+              M_HX_Z(0, 0) = by[y] * M_HX_Z(0, 0) + ay[y] * dhx_dz;
+              dhx_dz = dhx_dz / ky[y] + M_HX_Z(0, 0);
+            }
+
+            TIDE_DTYPE curl_h = dhz_dx - dhx_dz;
+            if (ca_requires_grad && ey_store != NULL) {
+              ey_store[store_idx] = tide_float_to_fp8_e4m3((float)EY(0, 0));
+            }
+            if (cb_requires_grad && curl_h_store != NULL) {
+              curl_h_store[store_idx] = tide_float_to_fp8_e4m3((float)curl_h);
+            }
+
+            EY(0, 0) = ca_val * EY(0, 0) + cb_val * curl_h;
+          }
         }
-
-        if (pml_y) {
-          M_HX_Z(0, 0) = by[y] * M_HX_Z(0, 0) + ay[y] * dhx_dz;
-          dhx_dz = dhx_dz / ky[y] + M_HX_Z(0, 0);
-        }
-
-        TIDE_DTYPE curl_h = dhz_dx - dhx_dz;
-        int64_t const store_idx = IDX_SHOT(shot_idx, y, x);
-
-        if (ca_requires_grad && ey_store != NULL) {
-          ey_store[store_idx] = tide_float_to_fp8_e4m3((float)EY(0, 0));
-        }
-        if (cb_requires_grad && curl_h_store != NULL) {
-          curl_h_store[store_idx] = tide_float_to_fp8_e4m3((float)curl_h);
-        }
-
-        EY(0, 0) = ca_val * EY(0, 0) + cb_val * curl_h;
       }
     }
   }
@@ -930,11 +961,20 @@ void FUNC(forward)(
     int64_t const pml_x0,
     int64_t const pml_y1,
     int64_t const pml_x1,
+    int64_t const n_threads,
     int64_t const device /* unused for CPU */) {
   
   (void)device;
   (void)dt;
   (void)step_ratio;
+#ifdef _OPENMP
+  int const prev_threads = omp_get_max_threads();
+  if (n_threads > 0) {
+    omp_set_num_threads((int)n_threads);
+  }
+#else
+  (void)n_threads;
+#endif
   
   int64_t const shot_numel = ny * nx;
 
@@ -972,6 +1012,11 @@ void FUNC(forward)(
           n_shots, shot_numel, n_receivers_per_shot);
     }
   }
+#ifdef _OPENMP
+  if (n_threads > 0) {
+    omp_set_num_threads(prev_threads);
+  }
+#endif
 }
 
 
@@ -1042,10 +1087,19 @@ void FUNC(forward_with_storage)(
     int64_t const pml_x0,
     int64_t const pml_y1,
     int64_t const pml_x1,
+    int64_t const n_threads,
     int64_t const device /* unused for CPU */) {
   
   (void)device;
   (void)dt;
+#ifdef _OPENMP
+  int const prev_threads = omp_get_max_threads();
+  if (n_threads > 0) {
+    omp_set_num_threads((int)n_threads);
+  }
+#else
+  (void)n_threads;
+#endif
 
   int64_t const shot_numel = ny * nx;
   int64_t const store_size = n_shots * shot_numel;
@@ -1210,6 +1264,11 @@ void FUNC(forward_with_storage)(
     for (int64_t shot = 0; shot < n_shots; ++shot) fclose(fp_curl[shot]);
     free(fp_curl);
   }
+#ifdef _OPENMP
+  if (n_threads > 0) {
+    omp_set_num_threads(prev_threads);
+  }
+#endif
 }
 
 /*
@@ -1277,10 +1336,19 @@ void FUNC(forward_with_boundary_storage)(
     int64_t const pml_x0,
     int64_t const pml_y1,
     int64_t const pml_x1,
+    int64_t const n_threads,
     int64_t const device /* unused for CPU */) {
 
   (void)device;
   (void)dt;
+#ifdef _OPENMP
+  int const prev_threads = omp_get_max_threads();
+  if (n_threads > 0) {
+    omp_set_num_threads((int)n_threads);
+  }
+#else
+  (void)n_threads;
+#endif
 
   int64_t const shot_numel = ny * nx;
   int64_t const boundary_step_elems = boundary_numel * n_shots;
@@ -1305,6 +1373,11 @@ void FUNC(forward_with_boundary_storage)(
     if (fp_bey != NULL) fclose(fp_bey);
     if (fp_bhx != NULL) fclose(fp_bhx);
     if (fp_bhz != NULL) fclose(fp_bhz);
+#ifdef _OPENMP
+    if (n_threads > 0) {
+      omp_set_num_threads(prev_threads);
+    }
+#endif
     return;
   }
 
@@ -1446,6 +1519,11 @@ void FUNC(forward_with_boundary_storage)(
   if (fp_bey != NULL) fclose(fp_bey);
   if (fp_bhx != NULL) fclose(fp_bhx);
   if (fp_bhz != NULL) fclose(fp_bhz);
+#ifdef _OPENMP
+  if (n_threads > 0) {
+    omp_set_num_threads(prev_threads);
+  }
+#endif
 }
 
 
@@ -1457,24 +1535,24 @@ void FUNC(forward_with_boundary_storage)(
  *   λ_Hz^{n-1/2} = λ_Hz^{n+1/2} + C_b * ∂λ_Ey/∂x
  */
 static void backward_kernel_lambda_h(
-    TIDE_DTYPE const *const cb,
-    TIDE_DTYPE const *const lambda_ey,
-    TIDE_DTYPE *const lambda_hx,
-    TIDE_DTYPE *const lambda_hz,
-    TIDE_DTYPE *const m_lambda_ey_x,
-    TIDE_DTYPE *const m_lambda_ey_z,
-    TIDE_DTYPE const *const ay,
-    TIDE_DTYPE const *const ayh,
-    TIDE_DTYPE const *const ax,
-    TIDE_DTYPE const *const axh,
-    TIDE_DTYPE const *const by,
-    TIDE_DTYPE const *const byh,
-    TIDE_DTYPE const *const bx,
-    TIDE_DTYPE const *const bxh,
-    TIDE_DTYPE const *const ky,
-    TIDE_DTYPE const *const kyh,
-    TIDE_DTYPE const *const kx,
-    TIDE_DTYPE const *const kxh,
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const lambda_ey,
+    TIDE_DTYPE *__restrict const lambda_hx,
+    TIDE_DTYPE *__restrict const lambda_hz,
+    TIDE_DTYPE *__restrict const m_lambda_ey_x,
+    TIDE_DTYPE *__restrict const m_lambda_ey_z,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh,
     TIDE_DTYPE const rdy,
     TIDE_DTYPE const rdx,
     int64_t const n_shots,
@@ -1491,41 +1569,45 @@ static void backward_kernel_lambda_h(
   int64_t const pml_y1h = MAX(pml_y0, pml_y1 - 1);
   int64_t const pml_x0h = pml_x0;
   int64_t const pml_x1h = MAX(pml_x0, pml_x1 - 1);
+  int64_t const pml_bounds_yh[] = {FD_PAD, pml_y0h, pml_y1h, ny - FD_PAD + 1};
+  int64_t const pml_bounds_xh[] = {FD_PAD, pml_x0h, pml_x1h, nx - FD_PAD + 1};
 
   TIDE_OMP_INDEX shot_idx;
 TIDE_OMP_PARALLEL_FOR
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    int64_t const shot_offset = shot_idx * shot_numel;
+    TIDE_DTYPE const *__restrict const cb_ptr =
+        cb_batched ? (cb + shot_offset) : cb;
+    for (int pml_y = 0; pml_y < 3; ++pml_y) {
+      for (int pml_x = 0; pml_x < 3; ++pml_x) {
 TIDE_OMP_SIMD_COLLAPSE2
-    for (int64_t y = FD_PAD; y < ny - FD_PAD + 1; ++y) {
-      for (int64_t x = FD_PAD; x < nx - FD_PAD + 1; ++x) {
-        TIDE_DTYPE const cb_val = CB(0, 0);
+        for (int64_t y = pml_bounds_yh[pml_y]; y < pml_bounds_yh[pml_y + 1]; ++y) {
+          for (int64_t x = pml_bounds_xh[pml_x]; x < pml_bounds_xh[pml_x + 1]; ++x) {
+            int64_t const idx = IDX(y, x);
+            TIDE_DTYPE const cb_val = cb_ptr[idx];
 
-        // Update λ_Hx: λ_Hx = λ_Hx - cb * d(λ_Ey)/dz
-        if (y < ny - FD_PAD) {
-          bool pml_y = y < pml_y0h || y >= pml_y1h;
-          
-          TIDE_DTYPE d_lambda_ey_dz = DIFFYH1(LAMBDA_EY);
+            if (y < ny - FD_PAD) {
+              TIDE_DTYPE d_lambda_ey_dz = DIFFYH1(LAMBDA_EY);
 
-          if (pml_y) {
-            M_LAMBDA_EY_Z(0, 0) = byh[y] * M_LAMBDA_EY_Z(0, 0) + ayh[y] * d_lambda_ey_dz;
-            d_lambda_ey_dz = d_lambda_ey_dz / kyh[y] + M_LAMBDA_EY_Z(0, 0);
+              if (pml_y != 1) {
+                M_LAMBDA_EY_Z(0, 0) = byh[y] * M_LAMBDA_EY_Z(0, 0) + ayh[y] * d_lambda_ey_dz;
+                d_lambda_ey_dz = d_lambda_ey_dz / kyh[y] + M_LAMBDA_EY_Z(0, 0);
+              }
+
+              LAMBDA_HX(0, 0) -= cb_val * d_lambda_ey_dz;
+            }
+
+            if (x < nx - FD_PAD) {
+              TIDE_DTYPE d_lambda_ey_dx = DIFFXH1(LAMBDA_EY);
+
+              if (pml_x != 1) {
+                M_LAMBDA_EY_X(0, 0) = bxh[x] * M_LAMBDA_EY_X(0, 0) + axh[x] * d_lambda_ey_dx;
+                d_lambda_ey_dx = d_lambda_ey_dx / kxh[x] + M_LAMBDA_EY_X(0, 0);
+              }
+
+              LAMBDA_HZ(0, 0) += cb_val * d_lambda_ey_dx;
+            }
           }
-
-          LAMBDA_HX(0, 0) -= cb_val * d_lambda_ey_dz;
-        }
-
-        // Update λ_Hz: λ_Hz = λ_Hz + cb * d(λ_Ey)/dx
-        if (x < nx - FD_PAD) {
-          bool pml_x = x < pml_x0h || x >= pml_x1h;
-
-          TIDE_DTYPE d_lambda_ey_dx = DIFFXH1(LAMBDA_EY);
-
-          if (pml_x) {
-            M_LAMBDA_EY_X(0, 0) = bxh[x] * M_LAMBDA_EY_X(0, 0) + axh[x] * d_lambda_ey_dx;
-            d_lambda_ey_dx = d_lambda_ey_dx / kxh[x] + M_LAMBDA_EY_X(0, 0);
-          }
-
-          LAMBDA_HZ(0, 0) += cb_val * d_lambda_ey_dx;
         }
       }
     }
@@ -1549,29 +1631,29 @@ TIDE_OMP_SIMD_COLLAPSE2
  *   pml_y/pml_x == 2: Right/Bottom PML region
  */
 static void backward_kernel_lambda_e_with_grad(
-    TIDE_DTYPE const *const ca,
-    TIDE_DTYPE const *const cq,
-    TIDE_DTYPE const *const lambda_hx,
-    TIDE_DTYPE const *const lambda_hz,
-    TIDE_DTYPE *const lambda_ey,
-    TIDE_DTYPE *const m_lambda_hx_z,
-    TIDE_DTYPE *const m_lambda_hz_x,
-    TIDE_DTYPE const *const ey_store,
-    TIDE_DTYPE const *const curl_h_store,
-    TIDE_DTYPE *const grad_ca,
-    TIDE_DTYPE *const grad_cb,
-    TIDE_DTYPE const *const ay,
-    TIDE_DTYPE const *const ayh,
-    TIDE_DTYPE const *const ax,
-    TIDE_DTYPE const *const axh,
-    TIDE_DTYPE const *const by,
-    TIDE_DTYPE const *const byh,
-    TIDE_DTYPE const *const bx,
-    TIDE_DTYPE const *const bxh,
-    TIDE_DTYPE const *const ky,
-    TIDE_DTYPE const *const kyh,
-    TIDE_DTYPE const *const kx,
-    TIDE_DTYPE const *const kxh,
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cq,
+    TIDE_DTYPE const *__restrict const lambda_hx,
+    TIDE_DTYPE const *__restrict const lambda_hz,
+    TIDE_DTYPE *__restrict const lambda_ey,
+    TIDE_DTYPE *__restrict const m_lambda_hx_z,
+    TIDE_DTYPE *__restrict const m_lambda_hz_x,
+    TIDE_DTYPE const *__restrict const ey_store,
+    TIDE_DTYPE const *__restrict const curl_h_store,
+    TIDE_DTYPE *__restrict const grad_ca,
+    TIDE_DTYPE *__restrict const grad_cb,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh,
     TIDE_DTYPE const rdy,
     TIDE_DTYPE const rdx,
     int64_t const n_shots,
@@ -1599,14 +1681,21 @@ static void backward_kernel_lambda_e_with_grad(
   TIDE_OMP_INDEX shot_idx;
 TIDE_OMP_PARALLEL_FOR
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    int64_t const shot_offset = shot_idx * shot_numel;
+    TIDE_DTYPE const *__restrict const ca_ptr =
+        ca_batched ? (ca + shot_offset) : ca;
+    TIDE_DTYPE const *__restrict const cq_ptr =
+        cq_batched ? (cq + shot_offset) : cq;
     // Loop over 3x3 grid of regions
     for (int pml_y = 0; pml_y < 3; ++pml_y) {
       for (int pml_x = 0; pml_x < 3; ++pml_x) {
 TIDE_OMP_SIMD_COLLAPSE2
         for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
           for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
-            TIDE_DTYPE const ca_val = CA(0, 0);
-            TIDE_DTYPE const cq_val = CQ(0, 0);
+            int64_t const idx = IDX(y, x);
+            int64_t const store_idx = shot_offset + idx;
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const cq_val = cq_ptr[idx];
 
             // Compute d(λ_Hz)/dx at integer grid points
             TIDE_DTYPE d_lambda_hz_dx = DIFFX1(LAMBDA_HZ);
@@ -1638,27 +1727,27 @@ TIDE_OMP_SIMD_COLLAPSE2
             if (pml_y == 1 && pml_x == 1) {
               // grad_ca += λ_Ey^{n+1} * E_y^n
               if (ca_requires_grad && ey_store != NULL) {
-                TIDE_DTYPE ey_n = ey_store[IDX_SHOT(shot_idx, y, x)];
+                TIDE_DTYPE ey_n = ey_store[store_idx];
                 if (ca_batched) {
-                  grad_ca[IDX_SHOT(shot_idx, y, x)] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
+                  grad_ca[store_idx] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
                 } else {
 #ifdef _OPENMP
 #pragma omp atomic
 #endif
-                  grad_ca[IDX(y, x)] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
+                  grad_ca[idx] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
                 }
               }
 
               // grad_cb += λ_Ey^{n+1} * curl_H^n
               if (cb_requires_grad && curl_h_store != NULL) {
-                TIDE_DTYPE curl_h_n = curl_h_store[IDX_SHOT(shot_idx, y, x)];
+                TIDE_DTYPE curl_h_n = curl_h_store[store_idx];
                 if (ca_batched) {
-                  grad_cb[IDX_SHOT(shot_idx, y, x)] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
+                  grad_cb[store_idx] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
                 } else {
 #ifdef _OPENMP
 #pragma omp atomic
 #endif
-                  grad_cb[IDX(y, x)] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
+                  grad_cb[idx] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
                 }
               }
             }
@@ -1670,29 +1759,29 @@ TIDE_OMP_SIMD_COLLAPSE2
 }
 
 static void backward_kernel_lambda_e_with_grad_bf16(
-    TIDE_DTYPE const *const ca,
-    TIDE_DTYPE const *const cq,
-    TIDE_DTYPE const *const lambda_hx,
-    TIDE_DTYPE const *const lambda_hz,
-    TIDE_DTYPE *const lambda_ey,
-    TIDE_DTYPE *const m_lambda_hx_z,
-    TIDE_DTYPE *const m_lambda_hz_x,
-    tide_bfloat16 const *const ey_store,
-    tide_bfloat16 const *const curl_h_store,
-    TIDE_DTYPE *const grad_ca,
-    TIDE_DTYPE *const grad_cb,
-    TIDE_DTYPE const *const ay,
-    TIDE_DTYPE const *const ayh,
-    TIDE_DTYPE const *const ax,
-    TIDE_DTYPE const *const axh,
-    TIDE_DTYPE const *const by,
-    TIDE_DTYPE const *const byh,
-    TIDE_DTYPE const *const bx,
-    TIDE_DTYPE const *const bxh,
-    TIDE_DTYPE const *const ky,
-    TIDE_DTYPE const *const kyh,
-    TIDE_DTYPE const *const kx,
-    TIDE_DTYPE const *const kxh,
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cq,
+    TIDE_DTYPE const *__restrict const lambda_hx,
+    TIDE_DTYPE const *__restrict const lambda_hz,
+    TIDE_DTYPE *__restrict const lambda_ey,
+    TIDE_DTYPE *__restrict const m_lambda_hx_z,
+    TIDE_DTYPE *__restrict const m_lambda_hz_x,
+    tide_bfloat16 const *__restrict const ey_store,
+    tide_bfloat16 const *__restrict const curl_h_store,
+    TIDE_DTYPE *__restrict const grad_ca,
+    TIDE_DTYPE *__restrict const grad_cb,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh,
     TIDE_DTYPE const rdy,
     TIDE_DTYPE const rdx,
     int64_t const n_shots,
@@ -1715,13 +1804,20 @@ static void backward_kernel_lambda_e_with_grad_bf16(
   TIDE_OMP_INDEX shot_idx;
 TIDE_OMP_PARALLEL_FOR
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    int64_t const shot_offset = shot_idx * shot_numel;
+    TIDE_DTYPE const *__restrict const ca_ptr =
+        ca_batched ? (ca + shot_offset) : ca;
+    TIDE_DTYPE const *__restrict const cq_ptr =
+        cq_batched ? (cq + shot_offset) : cq;
     for (int pml_y = 0; pml_y < 3; ++pml_y) {
       for (int pml_x = 0; pml_x < 3; ++pml_x) {
 TIDE_OMP_SIMD_COLLAPSE2
         for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
           for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
-            TIDE_DTYPE const ca_val = CA(0, 0);
-            TIDE_DTYPE const cq_val = CQ(0, 0);
+            int64_t const idx = IDX(y, x);
+            int64_t const store_idx = shot_offset + idx;
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const cq_val = cq_ptr[idx];
 
             TIDE_DTYPE d_lambda_hz_dx = DIFFX1(LAMBDA_HZ);
             TIDE_DTYPE d_lambda_hx_dz = DIFFY1(LAMBDA_HX);
@@ -1740,7 +1836,6 @@ TIDE_OMP_SIMD_COLLAPSE2
             LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + cq_val * curl_lambda_h;
 
             if (pml_y == 1 && pml_x == 1) {
-              int64_t const store_idx = IDX_SHOT(shot_idx, y, x);
               if (ca_requires_grad && ey_store != NULL) {
                 TIDE_DTYPE ey_n =
                     (TIDE_DTYPE)tide_bf16_to_float(ey_store[store_idx]);
@@ -1750,7 +1845,7 @@ TIDE_OMP_SIMD_COLLAPSE2
 #ifdef _OPENMP
 #pragma omp atomic
 #endif
-                  grad_ca[IDX(y, x)] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
+                  grad_ca[idx] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
                 }
               }
 
@@ -1763,7 +1858,7 @@ TIDE_OMP_SIMD_COLLAPSE2
 #ifdef _OPENMP
 #pragma omp atomic
 #endif
-                  grad_cb[IDX(y, x)] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
+                  grad_cb[idx] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
                 }
               }
             }
@@ -1775,29 +1870,29 @@ TIDE_OMP_SIMD_COLLAPSE2
 }
 
 static void backward_kernel_lambda_e_with_grad_fp8(
-    TIDE_DTYPE const *const ca,
-    TIDE_DTYPE const *const cq,
-    TIDE_DTYPE const *const lambda_hx,
-    TIDE_DTYPE const *const lambda_hz,
-    TIDE_DTYPE *const lambda_ey,
-    TIDE_DTYPE *const m_lambda_hx_z,
-    TIDE_DTYPE *const m_lambda_hz_x,
-    tide_fp8_e4m3 const *const ey_store,
-    tide_fp8_e4m3 const *const curl_h_store,
-    TIDE_DTYPE *const grad_ca,
-    TIDE_DTYPE *const grad_cb,
-    TIDE_DTYPE const *const ay,
-    TIDE_DTYPE const *const ayh,
-    TIDE_DTYPE const *const ax,
-    TIDE_DTYPE const *const axh,
-    TIDE_DTYPE const *const by,
-    TIDE_DTYPE const *const byh,
-    TIDE_DTYPE const *const bx,
-    TIDE_DTYPE const *const bxh,
-    TIDE_DTYPE const *const ky,
-    TIDE_DTYPE const *const kyh,
-    TIDE_DTYPE const *const kx,
-    TIDE_DTYPE const *const kxh,
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cq,
+    TIDE_DTYPE const *__restrict const lambda_hx,
+    TIDE_DTYPE const *__restrict const lambda_hz,
+    TIDE_DTYPE *__restrict const lambda_ey,
+    TIDE_DTYPE *__restrict const m_lambda_hx_z,
+    TIDE_DTYPE *__restrict const m_lambda_hz_x,
+    tide_fp8_e4m3 const *__restrict const ey_store,
+    tide_fp8_e4m3 const *__restrict const curl_h_store,
+    TIDE_DTYPE *__restrict const grad_ca,
+    TIDE_DTYPE *__restrict const grad_cb,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh,
     TIDE_DTYPE const rdy,
     TIDE_DTYPE const rdx,
     int64_t const n_shots,
@@ -1820,13 +1915,20 @@ static void backward_kernel_lambda_e_with_grad_fp8(
   TIDE_OMP_INDEX shot_idx;
 TIDE_OMP_PARALLEL_FOR
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    int64_t const shot_offset = shot_idx * shot_numel;
+    TIDE_DTYPE const *__restrict const ca_ptr =
+        ca_batched ? (ca + shot_offset) : ca;
+    TIDE_DTYPE const *__restrict const cq_ptr =
+        cq_batched ? (cq + shot_offset) : cq;
     for (int pml_y = 0; pml_y < 3; ++pml_y) {
       for (int pml_x = 0; pml_x < 3; ++pml_x) {
 TIDE_OMP_SIMD_COLLAPSE2
         for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
           for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
-            TIDE_DTYPE const ca_val = CA(0, 0);
-            TIDE_DTYPE const cq_val = CQ(0, 0);
+            int64_t const idx = IDX(y, x);
+            int64_t const store_idx = shot_offset + idx;
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const cq_val = cq_ptr[idx];
 
             TIDE_DTYPE d_lambda_hz_dx = DIFFX1(LAMBDA_HZ);
             TIDE_DTYPE d_lambda_hx_dz = DIFFY1(LAMBDA_HX);
@@ -1845,7 +1947,6 @@ TIDE_OMP_SIMD_COLLAPSE2
             LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + cq_val * curl_lambda_h;
 
             if (pml_y == 1 && pml_x == 1) {
-              int64_t const store_idx = IDX_SHOT(shot_idx, y, x);
               if (ca_requires_grad && ey_store != NULL) {
                 TIDE_DTYPE ey_n =
                     (TIDE_DTYPE)tide_fp8_e4m3_to_float(ey_store[store_idx]);
@@ -1855,7 +1956,7 @@ TIDE_OMP_SIMD_COLLAPSE2
 #ifdef _OPENMP
 #pragma omp atomic
 #endif
-                  grad_ca[IDX(y, x)] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
+                  grad_ca[idx] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
                 }
               }
 
@@ -1868,7 +1969,7 @@ TIDE_OMP_SIMD_COLLAPSE2
 #ifdef _OPENMP
 #pragma omp atomic
 #endif
-                  grad_cb[IDX(y, x)] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
+                  grad_cb[idx] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
                 }
               }
             }
@@ -1880,12 +1981,12 @@ TIDE_OMP_SIMD_COLLAPSE2
 }
 
 static void inverse_kernel_e_and_curl(
-    TIDE_DTYPE const *const ca,
-    TIDE_DTYPE const *const cb,
-    TIDE_DTYPE const *const hx,
-    TIDE_DTYPE const *const hz,
-    TIDE_DTYPE *const ey,
-    TIDE_DTYPE *const curl_h_out,
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const hx,
+    TIDE_DTYPE const *__restrict const hz,
+    TIDE_DTYPE *__restrict const ey,
+    TIDE_DTYPE *__restrict const curl_h_out,
     TIDE_DTYPE const rdy,
     TIDE_DTYPE const rdx,
     int64_t const n_shots,
@@ -1899,38 +2000,43 @@ static void inverse_kernel_e_and_curl(
     bool const ca_batched,
     bool const cb_batched) {
 
+  int64_t const y0 = MAX(FD_PAD, pml_y0);
+  int64_t const y1 = MIN(ny - FD_PAD + 1, pml_y1);
+  int64_t const x0 = MAX(FD_PAD, pml_x0);
+  int64_t const x1 = MIN(nx - FD_PAD + 1, pml_x1);
+
   TIDE_OMP_INDEX shot_idx;
 TIDE_OMP_PARALLEL_FOR
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    int64_t const shot_offset = shot_idx * shot_numel;
+    TIDE_DTYPE const *__restrict const ca_ptr =
+        ca_batched ? (ca + shot_offset) : ca;
+    TIDE_DTYPE const *__restrict const cb_ptr =
+        cb_batched ? (cb + shot_offset) : cb;
 TIDE_OMP_SIMD_COLLAPSE2
-    for (int64_t y = FD_PAD; y < ny - FD_PAD + 1; ++y) {
-      for (int64_t x = FD_PAD; x < nx - FD_PAD + 1; ++x) {
-        bool pml_y = y < pml_y0 || y >= pml_y1;
-        bool pml_x = x < pml_x0 || x >= pml_x1;
-        if (pml_y || pml_x) {
-          continue;
-        }
-
-        TIDE_DTYPE const ca_val = CA(0, 0);
-        TIDE_DTYPE const cb_val = CB(0, 0);
+    for (int64_t y = y0; y < y1; ++y) {
+      for (int64_t x = x0; x < x1; ++x) {
+        int64_t const idx = IDX(y, x);
+        int64_t const store_idx = shot_offset + idx;
+        TIDE_DTYPE const ca_val = ca_ptr[idx];
+        TIDE_DTYPE const cb_val = cb_ptr[idx];
 
         TIDE_DTYPE const dhz_dx = DIFFX1(HZ);
         TIDE_DTYPE const dhx_dz = DIFFY1(HX);
         TIDE_DTYPE const curl_h = dhz_dx - dhx_dz;
 
-        int64_t const idx = IDX_SHOT(shot_idx, y, x);
-        curl_h_out[idx] = curl_h;
-        ey[idx] = (ey[idx] - cb_val * curl_h) / ca_val;
+        curl_h_out[store_idx] = curl_h;
+        ey[store_idx] = (ey[store_idx] - cb_val * curl_h) / ca_val;
       }
     }
   }
 }
 
 static void inverse_kernel_h(
-    TIDE_DTYPE const *const cq,
-    TIDE_DTYPE const *const ey,
-    TIDE_DTYPE *const hx,
-    TIDE_DTYPE *const hz,
+    TIDE_DTYPE const *__restrict const cq,
+    TIDE_DTYPE const *__restrict const ey,
+    TIDE_DTYPE *__restrict const hx,
+    TIDE_DTYPE *__restrict const hz,
     TIDE_DTYPE const rdy,
     TIDE_DTYPE const rdx,
     int64_t const n_shots,
@@ -1943,19 +2049,22 @@ static void inverse_kernel_h(
     int64_t const pml_x1,
     bool const cq_batched) {
 
+  int64_t const y0 = MAX(FD_PAD, pml_y0);
+  int64_t const y1 = MIN(ny - FD_PAD + 1, pml_y1);
+  int64_t const x0 = MAX(FD_PAD, pml_x0);
+  int64_t const x1 = MIN(nx - FD_PAD + 1, pml_x1);
+
   TIDE_OMP_INDEX shot_idx;
 TIDE_OMP_PARALLEL_FOR
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    int64_t const shot_offset = shot_idx * shot_numel;
+    TIDE_DTYPE const *__restrict const cq_ptr =
+        cq_batched ? (cq + shot_offset) : cq;
 TIDE_OMP_SIMD_COLLAPSE2
-    for (int64_t y = FD_PAD; y < ny - FD_PAD + 1; ++y) {
-      for (int64_t x = FD_PAD; x < nx - FD_PAD + 1; ++x) {
-        bool pml_y = y < pml_y0 || y >= pml_y1;
-        bool pml_x = x < pml_x0 || x >= pml_x1;
-        if (pml_y || pml_x) {
-          continue;
-        }
-
-        TIDE_DTYPE const cq_val = CQ(0, 0);
+    for (int64_t y = y0; y < y1; ++y) {
+      for (int64_t x = x0; x < x1; ++x) {
+        int64_t const idx = IDX(y, x);
+        TIDE_DTYPE const cq_val = cq_ptr[idx];
 
         if (y < ny - FD_PAD) {
           TIDE_DTYPE const dey_dz = DIFFYH1(EY);
@@ -2048,12 +2157,21 @@ void FUNC(backward_with_boundary)(
     int64_t const pml_x0,
     int64_t const pml_y1,
     int64_t const pml_x1,
+    int64_t const n_threads,
     int64_t const device /* unused for CPU */) {
 
   (void)device;
   (void)dt;
   (void)grad_ca_shot;
   (void)grad_cb_shot;
+#ifdef _OPENMP
+  int const prev_threads = omp_get_max_threads();
+  if (n_threads > 0) {
+    omp_set_num_threads((int)n_threads);
+  }
+#else
+  (void)n_threads;
+#endif
 
   int64_t const shot_numel = ny * nx;
   int64_t const boundary_step_elems = boundary_numel * n_shots;
@@ -2076,6 +2194,11 @@ void FUNC(backward_with_boundary)(
     if (fp_bey != NULL) fclose(fp_bey);
     if (fp_bhx != NULL) fclose(fp_bhx);
     if (fp_bhz != NULL) fclose(fp_bhz);
+#ifdef _OPENMP
+    if (n_threads > 0) {
+      omp_set_num_threads(prev_threads);
+    }
+#endif
     return;
   }
 
@@ -2197,6 +2320,11 @@ void FUNC(backward_with_boundary)(
       ca, cb, grad_ca, grad_cb, grad_eps, grad_sigma,
       dt, n_shots, ny, nx, ca_batched, cb_batched,
       ca_requires_grad, cb_requires_grad);
+#ifdef _OPENMP
+  if (n_threads > 0) {
+    omp_set_num_threads(prev_threads);
+  }
+#endif
 }
 
 
@@ -2277,6 +2405,7 @@ void FUNC(backward)(
     int64_t const pml_x0,
     int64_t const pml_y1,
     int64_t const pml_x1,
+    int64_t const n_threads,
     int64_t const device /* unused for CPU */) {
   
   (void)device;
@@ -2284,6 +2413,14 @@ void FUNC(backward)(
   (void)grad_cb_shot;  // Not needed in CPU version
   (void)ey_store_3;
   (void)curl_store_3;
+#ifdef _OPENMP
+  int const prev_threads = omp_get_max_threads();
+  if (n_threads > 0) {
+    omp_set_num_threads((int)n_threads);
+  }
+#else
+  (void)n_threads;
+#endif
 
   int64_t const shot_numel = ny * nx;
   int64_t const store_size = n_shots * shot_numel;
@@ -2493,4 +2630,9 @@ void FUNC(backward)(
       ca, cb, grad_ca, grad_cb, grad_eps, grad_sigma,
       dt, n_shots, ny, nx, ca_batched, cb_batched,
       ca_requires_grad, cb_requires_grad);
+#ifdef _OPENMP
+  if (n_threads > 0) {
+    omp_set_num_threads(prev_threads);
+  }
+#endif
 }

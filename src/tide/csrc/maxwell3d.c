@@ -394,10 +394,19 @@ void FUNC(forward)(
     int64_t const pml_x1,
     int64_t const source_component,
     int64_t const receiver_component,
+    int64_t const n_threads,
     int64_t const device) {
   (void)dt;
   (void)step_ratio;
   (void)device;
+#ifdef _OPENMP
+  int const prev_threads = omp_get_max_threads();
+  if (n_threads > 0) {
+    omp_set_num_threads((int)n_threads);
+  }
+#else
+  (void)n_threads;
+#endif
 
   int64_t const shot_numel = nz * ny * nx;
 
@@ -460,4 +469,9 @@ void FUNC(forward)(
           n_receivers_per_shot);
     }
   }
+#ifdef _OPENMP
+  if (n_threads > 0) {
+    omp_set_num_threads(prev_threads);
+  }
+#endif
 }

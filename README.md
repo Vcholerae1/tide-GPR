@@ -86,10 +86,14 @@ print(f"Recorded data shape: {receiver_data.shape}")
 
 ## Core Modules
 
-- **`tide.maxwell`**: 2D TM mode Maxwell solver
+- **`tide.maxwelltm`**: 2D TM mode Maxwell solver
 - **`tide.wavelets`**: Source wavelet generation (Ricker, etc.)
 - **`tide.staggered`**: Staggered grid finite difference operators
-- **`tide.common`**: Utilities for padding, upsampling, CFL conditions
+- **`tide.callbacks`**: Callback state and factories
+- **`tide.resampling`**: Upsampling/downsampling utilities
+- **`tide.cfl`**: CFL condition helpers
+- **`tide.padding`**: Padding and interior masking helpers
+- **`tide.validation`**: Input validation helpers
 - **`tide.storage`**: Gradient checkpointing and storage management
 
 ## Examples
@@ -102,7 +106,7 @@ See the [`examples/`](examples/) directory for complete workflows:
 
 ## Documentation
 
-For detailed API documentation and tutorials, visit: [Documentation](https://yourdocs.url) *(coming soon)*
+For detailed API documentation and tutorials, visit: [Documentation]() *(coming soon)*
 
 ## Testing
 
@@ -136,7 +140,6 @@ If you use TIDE in your research, please cite:
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
 
 
 

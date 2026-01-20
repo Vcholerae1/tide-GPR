@@ -1,4 +1,4 @@
-# TIDE Backend CMakeLists.txt
+# TIDE Backend CMakelists.txt
 
 cmake_minimum_required(VERSION 3.18)
 project(tide_backend LANGUAGES C CXX)

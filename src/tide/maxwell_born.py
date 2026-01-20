@@ -39,8 +39,8 @@ from typing import Optional, Sequence, Tuple, Union
 import torch
 
 from . import staggered
-from .common import cfl_condition
-from .maxwell import EP0, MU0, prepare_parameters
+from .cfl import cfl_condition
+from .utils import EP0, MU0, prepare_parameters
 
 
 def prepare_born_parameters(

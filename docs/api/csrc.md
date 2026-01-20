@@ -4,7 +4,7 @@ This section describes the native kernels and build configuration in `src/tide/c
 TODO: Add build notes and call signatures for exported kernels.
 
 ## Key Files
-- CMakeLists.txt
+- CMakelists.txt
 - maxwell.c
 - maxwell.cu
 - storage_utils.c

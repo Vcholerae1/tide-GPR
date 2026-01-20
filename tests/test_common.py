@@ -3,19 +3,14 @@ import math
 import pytest
 import torch
 
-from tide.common import (
-    CallbackState,
-    create_callback_state,
-    cfl_condition,
-    create_or_pad,
-    downsample,
-    downsample_and_movedim,
-    reverse_pad,
-    upsample,
+from tide.callbacks import CallbackState, create_callback_state
+from tide.cfl import cfl_condition
+from tide.padding import create_or_pad, reverse_pad, zero_interior
+from tide.resampling import downsample, downsample_and_movedim, upsample
+from tide.validation import (
     validate_freq_taper_frac,
     validate_model_gradient_sampling_interval,
     validate_time_pad_frac,
-    zero_interior,
 )
 from tide.wavelets import ricker
 
@@ -60,8 +55,6 @@ def test_validate_time_pad_frac_bounds():
     assert validate_time_pad_frac(0.5) == pytest.approx(0.5)
     with pytest.raises(ValueError):
         validate_time_pad_frac(-0.1)
-
-
 
 
 def test_validate_model_gradient_sampling_interval():

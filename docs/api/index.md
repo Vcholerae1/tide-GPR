@@ -5,7 +5,11 @@ TODO: Replace placeholders with detailed signatures and behavior.
 
 ## Public Modules
 - tide (top-level)
-- tide.common
+- tide.callbacks
+- tide.resampling
+- tide.cfl
+- tide.padding
+- tide.validation
 - tide.maxwell
 - tide.wavelets
 - tide.staggered

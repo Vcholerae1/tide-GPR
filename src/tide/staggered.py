@@ -1,21 +1,23 @@
-from typing import List, Tuple
+from typing import list
 
 import torch
+
 from . import utils
 
+
 def set_pml_profiles(
-    pml_width: List[int],
+    pml_width: list[int],
     accuracy: int,
-    fd_pad: List[int],
+    fd_pad: list[int],
     dt: float,
-    grid_spacing: List[float],
+    grid_spacing: list[float],
     max_vel: float,
     dtype: torch.dtype,
     device: torch.device,
     pml_freq: float,
     ny: int,
     nx: int,
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Sets up PML profiles for a staggered grid.
 
     Args:
@@ -35,11 +37,11 @@ def set_pml_profiles(
 
     Returns:
         A tuple containing:
-        - List of torch.Tensors for a, b profiles: [ay, ayh, ax, axh, by, byh, bx, bxh]
-        - List of torch.Tensors for k profiles: [ky, kyh, kx, kxh]
+        - list of torch.Tensors for a, b profiles: [ay, ayh, ax, axh, by, byh, bx, bxh]
+        - list of torch.Tensors for k profiles: [ky, kyh, kx, kxh]
 
     """
-    pml_start: List[float] = [
+    pml_start: list[float] = [
         fd_pad[0] + pml_width[0],
         ny - 1 - fd_pad[1] - pml_width[1],
         fd_pad[2] + pml_width[2],
@@ -60,7 +62,7 @@ def set_pml_profiles(
         pml_start[:2],
         max_pml,
         dt,
-        ny, 
+        ny,
         max_vel,
         dtype,
         device,
@@ -109,7 +111,7 @@ def set_pml_profiles(
         start=0.0,
         grid_spacing=grid_spacing[1],
     )
-    
+
     # Reshape for broadcasting: [batch, ny, nx]
     ay = ay[None, :, None]
     ayh = ayh[None, :, None]
@@ -119,7 +121,7 @@ def set_pml_profiles(
     byh = byh[None, :, None]
     bx = bx[None, None, :]
     bxh = bxh[None, None, :]
-    
+
     ky = ky[None, :, None]
     kyh = kyh[None, :, None]
     kx = kx[None, None, :]
@@ -136,7 +138,9 @@ def setup_pml_profiles_1d(
     dt: float,
     device: torch.device,
     dtype: torch.dtype,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
     """Create 1D CPML profiles (a, b, k) for integer and half-grid points."""
     eps = 1e-9
     n_power = 2
@@ -167,7 +171,9 @@ def setup_pml_profiles_1d(
         sigma_alpha = sigma
         b = torch.exp(-sigma_alpha * abs(dt))
         denom = sigma_alpha + eps
-        a = torch.where(sigma_alpha > 0.0, sigma * (b - 1.0) / denom, torch.zeros_like(b))
+        a = torch.where(
+            sigma_alpha > 0.0, sigma * (b - 1.0) / denom, torch.zeros_like(b)
+        )
         return a, b, kappa
 
     ay, by, ky = _profiles(0.0)
@@ -176,11 +182,11 @@ def setup_pml_profiles_1d(
 
 
 def set_pml_profiles_3d(
-    pml_width: List[int],
+    pml_width: list[int],
     accuracy: int,
-    fd_pad: List[int],
+    fd_pad: list[int],
     dt: float,
-    grid_spacing: List[float],
+    grid_spacing: list[float],
     max_vel: float,
     dtype: torch.dtype,
     device: torch.device,
@@ -188,7 +194,7 @@ def set_pml_profiles_3d(
     nz: int,
     ny: int,
     nx: int,
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Sets up 3D PML profiles for a staggered grid.
 
     Args:
@@ -210,7 +216,7 @@ def set_pml_profiles_3d(
     _ = accuracy
     dz, dy, dx = grid_spacing
 
-    pml_start: List[float] = [
+    pml_start: list[float] = [
         fd_pad[0] + pml_width[0],
         nz - 1 - fd_pad[1] - pml_width[1],
         fd_pad[2] + pml_width[2],
@@ -337,12 +343,9 @@ def set_pml_profiles_3d(
     )
 
 
-
-
-
 def diffy1(a: torch.Tensor, stencil: int, rdy: torch.Tensor) -> torch.Tensor:
     """Calculates the first y derivative at integer grid points."""
-    if stencil   == 2:
+    if stencil == 2:
         return torch.nn.functional.pad(
             (a[..., 1:, :] - a[..., :-1, :]) * rdy, (0, 0, 1, 0)
         )

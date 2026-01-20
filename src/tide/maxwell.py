@@ -1,15 +1,21 @@
-import itertools
-import math
-from typing import Any, Callable, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Optional, Sequence, Union
 
 import torch
 
-from .common import (
-    CallbackState,
-    Callback,
-    cfl_condition,
-    upsample,
-    downsample_and_movedim,
+from .autograd_utils import (
+    _get_ctx_handle,
+    _register_ctx_handle,
+    _release_ctx_handle,
+)
+from .callbacks import CallbackState, Callback
+from .cfl import cfl_condition
+from .grid_utils import (
+    _compute_boundary_indices_flat,
+    _normalize_grid_spacing_2d,
+    _normalize_pml_width_2d,
+)
+from .resampling import upsample, downsample_and_movedim
+from .validation import (
     validate_model_gradient_sampling_interval,
     validate_freq_taper_frac,
     validate_time_pad_frac,
@@ -21,180 +27,23 @@ from .storage import (
     STORAGE_CPU,
     STORAGE_DISK,
     STORAGE_NONE,
+    _CPU_STORAGE_BUFFERS,
+    _normalize_storage_compression,
+    _resolve_storage_compression,
 )
+from .utils import C0, prepare_parameters
 from . import staggered
-
-# Physical constants
-EP0 = 8.8541878128e-12   # vacuum permittivity (F/m)
-MU0 = 1.2566370614359173e-06  # vacuum permeability (H/m)
-C0 = 1.0 / math.sqrt(EP0 * MU0)  # speed of light in vacuum (m/s)
-
-_CTX_HANDLE_COUNTER = itertools.count()
-_CTX_HANDLE_REGISTRY: dict[int, dict[str, Any]] = {}
-_CPU_STORAGE_BUFFERS = 3  # Keep in sync with csrc NUM_BUFFERS for CPU staging.
-
-
-def _register_ctx_handle(ctx_data: dict[str, Any]) -> torch.Tensor:
-    handle = next(_CTX_HANDLE_COUNTER)
-    _CTX_HANDLE_REGISTRY[handle] = ctx_data
-    return torch.tensor(handle, dtype=torch.int64)
-
-
-def _get_ctx_handle(handle: int) -> dict[str, Any]:
-    try:
-        return _CTX_HANDLE_REGISTRY[handle]
-    except KeyError as exc:
-        raise RuntimeError(f"Unknown context handle: {handle}") from exc
-
-
-def _release_ctx_handle(handle: Optional[int]) -> None:
-    if handle is None:
-        return
-    _CTX_HANDLE_REGISTRY.pop(handle, None)
-
-
-def _normalize_storage_compression(storage_compression: Union[bool, str, None]) -> str:
-    if storage_compression is True:
-        return "bf16"
-    if storage_compression is False or storage_compression is None:
-        return "none"
-    if isinstance(storage_compression, str):
-        value = storage_compression.strip().lower()
-        if value in {"none", "false", "off", "0"}:
-            return "none"
-        if value in {"bf16", "bfloat16"}:
-            return "bf16"
-        if value in {"fp8", "float8", "e4m3", "e4m3fn", "fp8_e4m3"}:
-            return "fp8"
-    raise ValueError(
-        "storage_compression must be False/True or one of "
-        "'none', 'bf16', or 'fp8'."
-    )
-
-
-def _resolve_storage_compression(
-    storage_compression: Union[bool, str, None],
-    dtype: torch.dtype,
-    device: torch.device,
-    *,
-    context: str,
-    allow_fp8: bool = True,
-) -> tuple[str, torch.dtype, int]:
-    storage_kind = _normalize_storage_compression(storage_compression)
-    if storage_kind == "none":
-        return storage_kind, dtype, dtype.itemsize
-    if storage_kind == "bf16":
-        if dtype != torch.float32:
-            raise NotImplementedError(
-                f"{context} (BF16 storage) is only supported for float32."
-            )
-        return storage_kind, torch.bfloat16, 2
-    if storage_kind == "fp8":
-        if not allow_fp8:
-            raise NotImplementedError(
-                f"{context} (FP8 storage) is not supported in this path."
-            )
-        # FP8 now supported on both CUDA and CPU
-        if dtype != torch.float32:
-            raise NotImplementedError(
-                f"{context} (FP8 storage) is only supported for float32."
-            )
-        return storage_kind, torch.uint8, 1
-    raise RuntimeError(f"Unsupported storage compression mode: {storage_kind}")
-
-
-def _compute_boundary_indices_flat(
-    ny: int,
-    nx: int,
-    pml_y0: int,
-    pml_x0: int,
-    pml_y1: int,
-    pml_x1: int,
-    boundary_width: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """Return flattened indices (y * nx + x) for a PML-side boundary ring.
-
-    The ring is a union of strips adjacent to the physical domain inside the
-    PML region. It is intended for boundary saving/injection and should have
-    width >= FD_PAD (stencil/2).
-    """
-    if boundary_width <= 0:
-        raise ValueError("boundary_width must be positive.")
-
-    max_width = min(pml_y0, ny - pml_y1, pml_x0, nx - pml_x1)
-    if boundary_width > max_width:
-        raise ValueError(
-            "boundary_width must fit within the padded grid; "
-            f"got boundary_width={boundary_width}, max_width={max_width}."
-        )
-
-    # Construct indices in a cache-friendly order:
-    # - top strip rows (contiguous in memory per row)
-    # - bottom strip rows
-    # - middle rows: left strip then right strip per row
-    # This ordering avoids the mask+nonzero pattern which produces a more
-    # irregular access pattern on GPU gather/scatter.
-    x_all = torch.arange(nx, device="cpu", dtype=torch.int64)
-
-    top_y = torch.arange(pml_y0 - boundary_width, pml_y0, device="cpu", dtype=torch.int64)
-    bottom_y = torch.arange(pml_y1, pml_y1 + boundary_width, device="cpu", dtype=torch.int64)
-    mid_y = torch.arange(pml_y0, pml_y1, device="cpu", dtype=torch.int64)
-    x_left = torch.arange(pml_x0 - boundary_width, pml_x0, device="cpu", dtype=torch.int64)
-    x_right = torch.arange(pml_x1, pml_x1 + boundary_width, device="cpu", dtype=torch.int64)
-
-    top = (top_y[:, None] * nx + x_all[None, :]).reshape(-1)
-    bottom = (bottom_y[:, None] * nx + x_all[None, :]).reshape(-1)
-
-    mid_base = mid_y * nx
-    mid_left = (mid_base[:, None] + x_left[None, :])
-    mid_right = (mid_base[:, None] + x_right[None, :])
-    mid = torch.cat((mid_left, mid_right), dim=1).reshape(-1)
-
-    flat = torch.cat((top, bottom, mid), dim=0).to(torch.int64)
-    return flat.to(device=device)
-
-
-def prepare_parameters(
-    epsilon_r: torch.Tensor, sigma: torch.Tensor, mu_r: torch.Tensor, dt: float
-) -> tuple:
-    """Prepare update coefficients for Maxwell equations.
-    
-    Args:
-        epsilon_r: Relative permittivity.
-        sigma: Conductivity (S/m).
-        mu_r: Relative permeability.
-        dt: Time step (s).
-    
-    Returns:
-        Tuple of (Ca, Cb, Cq) coefficients.
-    """
-    # Convert to absolute values
-    epsilon = epsilon_r * EP0
-    mu = mu_r * MU0
-    
-    # Ca and Cb for E-field update: E^{n+1} = Ca*E^n + Cb*(curl H)
-    # Ca = (1 - sigma*dt/(2*epsilon)) / (1 + sigma*dt/(2*epsilon))
-    # Cb = dt/epsilon / (1 + sigma*dt/(2*epsilon))
-    denom = 1.0 + sigma * dt / (2.0 * epsilon)
-    ca = (1.0 - sigma * dt / (2.0 * epsilon)) / denom
-    cb = (dt / epsilon) / denom
-    
-    # Cq for H-field update: H^{n+1/2} = H^{n-1/2} - Cq*(curl E)
-    cq = dt / mu
-    
-    return ca, cb, cq
 
 
 class MaxwellTM(torch.nn.Module):
     """2D TM mode Maxwell equations solver using FDTD method.
-    
+
     This module solves the TM (Transverse Magnetic) mode Maxwell equations
     in 2D with fields (Ey, Hx, Hz) using the FDTD method with CPML absorbing
     boundary conditions.
-    
+
     Args:
-        epsilon: Relative permittivity tensor [ny, nx]. 
+        epsilon: Relative permittivity tensor [ny, nx].
             For vacuum/air, use 1.0. For common materials:
             - Water: ~80
             - Glass: ~4-7
@@ -208,7 +57,7 @@ class MaxwellTM(torch.nn.Module):
             both directions) or a sequence [dy, dx].
         epsilon_requires_grad: Whether to compute gradients for permittivity.
         sigma_requires_grad: Whether to compute gradients for conductivity.
-    
+
     Note:
         The input parameters are RELATIVE values (dimensionless). They will be
         multiplied internally by the vacuum permittivity (ε₀ = 8.854e-12 F/m)
@@ -376,16 +225,17 @@ def maxwelltm(
     storage_bytes_limit_host: Optional[int] = None,
     storage_chunk_steps: int = 0,
     boundary_width: int = 0,
+    n_threads: Optional[int] = None,
 ):
     """2D TM mode Maxwell equations solver.
-    
+
     This is the main entry point for Maxwell TM propagation. It automatically
     handles CFL condition checking and time step resampling when needed.
-    
+
     If the user-provided time step (dt) is too large for numerical stability,
     the source signal will be upsampled internally and receiver data will be
     downsampled back to the original sampling rate.
-    
+
     Args:
         epsilon: Relative permittivity tensor [ny, nx].
         sigma: Electrical conductivity tensor [ny, nx] in S/m.
@@ -434,7 +284,8 @@ def maxwelltm(
         storage_chunk_steps: Optional chunk size (in stored steps) for
             CPU/disk modes. Currently unused.
         boundary_width: Width of boundary storage region (stage 2 only).
-        
+        n_threads: OpenMP thread count for CPU backend. None uses the OpenMP default.
+
     Returns:
         Tuple of (Ey, Hx, Hz, m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x, receiver_amplitudes).
     """
@@ -474,10 +325,7 @@ def maxwelltm(
     device = epsilon.device
 
     # Normalize grid_spacing to list
-    if isinstance(grid_spacing, (int, float)):
-        grid_spacing_list = [float(grid_spacing), float(grid_spacing)]
-    else:
-        grid_spacing_list = list(grid_spacing)
+    grid_spacing_list = _normalize_grid_spacing_2d(grid_spacing)
 
     # Compute maximum velocity if not provided
     if max_vel is None:
@@ -545,6 +393,7 @@ def maxwelltm(
         storage_bytes_limit_host,
         storage_chunk_steps,
         boundary_width,
+        n_threads,
     )
     
     # Unpack result
@@ -587,7 +436,7 @@ _update_H_opt: Optional[Callable] = None
 def maxwell_func(
     python_backend: Union[bool, str],
     *args,
-) -> Tuple[
+) -> tuple[
     torch.Tensor,  # Ey
     torch.Tensor,  # Hx
     torch.Tensor,  # Hz
@@ -695,12 +544,13 @@ def maxwell_python(
     storage_bytes_limit_host: Optional[int] = None,
     storage_chunk_steps: int = 0,
     boundary_width: int = 0,
+    n_threads: Optional[int] = None,
 ):
     """Performs the forward propagation of the 2D TM Maxwell equations.
 
     This function implements the FDTD time-stepping loop for the TM mode
     (Ey, Hx, Hz) with CPML absorbing boundary conditions.
-    
+
     - Models are padded by fd_pad + pml_width with replicate mode
     - Wavefields are padded by fd_pad only with zero padding
     - Output wavefields are cropped by fd_pad only (PML region is preserved)
@@ -736,7 +586,7 @@ def maxwell_python(
             - receiver_amplitudes: Recorded data at receivers [nt, n_shots, n_receivers]
     """
 
-    from .common import create_or_pad, zero_interior
+    from .padding import create_or_pad, zero_interior
 
     # These should be set by maxwell_func before calling this function
     assert _update_E_opt is not None, "_update_E_opt must be set by maxwell_func"
@@ -774,21 +624,11 @@ def maxwell_python(
         )
 
     # Normalize grid_spacing to list
-    if isinstance(grid_spacing, (int, float)):
-        grid_spacing = [float(grid_spacing), float(grid_spacing)]
-    else:
-        grid_spacing = list(grid_spacing)
+    grid_spacing = _normalize_grid_spacing_2d(grid_spacing)
     dy, dx = grid_spacing
 
     # Normalize pml_width to list [top, bottom, left, right]
-    if isinstance(pml_width, int):
-        pml_width_list = [pml_width] * 4
-    else:
-        pml_width_list = list(pml_width)
-        if len(pml_width_list) == 1:
-            pml_width_list = pml_width_list * 4
-        elif len(pml_width_list) == 2:
-            pml_width_list = [pml_width_list[0], pml_width_list[0], pml_width_list[1], pml_width_list[1]]
+    pml_width_list = _normalize_pml_width_2d(pml_width)
 
     # Determine number of time steps
     if nt is None:
@@ -1316,12 +1156,13 @@ def maxwell_c_cuda(
     storage_bytes_limit_host: Optional[int] = None,
     storage_chunk_steps: int = 0,
     boundary_width: int = 0,
+    n_threads: Optional[int] = None,
 ):
     """Performs Maxwell propagation using C/CUDA backend.
 
     This function provides the interface to the compiled C/CUDA implementations
     for high-performance wave propagation.
-    
+
     Padding strategy:
     - Models are padded by fd_pad + pml_width with replicate mode
     - Wavefields are padded by fd_pad only with zero padding
@@ -1335,7 +1176,7 @@ def maxwell_c_cuda(
     """
     from . import backend_utils
     from . import staggered
-    from .common import create_or_pad, zero_interior
+    from .padding import create_or_pad, zero_interior
 
     # Validate inputs
     if epsilon.ndim != 2:
@@ -1350,21 +1191,17 @@ def maxwell_c_cuda(
     model_ny, model_nx = epsilon.shape  # Original model dimensions
 
     # Normalize grid_spacing to list
-    if isinstance(grid_spacing, (int, float)):
-        grid_spacing = [float(grid_spacing), float(grid_spacing)]
-    else:
-        grid_spacing = list(grid_spacing)
+    grid_spacing = _normalize_grid_spacing_2d(grid_spacing)
     dy, dx = grid_spacing
 
+    n_threads_val = 0
+    if n_threads is not None:
+        n_threads_val = int(n_threads)
+        if n_threads_val < 0:
+            raise ValueError("n_threads must be >= 0 when provided.")
+
     # Normalize pml_width to list [top, bottom, left, right]
-    if isinstance(pml_width, int):
-        pml_width_list = [pml_width] * 4
-    else:
-        pml_width_list = list(pml_width)
-        if len(pml_width_list) == 1:
-            pml_width_list = pml_width_list * 4
-        elif len(pml_width_list) == 2:
-            pml_width_list = [pml_width_list[0], pml_width_list[0], pml_width_list[1], pml_width_list[1]]
+    pml_width_list = _normalize_pml_width_2d(pml_width)
 
     # Determine number of time steps
     if nt is None:
@@ -1739,6 +1576,7 @@ def maxwell_c_cuda(
                 m_Ey_z,
                 m_Hx_z,
                 m_Hz_x,
+                n_threads_val,
             )
         elif gradient_mode_str == "boundary":
             import warnings
@@ -1821,6 +1659,7 @@ def maxwell_c_cuda(
                 m_Ey_z,
                 m_Hx_z,
                 m_Hz_x,
+                n_threads_val,
             )
         # Unpack result (drop context handle if present)
         if len(result) == 9:
@@ -1968,6 +1807,7 @@ def maxwell_c_cuda(
                 pml_x0,
                 pml_y1,
                 pml_x1,
+                n_threads_val,
                 device_idx,
             )
 
@@ -2040,8 +1880,8 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         pml_x0: int,
         pml_y1: int,
         pml_x1: int,
-        fd_pad: Tuple[int, int, int, int],
-        pml_width: Tuple[int, int, int, int],
+        fd_pad: tuple[int, int, int, int],
+        pml_width: tuple[int, int, int, int],
         models: dict,
         forward_callback: Optional[Callback],
         backward_callback: Optional[Callback],
@@ -2056,7 +1896,8 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         m_Ey_z: torch.Tensor,
         m_Hx_z: torch.Tensor,
         m_Hz_x: torch.Tensor,
-    ) -> Tuple[Any, ...]:
+        n_threads: int,
+    ) -> tuple[Any, ...]:
         """Performs the forward propagation of the Maxwell TM equations."""
         from . import backend_utils
 
@@ -2253,6 +2094,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                     pml_x0,
                     pml_y1,
                     pml_x1,
+                    n_threads,
                     device_idx,
                 )
                 
@@ -2332,6 +2174,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 pml_x0,
                 pml_y1,
                 pml_x1,
+                n_threads,
                 device_idx,
             )
 
@@ -2360,7 +2203,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         )
 
     @staticmethod
-    def setup_context(ctx: Any, inputs: Tuple[Any, ...], outputs: Tuple[Any, ...]) -> None:
+    def setup_context(ctx: Any, inputs: tuple[Any, ...], outputs: tuple[Any, ...]) -> None:
         (
             ca,
             cb,
@@ -2414,6 +2257,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             _m_Ey_z,
             _m_Hx_z,
             _m_Hz_x,
+            n_threads,
         ) = inputs
 
         if len(outputs) != 9:
@@ -2498,11 +2342,12 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         ctx.backward_callback = backward_callback
         ctx.callback_frequency = callback_frequency
         ctx.source_amplitudes_scaled = ctx_data["source_amplitudes_scaled"]
+        ctx.n_threads = n_threads
 
     @staticmethod
     def backward(
         ctx: Any, *grad_outputs: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], ...]:
+    ) -> tuple[Optional[torch.Tensor], ...]:
         """Computes the gradients during the backward pass using ASM.
 
         Uses the Adjoint State Method (ASM) to compute gradients:
@@ -2656,6 +2501,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         callback_frequency = ctx.callback_frequency
         fd_pad_ctx = ctx.fd_pad
         models = ctx.models
+        n_threads = ctx.n_threads
 
         # Get the backend function
         backward_func = backend_utils.get_backend_function(
@@ -2736,6 +2582,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 pml_x0,
                 pml_y1,
                 pml_x1,
+                n_threads,
                 device_idx,
             )
 
@@ -2822,6 +2669,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             None, None, None,  # storage_mode_str, storage_path, storage_compression
             None, None, None,  # Ey, Hx, Hz
             None, None, None, None,  # m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x
+            None,  # n_threads
         )
 
 
@@ -2900,7 +2748,8 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         m_Ex_z: torch.Tensor,
         m_Ex_y: torch.Tensor,
         m_Ey_x: torch.Tensor,
-    ) -> Tuple[Any, ...]:
+        n_threads: int,
+    ) -> tuple[Any, ...]:
         from . import backend_utils
 
         import ctypes
@@ -3138,6 +2987,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             pml_x1,
             source_component,
             receiver_component,
+            n_threads,
             device_idx,
         )
 
@@ -3176,7 +3026,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         )
 
     @staticmethod
-    def setup_context(ctx: Any, inputs: Tuple[Any, ...], outputs: Tuple[Any, ...]) -> None:
+    def setup_context(ctx: Any, inputs: tuple[Any, ...], outputs: tuple[Any, ...]) -> None:
         (
             ca,
             cb,
@@ -3247,6 +3097,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             _m_Ex_z,
             _m_Ex_y,
             _m_Ey_x,
+            n_threads,
         ) = inputs
 
         if len(outputs) != 20:
@@ -3318,9 +3169,10 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         ctx.shot_bytes_uncomp = ctx_data["shot_bytes_uncomp"]
         ctx.source_component = int(source_component)
         ctx.receiver_component = int(receiver_component)
+        ctx.n_threads = n_threads
 
     @staticmethod
-    def backward(ctx: Any, *grad_outputs: torch.Tensor) -> Tuple[Optional[torch.Tensor], ...]:
+    def backward(ctx: Any, *grad_outputs: torch.Tensor) -> tuple[Optional[torch.Tensor], ...]:
         from . import backend_utils
 
         grad_outputs = list(grad_outputs)
@@ -3411,6 +3263,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         shot_bytes_uncomp = ctx.shot_bytes_uncomp
         source_component = ctx.source_component
         receiver_component = ctx.receiver_component
+        n_threads = ctx.n_threads
 
         if grad_r is None or grad_r.numel() == 0:
             grad_r = torch.zeros(nt, n_shots, n_receivers, device=device, dtype=dtype)
@@ -3605,6 +3458,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             pml_x1,
             source_component,
             receiver_component,
+            n_threads,
             device_idx,
         )
 
@@ -3639,6 +3493,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             None, None, None, None, None, None,  # Ex, Ey, Ez, Hx, Hy, Hz
             None, None, None, None, None, None,  # m_Hz_y, m_Hy_z, m_Hx_z, m_Hz_x, m_Hy_x, m_Hx_y
             None, None, None, None, None, None,  # m_Ey_z, m_Ez_y, m_Ez_x, m_Ex_z, m_Ex_y, m_Ey_x
+            None,  # n_threads
         )
 
 
@@ -3745,6 +3600,7 @@ class Maxwell3D(torch.nn.Module):
         boundary_width: int = 0,
         source_component: str = "Ez",
         receiver_component: Optional[str] = None,
+        n_threads: Optional[int] = None,
     ):
         return maxwell3d(
             self.epsilon,
@@ -3796,6 +3652,7 @@ class Maxwell3D(torch.nn.Module):
             boundary_width,
             source_component,
             receiver_component,
+            n_threads,
         )
 
 
@@ -3849,6 +3706,7 @@ def maxwell3d(
     boundary_width: int = 0,
     source_component: str = "Ez",
     receiver_component: Optional[str] = None,
+    n_threads: Optional[int] = None,
 ):
     """3D Maxwell equations solver (Python backend reference).
 
@@ -3980,6 +3838,7 @@ def maxwell3d(
         boundary_width,
         source_component,
         receiver_component,
+        n_threads,
     )
 
     (
@@ -4156,9 +4015,10 @@ def maxwell3d_python(
     boundary_width: int,
     source_component: str,
     receiver_component: Optional[str],
+    n_threads: Optional[int] = None,
 ):
     """Reference Python backend for 3D Maxwell propagation (forward only)."""
-    from .common import create_or_pad
+    from .padding import create_or_pad
 
     _ = (
         model_gradient_sampling_interval,
@@ -4169,6 +4029,7 @@ def maxwell3d_python(
         storage_bytes_limit_host,
         storage_chunk_steps,
         boundary_width,
+        n_threads,
     )
 
     if epsilon.ndim != 3:
@@ -4666,9 +4527,10 @@ def maxwell3d_c_cuda(
     boundary_width: int,
     source_component: str,
     receiver_component: Optional[str],
+    n_threads: Optional[int] = None,
 ):
     """3D Maxwell propagation using the C/CUDA backend (ASM on CUDA)."""
-    from .common import create_or_pad
+    from .padding import create_or_pad
     from . import staggered
     from . import backend_utils
 
@@ -4697,6 +4559,12 @@ def maxwell3d_c_cuda(
     requires_grad = epsilon.requires_grad or sigma.requires_grad
     device = epsilon.device
     dtype = epsilon.dtype
+
+    n_threads_val = 0
+    if n_threads is not None:
+        n_threads_val = int(n_threads)
+        if n_threads_val < 0:
+            raise ValueError("n_threads must be >= 0 when provided.")
 
     storage_mode_str = storage_mode.lower()
     if storage_mode_str not in {"device", "cpu", "disk", "none", "auto"}:
@@ -5100,6 +4968,7 @@ def maxwell3d_c_cuda(
             m_Ex_z,
             m_Ex_y,
             m_Ey_x,
+            n_threads_val,
         )
         (
             Ex,
@@ -5196,6 +5065,7 @@ def maxwell3d_c_cuda(
             pml_x1,
             src_code,
             rec_code,
+            n_threads_val,
             device.index if device.type == "cuda" else -1,
         )
 
@@ -5448,7 +5318,8 @@ class MaxwellTMForwardBoundaryFunc(torch.autograd.Function):
         m_Ey_z: torch.Tensor,
         m_Hx_z: torch.Tensor,
         m_Hz_x: torch.Tensor,
-    ) -> Tuple[torch.Tensor, ...]:
+        n_threads: int,
+    ) -> tuple[torch.Tensor, ...]:
         from . import backend_utils
 
         import ctypes
@@ -5627,6 +5498,7 @@ class MaxwellTMForwardBoundaryFunc(torch.autograd.Function):
             pml_x0,
             pml_y1,
             pml_x1,
+            n_threads,
             device_idx,
         )
 
@@ -5683,6 +5555,7 @@ class MaxwellTMForwardBoundaryFunc(torch.autograd.Function):
         ctx.storage_mode = storage_mode
         ctx.shot_bytes_uncomp = shot_bytes_uncomp
         ctx.boundary_numel = boundary_numel
+        ctx.n_threads = n_threads
 
         return (
             Ey,
@@ -5698,7 +5571,7 @@ class MaxwellTMForwardBoundaryFunc(torch.autograd.Function):
     @staticmethod
     def backward(
         ctx: Any, *grad_outputs: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], ...]:
+    ) -> tuple[Optional[torch.Tensor], ...]:
         from . import backend_utils
 
         (
@@ -5750,6 +5623,7 @@ class MaxwellTMForwardBoundaryFunc(torch.autograd.Function):
         storage_mode = ctx.storage_mode
         shot_bytes_uncomp = ctx.shot_bytes_uncomp
         boundary_numel = ctx.boundary_numel
+        n_threads = ctx.n_threads
 
         import ctypes
 
@@ -5893,6 +5767,7 @@ class MaxwellTMForwardBoundaryFunc(torch.autograd.Function):
             pml_x0,
             pml_y1,
             pml_x1,
+            n_threads,
             device_idx,
         )
 
@@ -5924,4 +5799,5 @@ class MaxwellTMForwardBoundaryFunc(torch.autograd.Function):
             None, None, None,  # storage_mode_str, storage_path, storage_compression
             None, None, None,  # Ey, Hx, Hz
             None, None, None, None,  # m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x
+            None,  # n_threads
         )

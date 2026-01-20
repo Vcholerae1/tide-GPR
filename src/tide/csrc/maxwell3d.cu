@@ -2770,9 +2770,11 @@ void FUNC(forward)(
     int64_t const pml_x1,
     int64_t const source_component,
     int64_t const receiver_component,
+    int64_t const n_threads,
     int64_t const device) {
   (void)dt;
   (void)step_ratio;
+  (void)n_threads;
   if (device >= 0) {
     cudaSetDevice((int)device);
   }
@@ -3072,8 +3074,10 @@ void FUNC(forward_with_storage)(
     int64_t const pml_x1,
     int64_t const source_component,
     int64_t const receiver_component,
+    int64_t const n_threads,
     int64_t const device) {
   (void)dt;
+  (void)n_threads;
 
   if (device >= 0) {
     cudaSetDevice((int)device);
@@ -3567,8 +3571,10 @@ void FUNC(backward)(
     int64_t const pml_x1,
     int64_t const source_component,
     int64_t const receiver_component,
+    int64_t const n_threads,
     int64_t const device) {
   (void)dt;
+  (void)n_threads;
 
   if (device >= 0) {
     cudaSetDevice((int)device);

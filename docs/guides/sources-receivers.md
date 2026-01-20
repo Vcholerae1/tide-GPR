@@ -10,7 +10,6 @@ TODO: Document time axis convention and normalization.
 ## Source Locations
 - Expected shape: [n_shots, n_sources, ndim].
 - Coordinate order: (y, x) for 2D.
-- Use `tide.IGNORE_LOCATION` for unused sources.
 
 ## Receiver Locations
 - Expected shape: [n_shots, n_receivers, ndim].

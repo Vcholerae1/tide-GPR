@@ -1894,11 +1894,13 @@ extern "C" void FUNC(forward)(
     int64_t const pml_x0_h,
     int64_t const pml_y1_h,
     int64_t const pml_x1_h,
+    int64_t const n_threads,
     int64_t const device) {
   
   cudaSetDevice(device);
   (void)dt_h;
   (void)step_ratio_h;
+  (void)n_threads;
 
   int64_t const shot_numel_h = ny_h * nx_h;
 
@@ -2057,9 +2059,11 @@ extern "C" void FUNC(forward_with_storage)(
     int64_t const pml_x0_h,
     int64_t const pml_y1_h,
     int64_t const pml_x1_h,
+    int64_t const n_threads,
     int64_t const device) {
   
   cudaSetDevice(device);
+  (void)n_threads;
 
   int64_t const shot_numel_h = ny_h * nx_h;
   size_t const bytes_per_step_store =
@@ -2380,9 +2384,11 @@ extern "C" void FUNC(forward_with_boundary_storage)(
     int64_t const pml_x0_h,
     int64_t const pml_y1_h,
     int64_t const pml_x1_h,
+    int64_t const n_threads,
     int64_t const device) {
   
   cudaSetDevice(device);
+  (void)n_threads;
 
   int64_t const shot_numel_h = ny_h * nx_h;
   size_t const bytes_per_step_store =
@@ -2683,10 +2689,12 @@ extern "C" void FUNC(backward_with_boundary)(
     int64_t const pml_x0_h,
     int64_t const pml_y1_h,
     int64_t const pml_x1_h,
+    int64_t const n_threads,
     int64_t const device) {
 
   cudaSetDevice(device);
   (void)dt_h;
+  (void)n_threads;
 
   int64_t const shot_numel_h = ny_h * nx_h;
   size_t const bytes_per_step_store =
@@ -3066,10 +3074,12 @@ extern "C" void FUNC(backward)(
     int64_t const pml_x0_h,
     int64_t const pml_y1_h,
     int64_t const pml_x1_h,
+    int64_t const n_threads,
     int64_t const device) {
   
   cudaSetDevice(device);
   (void)dt_h;
+  (void)n_threads;
 
   int64_t const shot_numel_h = ny_h * nx_h;
   size_t const bytes_per_step_store =

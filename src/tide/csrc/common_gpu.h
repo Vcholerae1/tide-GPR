@@ -4,7 +4,7 @@
 #include <cuda_runtime.h>
 
 // Define TIDE_DTYPE_FLOAT based on TIDE_DTYPE (for vectorized load optimization)
-// Note: TIDE_DTYPE_FLOAT is now defined in CMakeLists.txt for better compatibility
+// Note: TIDE_DTYPE_FLOAT is now defined in CMakelists.txt for better compatibility
 #ifndef TIDE_DTYPE_FLOAT
 #ifdef TIDE_DTYPE
 #if TIDE_DTYPE == float

@@ -26,7 +26,11 @@ TODO: replace placeholders with project-specific content.
 ## API Reference
 - api/index.md
 - api/tide.md
-- api/common.md
+- api/callbacks.md
+- api/resampling.md
+- api/cfl.md
+- api/padding.md
+- api/validation.md
 - api/maxwell.md
 - api/wavelets.md
 - api/staggered.md
