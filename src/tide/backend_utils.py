@@ -2,7 +2,7 @@ import ctypes
 import pathlib
 import platform
 from ctypes import c_bool, c_double, c_float, c_int64, c_void_p
-from typing import Any, Callable, Optional, TypeAlias, list
+from typing import Any, Callable, Optional, TypeAlias
 
 import torch
 
@@ -189,104 +189,6 @@ def get_maxwell_tm_forward_with_storage_template() -> list[Any]:
     return args
 
 
-def get_maxwell_tm_forward_with_boundary_storage_template() -> list[Any]:
-    """Returns the argtype template for Maxwell TM forward with boundary storage."""
-    args: list[Any] = []
-    # Material parameters
-    args += [c_void_p] * 3  # ca, cb, cq
-    # Source
-    args += [c_void_p]  # f
-    # Fields
-    args += [c_void_p] * 3  # ey, hx, hz
-    # PML memory variables
-    args += [c_void_p] * 4  # m_ey_x, m_ey_z, m_hx_z, m_hz_x
-    # Recorded data
-    args += [c_void_p]  # r
-    # Boundary storage: Ey, Hx, Hz (store_1, store_3, filenames)
-    args += [c_void_p] * 9
-    # Boundary indices + size
-    args += [c_void_p]  # boundary_indices
-    args += [c_int64]  # boundary_numel
-    # PML profiles
-    args += [c_void_p] * 8  # ay, by, ayh, byh, ax, bx, axh, bxh
-    # Kappa profiles
-    args += [c_void_p] * 4  # ky, kyh, kx, kxh
-    # Source and receiver indices
-    args += [c_void_p] * 2  # sources_i, receivers_i
-    # Grid spacing
-    args += [FLOAT_TYPE] * 2  # rdy, rdx
-    # Time step
-    args += [FLOAT_TYPE]  # dt
-    # Sizes
-    args += [c_int64]  # nt
-    args += [c_int64]  # n_shots
-    args += [c_int64] * 2  # ny, nx
-    args += [c_int64] * 2  # n_sources_per_shot, n_receivers_per_shot
-    # Storage mode
-    args += [c_int64] * 2  # storage_mode, shot_bytes_uncomp
-    # Batched flags
-    args += [c_bool] * 3  # ca_batched, cb_batched, cq_batched
-    # PML boundaries
-    args += [c_int64] * 4  # pml_y0, pml_x0, pml_y1, pml_x1
-    # OpenMP threads (CPU only)
-    args += [c_int64]  # n_threads
-    # Device (for CUDA)
-    args += [c_int64]  # device
-    return args
-
-
-def get_maxwell_tm_backward_with_boundary_template() -> list[Any]:
-    """Returns the argtype template for Maxwell TM backward with boundary storage."""
-    args: list[Any] = []
-    # Material parameters
-    args += [c_void_p] * 3  # ca, cb, cq
-    # Source (scaled) and grad_r
-    args += [c_void_p] * 2  # f, grad_r
-    # Reconstructed forward fields and curl(H)
-    args += [c_void_p] * 4  # ey, hx, hz, curl_h
-    # Adjoint fields (lambda)
-    args += [c_void_p] * 3  # lambda_ey, lambda_hx, lambda_hz
-    # Adjoint PML memory variables
-    args += [c_void_p] * 4  # m_lambda_ey_x, m_lambda_ey_z, m_lambda_hx_z, m_lambda_hz_x
-    # Boundary storage: Ey, Hx, Hz (store_1, store_3, filenames)
-    args += [c_void_p] * 9
-    # Boundary indices + size
-    args += [c_void_p]  # boundary_indices
-    args += [c_int64]  # boundary_numel
-    # Gradient outputs
-    args += [c_void_p]  # grad_f
-    args += [c_void_p] * 4  # grad_ca, grad_cb, grad_eps, grad_sigma
-    args += [c_void_p] * 2  # grad_ca_shot, grad_cb_shot
-    # PML profiles
-    args += [c_void_p] * 8  # ay, by, ayh, byh, ax, bx, axh, bxh
-    # Kappa profiles
-    args += [c_void_p] * 4  # ky, kyh, kx, kxh
-    # Source and receiver indices
-    args += [c_void_p] * 2  # sources_i, receivers_i
-    # Grid spacing
-    args += [FLOAT_TYPE] * 2  # rdy, rdx
-    # Time step
-    args += [FLOAT_TYPE]  # dt
-    # Sizes
-    args += [c_int64]  # nt
-    args += [c_int64]  # n_shots
-    args += [c_int64] * 2  # ny, nx
-    args += [c_int64] * 2  # n_sources_per_shot, n_receivers_per_shot
-    # Storage mode
-    args += [c_int64] * 2  # storage_mode, shot_bytes_uncomp
-    # Requires grad flags
-    args += [c_bool] * 2  # ca_requires_grad, cb_requires_grad
-    # Batched flags
-    args += [c_bool] * 3  # ca_batched, cb_batched, cq_batched
-    # PML boundaries
-    args += [c_int64] * 4  # pml_y0, pml_x0, pml_y1, pml_x1
-    # OpenMP threads (CPU only)
-    args += [c_int64]  # n_threads
-    # Device (for CUDA)
-    args += [c_int64]  # device
-    return args
-
-
 def get_maxwell_3d_forward_template() -> list[Any]:
     """Returns the argtype template for the 3D Maxwell forward propagator."""
     args: list[Any] = []
@@ -447,9 +349,7 @@ def get_maxwell_3d_backward_template() -> list[Any]:
 templates: dict[str, Callable[[], list[Any]]] = {
     "maxwell_tm_forward": get_maxwell_tm_forward_template,
     "maxwell_tm_forward_with_storage": get_maxwell_tm_forward_with_storage_template,
-    "maxwell_tm_forward_with_boundary_storage": get_maxwell_tm_forward_with_boundary_storage_template,
     "maxwell_tm_backward": get_maxwell_tm_backward_template,
-    "maxwell_tm_backward_with_boundary": get_maxwell_tm_backward_with_boundary_template,
     "maxwell_3d_forward": get_maxwell_3d_forward_template,
     "maxwell_3d_forward_with_storage": get_maxwell_3d_forward_with_storage_template,
     "maxwell_3d_backward": get_maxwell_3d_backward_template,
@@ -589,16 +489,7 @@ if _dll is not None:
             _assign_argtypes(
                 "maxwell_tm", current_accuracy, current_dtype, "forward_with_storage"
             )
-            _assign_argtypes(
-                "maxwell_tm",
-                current_accuracy,
-                current_dtype,
-                "forward_with_boundary_storage",
-            )
             _assign_argtypes("maxwell_tm", current_accuracy, current_dtype, "backward")
-            _assign_argtypes(
-                "maxwell_tm", current_accuracy, current_dtype, "backward_with_boundary"
-            )
             _assign_argtypes("maxwell_3d", current_accuracy, current_dtype, "forward")
             _assign_argtypes(
                 "maxwell_3d", current_accuracy, current_dtype, "forward_with_storage"

@@ -258,7 +258,7 @@ def generate_base_and_filtered_observed():
 
         observed_sets = {}
         for key, spec in filter_specs.items():
-            lowpass_hz = spec["lowpass_mhz"] * 1e6
+            lowpass_hz = float(spec["lowpass_mhz"]) * 1e6
             data_filtered = (
                 apply_fir_lowpass(observed_base, dt=dt, cutoff_hz=lowpass_hz)
                 if lowpass_hz > 0 else observed_base
@@ -311,7 +311,7 @@ vmax_stage = epsilon_true_np.max()
 for stage_idx, cfg in enumerate(inversion_schedule, 1):
     data_key = cfg["data_key"]
     obs_cfg = observed_sets[data_key]
-    n_epochs_adamw = cfg["adamw_epochs"]
+    n_epochs_adamw = int(cfg["adamw_epochs"])
     lowpass_hz = obs_cfg["lowpass_hz"]
 
     print(f"\n==== Stage {stage_idx}: {obs_cfg['desc']} ====")

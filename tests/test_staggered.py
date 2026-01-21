@@ -273,10 +273,11 @@ class TestSetPMLProfiles2D:
         pml_freq = 25.0
         ny, nx = 32, 32
 
-        ab_profiles, k_profiles = staggered.set_pml_profiles(
+        profiles = staggered.set_pml_profiles(
             pml_width, accuracy, fd_pad, dt, grid_spacing,
             max_vel, dtype, device, pml_freq, ny, nx
         )
+        ab_profiles, k_profiles = profiles[:8], profiles[8:]
 
         # ab_profiles: [ay, ayh, ax, axh, by, byh, bx, bxh]
         # k_profiles: [ky, kyh, kx, kxh]
@@ -302,10 +303,11 @@ class TestSetPMLProfiles2D:
         pml_freq = 25.0
         ny, nx = 16, 16
 
-        ab_profiles, k_profiles = staggered.set_pml_profiles(
+        profiles = staggered.set_pml_profiles(
             pml_width, accuracy, fd_pad, dt, grid_spacing,
             max_vel, dtype, device, pml_freq, ny, nx
         )
+        ab_profiles, k_profiles = profiles[:8], profiles[8:]
 
         # With zero PML width, a and b profiles should be all zeros
         # k profiles should be all ones
@@ -326,15 +328,12 @@ class TestSetPMLProfiles2D:
         device = torch.device("cpu")
         pml_freq = 25.0
         ny, nx = 32, 32
-
-        ab_profiles, k_profiles = staggered.set_pml_profiles(
+        profiles = staggered.set_pml_profiles(
             pml_width, accuracy, fd_pad, dt, grid_spacing,
             max_vel, dtype, device, pml_freq, ny, nx
         )
-
-        ay, ayh, ax, axh, by, byh, bx, bxh = ab_profiles
-        ky, kyh, kx, kxh = k_profiles
-
+        
+        ay, ayh, ax, axh, by, byh, bx, bxh,ky, kyh, kx, kxh = profiles
         # a coefficients can be negative or small (CPML recursive convolution)
         # b coefficients are decay factors, should be in [0, 1]
         for b in [by, byh, bx, bxh]:

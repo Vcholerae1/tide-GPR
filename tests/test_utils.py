@@ -1,8 +1,6 @@
 """Tests for tide.utils module - PML setup functions."""
 
-import math
 
-import pytest
 import torch
 
 from tide import utils

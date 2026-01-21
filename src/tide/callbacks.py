@@ -6,7 +6,6 @@ from typing import (
     Dict,
     Optional,
     Union,
-    list,
 )
 
 if TYPE_CHECKING:

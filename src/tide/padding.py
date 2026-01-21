@@ -1,6 +1,4 @@
-"""Padding utilities for models and wavefields."""
-
-from typing import Union, list
+from typing import Union
 
 import torch
 

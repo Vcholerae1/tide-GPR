@@ -16,7 +16,6 @@ TODO: Add signatures and usage examples for each item.
 
 ## Classes
 - MaxwellTM
-- Maxwell3D
 - CallbackState
 
 ## Types
@@ -24,7 +23,6 @@ TODO: Add signatures and usage examples for each item.
 
 ## Functions
 - maxwelltm
-- maxwell3d
 - create_callback_state
 - upsample
 - downsample

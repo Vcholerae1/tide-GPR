@@ -117,8 +117,13 @@ inner_size_x = inner_nx * dx
 print(f"波场尺寸: {inner_ny} x {inner_nx} ({inner_size_y:.2f} m x {inner_size_x:.2f} m)")
 
 # 初始图像 - 使用米为单位
-im = ax.imshow(snapshots[0], cmap='RdBu_r', vmin=vmin, vmax=vmax,
-               extent=[0, inner_size_x, inner_size_y, 0])
+im = ax.imshow(
+    snapshots[0],
+    cmap="RdBu_r",
+    vmin=vmin,
+    vmax=vmax,
+    extent=(0, inner_size_x, inner_size_y, 0),
+)
 ax.set_xlabel('x (m)')
 ax.set_ylabel('Depth (m)')
 title = ax.set_title('Ey Field (Inner Region), t = 0.00 ns')

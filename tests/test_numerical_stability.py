@@ -354,6 +354,7 @@ class TestEnergyConservation:
         else:
             late_signal = torch.tensor(0.0)
 
+        assert late_signal <= early_signal
+
         # With PML, late signal should be attenuated
         assert torch.isfinite(out).all()
-

@@ -1,7 +1,7 @@
 """CFL condition helpers for stable time stepping."""
 
 import math
-from typing import Union, list
+from typing import Union
 
 
 def cfl_condition(

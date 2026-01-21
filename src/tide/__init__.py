@@ -22,7 +22,7 @@ from .validation import (
     validate_freq_taper_frac,
     validate_time_pad_frac,
 )
-from .maxwell import MaxwellTM, Maxwell3D, maxwelltm, maxwell3d
+from .maxwell import MaxwellTM, maxwelltm
 from .wavelets import ricker
 
 __all__ = [
@@ -38,13 +38,11 @@ __all__ = [
     "wavelets",
     # Classes
     "MaxwellTM",
-    "Maxwell3D",
     "CallbackState",
     # Type aliases
     "Callback",
     # Functions
     "maxwelltm",
-    "maxwell3d",
     "create_callback_state",
     # Signal processing
     "upsample",

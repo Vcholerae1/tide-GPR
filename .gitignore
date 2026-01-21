@@ -42,6 +42,3 @@ check.md
 *.png
 *.html
 !README.md
-
-deepwave/
-.claude/

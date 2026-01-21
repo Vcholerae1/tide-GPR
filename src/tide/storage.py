@@ -10,16 +10,20 @@ import contextlib
 import os
 import shutil
 from pathlib import Path
-from typing import Union, list
+from typing import Union
 from uuid import uuid4
 
 import torch
 
-STORAGE_DEVICE = 0
-STORAGE_CPU = 1
-STORAGE_DISK = 2
-STORAGE_NONE = 3
-_CPU_STORAGE_BUFFERS = 3  # Keep in sync with csrc NUM_BUFFERS for CPU staging.
+# Snapshot storage modes: prefer DEVICE, fall back to CPU or DISK; NONE disables snapshotting
+STORAGE_DEVICE = 0  # Keep snapshots on the accelerator (fastest, uses device memory)
+STORAGE_CPU    = 1  # Stage snapshots in host memory (slower, avoids GPU OOM)
+STORAGE_DISK   = 2  # Spill snapshots to disk (slowest, preserves host/GPU memory)
+STORAGE_NONE   = 3  # Do not store snapshots
+
+# Number of ring buffers for CPU-stage ping-pong: allows overlapping reads/writes
+# (write to one, read from another, keep one ready). MUST match csrc NUM_BUFFERS.
+_CPU_STORAGE_BUFFERS = 3
 
 
 def _normalize_storage_compression(storage_compression: Union[bool, str, None]) -> str:

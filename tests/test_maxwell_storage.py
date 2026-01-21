@@ -59,7 +59,6 @@ def _run_grad(
         pml_width=8,
         save_snapshots=None,
         model_gradient_sampling_interval=2,
-        gradient_mode="snapshot",
         storage_mode=storage_mode,
         storage_path=storage_path,
         storage_compression=storage_compression,
@@ -68,6 +67,10 @@ def _run_grad(
     loss = receivers.square().sum()
     loss.backward()
     torch.cuda.synchronize()
+
+    assert epsilon.grad is not None
+    assert sigma.grad is not None
+
     return (
         epsilon.grad.detach().cpu(),
         sigma.grad.detach().cpu(),
@@ -103,10 +106,10 @@ def test_snapshot_storage_bf16_modes_match():
 
     torch.testing.assert_close(rec_cpu, rec_dev, rtol=1e-4, atol=1e-5)
     torch.testing.assert_close(rec_disk, rec_dev, rtol=1e-4, atol=1e-5)
-    torch.testing.assert_close(eps_cpu, eps_dev, rtol=1e-3, atol=1e-4)
-    torch.testing.assert_close(eps_disk, eps_dev, rtol=1e-3, atol=1e-4)
-    torch.testing.assert_close(sig_cpu, sig_dev, rtol=1e-3, atol=1e-4)
-    torch.testing.assert_close(sig_disk, sig_dev, rtol=1e-3, atol=1e-4)
+    torch.testing.assert_close(eps_cpu, eps_dev, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(eps_disk, eps_dev, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(sig_cpu, sig_dev, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(sig_disk, sig_dev, rtol=1e-4, atol=1e-5)
 
 
 def test_storage_mode_none_rejects_gradients():
@@ -141,6 +144,5 @@ def test_storage_mode_none_rejects_gradients():
             receiver_location=receiver_location,
             stencil=2,
             pml_width=4,
-            gradient_mode="snapshot",
             storage_mode="none",
         )

@@ -1,4 +1,4 @@
-from typing import list
+from typing import Tuple
 
 import torch
 
@@ -17,7 +17,7 @@ def set_pml_profiles(
     pml_freq: float,
     ny: int,
     nx: int,
-) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+) -> list[torch.Tensor]:
     """Sets up PML profiles for a staggered grid.
 
     Args:
@@ -36,9 +36,10 @@ def set_pml_profiles(
         nx: The number of grid points in the x direction.
 
     Returns:
-        A tuple containing:
-        - list of torch.Tensors for a, b profiles: [ay, ayh, ax, axh, by, byh, bx, bxh]
-        - list of torch.Tensors for k profiles: [ky, kyh, kx, kxh]
+        A list containing:
+        - a, b profiles: [ay, ayh, ax, axh, by, byh, bx, bxh]
+        - k profiles: [ky, kyh, kx, kxh]
+        Total 12 tensors.
 
     """
     pml_start: list[float] = [
@@ -127,7 +128,7 @@ def set_pml_profiles(
     kx = kx[None, None, :]
     kxh = kxh[None, None, :]
 
-    return [ay, ayh, ax, axh, by, byh, bx, bxh], [ky, kyh, kx, kxh]
+    return [ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh]
 
 
 def setup_pml_profiles_1d(

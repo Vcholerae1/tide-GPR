@@ -1,7 +1,5 @@
-from torch.cuda import device
-import sys
-from pathlib import Path
 import time
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,13 +7,9 @@ import torch
 import torch.nn.functional as F
 from scipy.ndimage import gaussian_filter
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 import tide
 
-
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 dx = 0.02
@@ -28,15 +22,17 @@ n_shots = 100
 d_source = 4
 first_source = 0
 # Shots per batch (batch size).
-batch_size = 28
+batch_size = 16
 model_gradient_sampling_interval = 5
 storage_mode = "device"
-storage_compression = None
+storage_compression = "fp8"
 
 model_path = "examples/data/OverThrust.npy"
 epsilon_true_raw = np.load(model_path)
 print(f"Loaded model shape: {epsilon_true_raw.shape}")
-print(f"Permittivity range: {epsilon_true_raw.min():.2f} - {epsilon_true_raw.max():.2f}")
+print(
+    f"Permittivity range: {epsilon_true_raw.min():.2f} - {epsilon_true_raw.max():.2f}"
+)
 
 ny, nx = epsilon_true_raw.shape
 epsilon_true_np = epsilon_true_raw.copy()
@@ -74,7 +70,7 @@ inversion_schedule = [
     {"data_key": "lp700", "adamw_epochs": 10, "lbfgs_epochs": 6},
 ]
 
-print(f"Base forward frequency: {base_forward_freq/1e6:.0f} MHz")
+print(f"Base forward frequency: {base_forward_freq / 1e6:.0f} MHz")
 print("FIR low-pass schedule on observed data:")
 for key, spec in filter_specs.items():
     print(f"  {key}: {spec['desc']} (cutoff {spec['lowpass_mhz']} MHz)")
@@ -87,7 +83,7 @@ for item in inversion_schedule:
 
 lowpass_tag = "-".join(str(spec["lowpass_mhz"]) for spec in filter_specs.values())
 output_dir = Path("outputs") / (
-    f"multiscale_fir_base{int(base_forward_freq/1e6)}MHz_lp{lowpass_tag}_shots{n_shots}_bs{batch_size}_nt{nt}"
+    f"multiscale_fir_base{int(base_forward_freq / 1e6)}MHz_lp{lowpass_tag}_shots{n_shots}_bs{batch_size}_nt{nt}"
 )
 output_dir.mkdir(parents=True, exist_ok=True)
 print(f"Saving figures to: {output_dir}")
@@ -96,7 +92,9 @@ print(f"Saving figures to: {output_dir}")
 pde_counts = {"forward": 0.0, "adjoint": 0.0}
 
 
-def add_pde_counts(batch_size: int, forward: bool = False, adjoint: bool = False) -> None:
+def add_pde_counts(
+    batch_size: int, forward: bool = False, adjoint: bool = False
+) -> None:
     if batch_size <= 0:
         return
     frac = batch_size / n_shots
@@ -112,7 +110,9 @@ def format_pde_counts(forward: float, adjoint: float) -> str:
 
 
 def report_pde_totals(prefix: str) -> None:
-    print(f"{prefix}PDE solves (100 shots = 1): {format_pde_counts(pde_counts['forward'], pde_counts['adjoint'])}")
+    print(
+        f"{prefix}PDE solves (100 shots = 1): {format_pde_counts(pde_counts['forward'], pde_counts['adjoint'])}"
+    )
 
 
 def report_pde_delta(prefix: str, forward_start: float, adjoint_start: float) -> None:
@@ -123,7 +123,9 @@ def report_pde_delta(prefix: str, forward_start: float, adjoint_start: float) ->
 
 def make_shot_batches() -> list[torch.Tensor]:
     perm = torch.arange(n_shots, device=device)
-    return [perm[i:i + n_shots_per_batch] for i in range(0, n_shots, n_shots_per_batch)]
+    return [
+        perm[i : i + n_shots_per_batch] for i in range(0, n_shots, n_shots_per_batch)
+    ]
 
 
 def design_fir_filter(cutoff_hz: float, fs: float, numtaps: int) -> torch.Tensor:
@@ -148,7 +150,9 @@ def apply_fir_lowpass(data: torch.Tensor, dt: float, cutoff_hz: float) -> torch.
     numtaps = max(3, int(fs / cutoff_hz))
     if numtaps % 2 == 0:
         numtaps += 1
-    fir_coeff = design_fir_filter(cutoff_hz, fs, numtaps).to(device=data.device, dtype=data.dtype)
+    fir_coeff = design_fir_filter(cutoff_hz, fs, numtaps).to(
+        device=data.device, dtype=data.dtype
+    )
 
     if data.ndim == 1:
         data_2d = data.view(1, 1, -1)
@@ -163,10 +167,14 @@ def apply_fir_lowpass(data: torch.Tensor, dt: float, cutoff_hz: float) -> torch.
         filtered = F.conv1d(padded, fir_coeff.view(1, 1, -1), padding=0)
         return filtered.view(n_shots_local, n_rx_local, nt_local).permute(2, 0, 1)
 
-    raise ValueError(f"Unsupported data dimension: {data.ndim}. Expected 1D or 3D tensor.")
+    raise ValueError(
+        f"Unsupported data dimension: {data.ndim}. Expected 1D or 3D tensor."
+    )
 
 
-def save_filter_comparison(observed_base: torch.Tensor, observed_sets: dict, output_dir: Path) -> None:
+def save_filter_comparison(
+    observed_base: torch.Tensor, observed_sets: dict, output_dir: Path
+) -> None:
     """Save base vs filtered data comparison figure."""
     base_np = observed_base.detach().cpu().numpy()[:, :, 0]
     filtered_arrays = []
@@ -174,16 +182,20 @@ def save_filter_comparison(observed_base: torch.Tensor, observed_sets: dict, out
         data_np = observed_sets[key]["data"].detach().cpu().numpy()[:, :, 0]
         filtered_arrays.append((key, data_np, observed_sets[key]["desc"]))
 
-    absmax = max(np.abs(base_np).max(), *(np.abs(arr).max() for _, arr, _ in filtered_arrays))
+    absmax = max(
+        np.abs(base_np).max(), *(np.abs(arr).max() for _, arr, _ in filtered_arrays)
+    )
     vlim = (-absmax, absmax)
 
     n_cols = 1 + len(filtered_arrays)
-    fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 5), sharex=True, sharey=True)
+    fig, axes = plt.subplots(
+        1, n_cols, figsize=(5 * n_cols, 5), sharex=True, sharey=True
+    )
     if n_cols == 1:
         axes = [axes]
 
     axes[0].imshow(base_np, aspect="auto", cmap="seismic", vmin=vlim[0], vmax=vlim[1])
-    axes[0].set_title(f"{base_forward_freq/1e6:.0f} MHz base")
+    axes[0].set_title(f"{base_forward_freq / 1e6:.0f} MHz base")
     axes[0].set_xlabel("Shots")
     axes[0].set_ylabel("Time samples")
 
@@ -193,13 +205,18 @@ def save_filter_comparison(observed_base: torch.Tensor, observed_sets: dict, out
         axes[idx].set_xlabel("Shots")
 
     plt.tight_layout()
-    filename = output_dir / f"data_filter_comparison_base{int(base_forward_freq/1e6)}_lp{lowpass_tag}.jpg"
+    filename = (
+        output_dir
+        / f"data_filter_comparison_base{int(base_forward_freq / 1e6)}_lp{lowpass_tag}.jpg"
+    )
     plt.savefig(filename, dpi=150)
     plt.close(fig)
     print(f"Saved data filter comparison to '{filename}'")
 
 
-def save_model_snapshot(eps_array: np.ndarray, title: str, filename: Path, vmin: float, vmax: float) -> None:
+def save_model_snapshot(
+    eps_array: np.ndarray, title: str, filename: Path, vmin: float, vmax: float
+) -> None:
     fig, ax = plt.subplots(figsize=(7, 5))
     im = ax.imshow(eps_array, aspect="auto", vmin=vmin, vmax=vmax)
     ax.set_title(title)
@@ -212,7 +229,9 @@ def save_model_snapshot(eps_array: np.ndarray, title: str, filename: Path, vmin:
     print(f"Saved model snapshot to '{filename}'")
 
 
-def forward_shots(epsilon, sigma, mu, shot_indices, source_amplitude_full, requires_grad=True):
+def forward_shots(
+    epsilon, sigma, mu, shot_indices, source_amplitude_full, requires_grad=True
+):
     src_amp = source_amplitude_full[shot_indices]
     src_loc = source_locations[shot_indices]
     rec_loc = receiver_locations[shot_indices]
@@ -228,7 +247,9 @@ def forward_shots(epsilon, sigma, mu, shot_indices, source_amplitude_full, requi
         receiver_location=rec_loc,
         pml_width=pml_width,
         save_snapshots=requires_grad,
-        model_gradient_sampling_interval=model_gradient_sampling_interval if requires_grad else 1,
+        model_gradient_sampling_interval=model_gradient_sampling_interval
+        if requires_grad
+        else 1,
         storage_mode=storage_mode,
         storage_compression=storage_compression,
     )
@@ -237,15 +258,21 @@ def forward_shots(epsilon, sigma, mu, shot_indices, source_amplitude_full, requi
 
 def generate_base_and_filtered_observed():
     with torch.no_grad():
-        wavelet = tide.ricker(base_forward_freq, nt, dt, peak_time=1.0 / base_forward_freq).to(device)
+        wavelet = tide.ricker(
+            base_forward_freq, nt, dt, peak_time=1.0 / base_forward_freq
+        ).to(device)
         src_amp_full = wavelet.view(1, 1, nt).repeat(n_shots, 1, 1)
 
         obs_list = []
         for shot_indices in make_shot_batches():
             obs_list.append(
                 forward_shots(
-                    epsilon_true, sigma_true, mu_true,
-                    shot_indices, src_amp_full, requires_grad=False
+                    epsilon_true,
+                    sigma_true,
+                    mu_true,
+                    shot_indices,
+                    src_amp_full,
+                    requires_grad=False,
                 )
             )
             add_pde_counts(int(shot_indices.numel()), forward=True)
@@ -253,10 +280,11 @@ def generate_base_and_filtered_observed():
 
         observed_sets = {}
         for key, spec in filter_specs.items():
-            lowpass_hz = spec["lowpass_mhz"] * 1e6
+            lowpass_hz = float(spec["lowpass_mhz"]) * 1e6
             data_filtered = (
                 apply_fir_lowpass(observed_base, dt=dt, cutoff_hz=lowpass_hz)
-                if lowpass_hz > 0 else observed_base
+                if lowpass_hz > 0
+                else observed_base
             )
             observed_sets[key] = {
                 "data": data_filtered,
@@ -296,7 +324,7 @@ time_start_all = time.time()
 
 print("Generating base observed data once, then FIR filtering...")
 observed_raw, observed_sets, src_amp_full = generate_base_and_filtered_observed()
-print(f"Base forward modeled at {base_forward_freq/1e6:.0f} MHz.")
+print(f"Base forward modeled at {base_forward_freq / 1e6:.0f} MHz.")
 report_pde_totals("After observed generation: ")
 save_filter_comparison(observed_raw, observed_sets, output_dir)
 
@@ -306,8 +334,8 @@ vmax_stage = epsilon_true_np.max()
 for stage_idx, cfg in enumerate(inversion_schedule, 1):
     data_key = cfg["data_key"]
     obs_cfg = observed_sets[data_key]
-    n_epochs_adamw = cfg["adamw_epochs"]
-    n_epochs_lbfgs = cfg["lbfgs_epochs"]
+    n_epochs_adamw = int(cfg["adamw_epochs"])
+    n_epochs_lbfgs = int(cfg["lbfgs_epochs"])
     lowpass_hz = obs_cfg["lowpass_hz"]
 
     print(f"\n==== Stage {stage_idx}: {obs_cfg['desc']} ====")
@@ -325,8 +353,12 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
 
         for shot_indices in make_shot_batches():
             syn = forward_shots(
-                epsilon_inv, sigma_fixed, mu_fixed,
-                shot_indices, src_amp_full, requires_grad=True
+                epsilon_inv,
+                sigma_fixed,
+                mu_fixed,
+                shot_indices,
+                src_amp_full,
+                requires_grad=True,
             )
             add_pde_counts(int(shot_indices.numel()), forward=True)
             syn_filtered = apply_fir_lowpass(syn, dt=dt, cutoff_hz=lowpass_hz)
@@ -352,8 +384,7 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
 
         all_losses.append(epoch_loss)
         if (epoch + 1) % 1 == 0 or epoch == 0:
-            print(f"  AdamW epoch {epoch + 1}/{n_epochs_adamw}  "
-                  f"Loss={epoch_loss:.6e}")
+            print(f"  AdamW epoch {epoch + 1}/{n_epochs_adamw}  Loss={epoch_loss:.6e}")
 
     # Stage 2: L-BFGS
     optimizer_lbfgs = torch.optim.LBFGS(
@@ -369,8 +400,12 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
         total_loss = torch.zeros((), device=device)
         for shot_indices in make_shot_batches():
             syn = forward_shots(
-                epsilon_inv, sigma_fixed, mu_fixed,
-                shot_indices, src_amp_full, requires_grad=True
+                epsilon_inv,
+                sigma_fixed,
+                mu_fixed,
+                shot_indices,
+                src_amp_full,
+                requires_grad=True,
             )
             add_pde_counts(int(shot_indices.numel()), forward=True)
             syn_filtered = apply_fir_lowpass(syn, dt=dt, cutoff_hz=lowpass_hz)
@@ -468,9 +503,3 @@ print(f"Improvement: {(1 - rms_result / rms_init) * 100:.1f}%")
 
 print("\n=== Timing Summary ===")
 print(f"Total inversion time: {time_all:.2f}s")
-
-
-
-
-
-

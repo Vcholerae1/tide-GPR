@@ -5,8 +5,6 @@ import torch
 
 import tide
 
-
-@pytest.mark.cuda
 class TestGradientAccuracy2D:
     """Tests for 2D MaxwellTM gradient accuracy."""
 
@@ -75,6 +73,7 @@ class TestGradientAccuracy2D:
         )[-1]
         loss_base = out_base.pow(2).sum()
         loss_base.backward()
+        assert eps_base.grad is not None
         grad_autodiff = eps_base.grad.clone()
 
         # Finite difference: perturb epsilon at a single point
@@ -129,9 +128,12 @@ class TestGradientAccuracy2D:
         loss = out.pow(2).sum()
         loss.backward()
 
+        assert sigma.grad is not None
+        sigma_grad = sigma.grad
+
         # Gradient should be non-zero somewhere
-        assert sigma.grad.abs().sum() > 0, "Sigma gradient should be non-zero"
-        assert torch.isfinite(sigma.grad).all(), "Sigma gradient should be finite"
+        assert sigma_grad.abs().sum() > 0, "Sigma gradient should be non-zero"
+        assert torch.isfinite(sigma_grad).all(), "Sigma gradient should be finite"
 
 
 class TestGradientSamplingInterval:
@@ -175,6 +177,7 @@ class TestGradientSamplingInterval:
         )[-1]
         loss1 = out1.pow(2).sum()
         loss1.backward()
+        assert eps1.grad is not None
         grad1 = eps1.grad.clone()
 
         # Compute gradient with sampling interval 3
@@ -194,6 +197,7 @@ class TestGradientSamplingInterval:
         )[-1]
         loss2 = out2.pow(2).sum()
         loss2.backward()
+        assert eps2.grad is not None
         grad2 = eps2.grad.clone()
 
         # Gradients should be different (sampling_interval affects gradient computation)
@@ -242,7 +246,10 @@ class TestGradientSamplingInterval:
             loss = out.pow(2).sum()
             loss.backward()
 
-            assert torch.isfinite(eps.grad).all(), f"Gradient should be finite for interval={interval}"
+            assert eps.grad is not None
+            grad = eps.grad
+
+            assert torch.isfinite(grad).all(), f"Gradient should be finite for interval={interval}"
 
 
 class TestGradientBoundaryConditions:
@@ -286,8 +293,11 @@ class TestGradientBoundaryConditions:
         loss = out.pow(2).sum()
         loss.backward()
 
-        assert torch.isfinite(eps.grad).all(), "Gradient should be finite with PML"
-        assert eps.grad.abs().sum() > 0, "Gradient should be non-zero with PML"
+        assert eps.grad is not None
+        grad = eps.grad
+
+        assert torch.isfinite(grad).all(), "Gradient should be finite with PML"
+        assert grad.abs().sum() > 0, "Gradient should be non-zero with PML"
 
     def test_gradient_without_pml(self):
         """Test gradient computation without PML boundaries."""
@@ -328,7 +338,10 @@ class TestGradientBoundaryConditions:
         loss.backward()
 
         # Gradient might have reflections at boundaries, but should still be finite
-        assert torch.isfinite(eps.grad).all(), "Gradient should be finite without PML"
+        assert eps.grad is not None
+        grad = eps.grad
+
+        assert torch.isfinite(grad).all(), "Gradient should be finite without PML"
 
 
 class TestGradientMultiSource:
@@ -342,7 +355,6 @@ class TestGradientMultiSource:
         ny, nx = 14, 18
         nt = 12
         n_sources = 2
-        n_receivers = 2
 
         epsilon = torch.ones(ny, nx, device=device, dtype=dtype) * 4.0
         sigma = torch.zeros_like(epsilon)
@@ -377,5 +389,8 @@ class TestGradientMultiSource:
         loss = out.pow(2).sum()
         loss.backward()
 
-        assert torch.isfinite(eps.grad).all(), "Gradient should be finite for multiple sources"
-        assert eps.grad.abs().sum() > 0, "Gradient should be non-zero for multiple sources"
+        assert eps.grad is not None
+        grad = eps.grad
+
+        assert torch.isfinite(grad).all(), "Gradient should be finite for multiple sources"
+        assert grad.abs().sum() > 0, "Gradient should be non-zero for multiple sources"
