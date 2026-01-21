@@ -1,6 +1,6 @@
 [project]
 name = "tide"
-version = "0.1.0"
+version = "0.0.2"
 description = "Torch-based Inversion & Development Engine for electromagnetic wave propagation"
 readme = "README.md"
 license = {text = "MIT"}
