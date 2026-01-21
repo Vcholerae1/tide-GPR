@@ -34,6 +34,8 @@ jobs:
           CIBW_BEFORE_ALL_LINUX: >
             curl -sL https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo -o /etc/yum.repos.d/cuda-rhel8.repo && 
             dnf install -y cuda-nvcc-12-4 cuda-cudart-devel-12-4 gcc-toolset-13
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >
+            auditwheel repair -w {dest_dir} {wheel} --plat manylinux_2_28_x86_64 --exclude libcuda.so.1 --exclude 'libcudart.so.*'
           CIBW_ENVIRONMENT_LINUX: >
             PATH="/opt/rh/gcc-toolset-13/root/usr/bin/:$PATH:/usr/local/cuda-12.4/bin" 
             CUDA_PATH="/usr/local/cuda-12.4" 
@@ -96,16 +98,28 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v5
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cibw-wheels-*
+          path: wheelhouse
+          merge-multiple: true
+
+      - name: Download sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+      - name: Prepare dist
+        run: |
+          mkdir -p dist
+          mv wheelhouse/*.whl dist/
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
           version: "latest"
-
-      - name: Build before publish
-        run: |
-          uv build
 
       - name: Publish distributions
         env:
