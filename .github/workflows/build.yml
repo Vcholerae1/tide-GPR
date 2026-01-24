@@ -77,12 +77,10 @@ jobs:
             cp "C:\Program Files\LLVM\bin\libomp.dll" src/tide/
           CIBW_ENVIRONMENT_WINDOWS: >
             PATH="C:\\Program Files\\LLVM\\bin;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4\\bin;$PATH"
-            CudaToolkitDir="C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4" 
-            CUDA_PATH="C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4" 
             CC="C:\\Program Files\\LLVM\\bin\\clang-cl.exe"
             CXX="C:\\Program Files\\LLVM\\bin\\clang-cl.exe"
             CMAKE_GENERATOR="Ninja"
-            CMAKE_ARGS="-DCUDAToolkit_ROOT=C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4 -DOpenMP_ROOT=C:/Program Files/LLVM"
+            CUDAToolkit_ROOT="C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4"
           
           # macOS: CPU-only build  
           CIBW_ENVIRONMENT_MACOS: CMAKE_ARGS="-DTIDE_ENABLE_CUDA=OFF"
