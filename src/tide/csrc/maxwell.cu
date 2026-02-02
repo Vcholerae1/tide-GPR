@@ -34,13 +34,9 @@
 #include <climits>
 #include <math.h>
 #include <cuda_bf16.h>
-#if defined(__has_include)
-#if __has_include(<cuda_fp8.h>)
+#if defined(__CUDACC__)
 #include <cuda_fp8.h>
 #define TIDE_HAVE_CUDA_FP8 1
-#else
-#define TIDE_HAVE_CUDA_FP8 0
-#endif
 #else
 #define TIDE_HAVE_CUDA_FP8 0
 #endif
@@ -204,73 +200,40 @@ __global__ void record_adjoint_at_sources(TIDE_DTYPE *__restrict const grad_f,
 
 
 // FP8 E4M3 (1 sign, 4 exponent, 3 mantissa) encode/decode.
+//
+// Policy: only use NVIDIA HW FP8 conversions. No software fallback.
+// If compiled for an arch without FP8 HW support, we trap at runtime.
 __device__ __forceinline__ uint8_t fp8_e4m3_from_float(float x) {
-#if TIDE_HAVE_CUDA_FP8
-  return (uint8_t)__nv_cvt_float_to_fp8(x, __NV_SATFINITE, __NV_E4M3);
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+  // Use the native FP8 convert instruction (sm89+), avoiding any header-driven
+  // software fallback paths.
+  unsigned short storage;
+  asm("{cvt.rn.satfinite.e4m3x2.f32 %0, %2, %1;}\n" : "=h"(storage)
+      : "f"(x), "f"(0.0f));
+  return (uint8_t)storage;
 #else
-  if (x == 0.0f) {
-    return 0;
-  }
-  uint8_t sign = (x < 0.0f) ? 0x80 : 0;
-  float ax = fabsf(x);
-  if (!isfinite(ax)) {
-    return (uint8_t)(sign | 0x7F);
-  }
-  int exp;
-  float m = frexpf(ax, &exp);  // ax = m * 2^exp, m in [0.5, 1)
-  int e = exp - 1;
-  int exp_field = e + 7;
-  int mant = 0;
-
-  if (exp_field <= 0) {
-    mant = __float2int_rn(ax * 512.0f);
-    if (mant <= 0) {
-      return sign;
-    }
-    if (mant > 7) {
-      mant = 7;
-    }
-    exp_field = 0;
-  } else if (exp_field >= 0xF) {
-    exp_field = 0xE;
-    mant = 7;
-  } else {
-    float frac = m * 2.0f - 1.0f;
-    mant = __float2int_rn(frac * 8.0f);
-    if (mant == 8) {
-      mant = 0;
-      exp_field += 1;
-      if (exp_field >= 0xF) {
-        exp_field = 0xE;
-        mant = 7;
-      }
-    }
-  }
-
-  return (uint8_t)(sign | ((uint8_t)exp_field << 3) | (uint8_t)(mant & 0x7));
+  asm("trap;");
+  return 0;
 #endif
 }
 
 __device__ __forceinline__ float fp8_e4m3_to_float(uint8_t v) {
-#if TIDE_HAVE_CUDA_FP8
-  __half h = __nv_cvt_fp8_to_halfraw((__nv_fp8_storage_t)v, __NV_E4M3);
-  return __half2float(h);
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+  // Convert FP8x2 -> FP16x2 using the native instruction (sm89+), then take
+  // the lower lane (corresponding to the input byte).
+  unsigned short storage = (unsigned short)v;
+  unsigned int half2_storage;
+  asm("{cvt.rn.f16x2.e4m3x2 %0, %1;}\n" : "=r"(half2_storage) : "h"(storage));
+  union {
+    unsigned int u;
+    __half2 h2;
+  } tmp;
+  tmp.u = half2_storage;
+  float2 out = __half22float2(tmp.h2);
+  return out.x;
 #else
-  if (v == 0) {
-    return 0.0f;
-  }
-  int sign = v & 0x80;
-  int exp_field = (v >> 3) & 0xF;
-  int mant = v & 0x7;
-  float val;
-  if (exp_field == 0) {
-    float frac = (float)mant / 8.0f;
-    val = ldexpf(frac, -6);
-  } else {
-    float frac = 1.0f + (float)mant / 8.0f;
-    val = ldexpf(frac, exp_field - 7);
-  }
-  return sign ? -val : val;
+  asm("trap;");
+  return 0.0f;
 #endif
 }
 
@@ -295,13 +258,6 @@ __global__ __launch_bounds__(256) void forward_kernel_h(
     TIDE_DTYPE const *__restrict const kyh,
     TIDE_DTYPE const *__restrict const kx,
     TIDE_DTYPE const *__restrict const kxh) {
-  
-#if FD_PAD > 1
-  // Shared-memory tiling for Ey stencil loads.
-  // Assumes blockDim.z == 1 (one shot per block).
-  extern __shared__ TIDE_DTYPE shmem[];
-  TIDE_DTYPE *__restrict const tile_ey = shmem;
-#endif
 
   int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
               (int64_t)threadIdx.x + FD_PAD;
@@ -312,36 +268,7 @@ __global__ __launch_bounds__(256) void forward_kernel_h(
 
   if (shot_idx >= n_shots) return;
 
-#if FD_PAD > 1
-  int64_t const tile_w = (int64_t)blockDim.x + 2 * (int64_t)FD_PAD;
-  int64_t const tile_h = (int64_t)blockDim.y + 2 * (int64_t)FD_PAD;
-  int64_t const tile_pitch = tile_w;
-  int64_t const x0 = (int64_t)blockIdx.x * (int64_t)blockDim.x + FD_PAD;
-  int64_t const y0 = (int64_t)blockIdx.y * (int64_t)blockDim.y + FD_PAD;
-  int64_t const base = shot_idx * shot_numel;
-
-  int64_t const t = (int64_t)threadIdx.y * (int64_t)blockDim.x +
-                    (int64_t)threadIdx.x;
-  int64_t const nthreads = (int64_t)blockDim.x * (int64_t)blockDim.y;
-  int64_t const tile_numel = tile_w * tile_h;
-  // Original scalar loading (optimization 2.1: vectorized loading disabled due to overhead)
-  for (int64_t idx = t; idx < tile_numel; idx += nthreads) {
-    int64_t const ly = idx / tile_w;
-    int64_t const lx = idx - ly * tile_w;
-    int64_t const gx = x0 - FD_PAD + lx;
-    int64_t const gy = y0 - FD_PAD + ly;
-    if (0 <= gx && gx < nx && 0 <= gy && gy < ny) {
-      tile_ey[ly * tile_pitch + lx] = __ldg(&ey[base + gy * nx + gx]);
-    } else {
-      tile_ey[ly * tile_pitch + lx] = (TIDE_DTYPE)0;
-    }
-  }
-  __syncthreads();
-
-#define EY_L(dy, dx) tile_ey[((int64_t)threadIdx.y + (int64_t)FD_PAD + (dy)) * tile_pitch + ((int64_t)threadIdx.x + (int64_t)FD_PAD + (dx))]
-#else
 #define EY_L(dy, dx) EY(dy, dx)
-#endif
 
   if (y < ny - FD_PAD + 1 && x < nx - FD_PAD + 1 && shot_idx < n_shots) {
     int64_t const pml_y0h = pml_y0;
@@ -416,18 +343,6 @@ __global__ __launch_bounds__(256) void forward_kernel_e(
     TIDE_DTYPE const *__restrict const kx,
     TIDE_DTYPE const *__restrict const kxh) {
 
-#if FD_PAD > 1
-  // Shared-memory tiling for Hx/Hz stencil loads.
-  // Assumes blockDim.z == 1 (one shot per block).
-  extern __shared__ TIDE_DTYPE shmem[];
-  int64_t const tile_w = (int64_t)blockDim.x + 2 * (int64_t)FD_PAD;
-  int64_t const tile_h = (int64_t)blockDim.y + 2 * (int64_t)FD_PAD;
-  int64_t const tile_pitch = tile_w;
-  int64_t const tile_numel = tile_w * tile_h;
-  TIDE_DTYPE *__restrict const tile_hx = shmem;
-  TIDE_DTYPE *__restrict const tile_hz = shmem + tile_numel;
-#endif
-
   int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
               (int64_t)threadIdx.x + FD_PAD;
   int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
@@ -437,38 +352,8 @@ __global__ __launch_bounds__(256) void forward_kernel_e(
 
   if (shot_idx >= n_shots) return;
 
-#if FD_PAD > 1
-  int64_t const x0 = (int64_t)blockIdx.x * (int64_t)blockDim.x + FD_PAD;
-  int64_t const y0 = (int64_t)blockIdx.y * (int64_t)blockDim.y + FD_PAD;
-  int64_t const base = shot_idx * shot_numel;
-  int64_t const t = (int64_t)threadIdx.y * (int64_t)blockDim.x +
-                    (int64_t)threadIdx.x;
-  int64_t const nthreads = (int64_t)blockDim.x * (int64_t)blockDim.y;
-  // Original scalar loading (optimization 2.1: vectorized loading disabled due to overhead)
-  for (int64_t idx = t; idx < tile_numel; idx += nthreads) {
-    int64_t const ly = idx / tile_w;
-    int64_t const lx = idx - ly * tile_w;
-    int64_t const gx = x0 - FD_PAD + lx;
-    int64_t const gy = y0 - FD_PAD + ly;
-    if (0 <= gx && gx < nx && 0 <= gy && gy < ny) {
-      int64_t const g = base + gy * nx + gx;
-      int64_t const offset = ly * tile_pitch + lx;
-      tile_hx[offset] = __ldg(&hx[g]);
-      tile_hz[offset] = __ldg(&hz[g]);
-    } else {
-      int64_t const offset = ly * tile_pitch + lx;
-      tile_hx[offset] = (TIDE_DTYPE)0;
-      tile_hz[offset] = (TIDE_DTYPE)0;
-    }
-  }
-  __syncthreads();
-
-#define HX_L(dy, dx) tile_hx[((int64_t)threadIdx.y + (int64_t)FD_PAD + (dy)) * tile_pitch + ((int64_t)threadIdx.x + (int64_t)FD_PAD + (dx))]
-#define HZ_L(dy, dx) tile_hz[((int64_t)threadIdx.y + (int64_t)FD_PAD + (dy)) * tile_pitch + ((int64_t)threadIdx.x + (int64_t)FD_PAD + (dx))]
-#else
 #define HX_L(dy, dx) HX(dy, dx)
 #define HZ_L(dy, dx) HZ(dy, dx)
-#endif
 
   if (y < ny - FD_PAD + 1 && x < nx - FD_PAD + 1 && shot_idx < n_shots) {
     int64_t j = y * nx + x;
@@ -534,18 +419,6 @@ __global__ void forward_kernel_e_with_storage(
     bool const ca_requires_grad,
     bool const cb_requires_grad) {
 
-#if FD_PAD > 1
-  // Shared-memory tiling for Hx/Hz stencil loads.
-  // Assumes blockDim.z == 1 (one shot per block).
-  extern __shared__ TIDE_DTYPE shmem[];
-  int64_t const tile_w = (int64_t)blockDim.x + 2 * (int64_t)FD_PAD;
-  int64_t const tile_h = (int64_t)blockDim.y + 2 * (int64_t)FD_PAD;
-  int64_t const tile_pitch = tile_w;
-  int64_t const tile_numel = tile_w * tile_h;
-  TIDE_DTYPE *__restrict const tile_hx = shmem;
-  TIDE_DTYPE *__restrict const tile_hz = shmem + tile_numel;
-#endif
-
   int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
               (int64_t)threadIdx.x + FD_PAD;
   int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
@@ -555,38 +428,8 @@ __global__ void forward_kernel_e_with_storage(
 
   if (shot_idx >= n_shots) return;
 
-#if FD_PAD > 1
-  int64_t const x0 = (int64_t)blockIdx.x * (int64_t)blockDim.x + FD_PAD;
-  int64_t const y0 = (int64_t)blockIdx.y * (int64_t)blockDim.y + FD_PAD;
-  int64_t const base = shot_idx * shot_numel;
-  int64_t const t = (int64_t)threadIdx.y * (int64_t)blockDim.x +
-                    (int64_t)threadIdx.x;
-  int64_t const nthreads = (int64_t)blockDim.x * (int64_t)blockDim.y;
-  // Original scalar loading (optimization 2.1: vectorized loading disabled due to overhead)
-  for (int64_t idx = t; idx < tile_numel; idx += nthreads) {
-    int64_t const ly = idx / tile_w;
-    int64_t const lx = idx - ly * tile_w;
-    int64_t const gx = x0 - FD_PAD + lx;
-    int64_t const gy = y0 - FD_PAD + ly;
-    if (0 <= gx && gx < nx && 0 <= gy && gy < ny) {
-      int64_t const g = base + gy * nx + gx;
-      int64_t const offset = ly * tile_pitch + lx;
-      tile_hx[offset] = __ldg(&hx[g]);
-      tile_hz[offset] = __ldg(&hz[g]);
-    } else {
-      int64_t const offset = ly * tile_pitch + lx;
-      tile_hx[offset] = (TIDE_DTYPE)0;
-      tile_hz[offset] = (TIDE_DTYPE)0;
-    }
-  }
-  __syncthreads();
-
-#define HX_L(dy, dx) tile_hx[((int64_t)threadIdx.y + (int64_t)FD_PAD + (dy)) * tile_pitch + ((int64_t)threadIdx.x + (int64_t)FD_PAD + (dx))]
-#define HZ_L(dy, dx) tile_hz[((int64_t)threadIdx.y + (int64_t)FD_PAD + (dy)) * tile_pitch + ((int64_t)threadIdx.x + (int64_t)FD_PAD + (dx))]
-#else
 #define HX_L(dy, dx) HX(dy, dx)
 #define HZ_L(dy, dx) HZ(dy, dx)
-#endif
 
   if (y < ny - FD_PAD + 1 && x < nx - FD_PAD + 1 && shot_idx < n_shots){
     int64_t j = y * nx + x;
@@ -663,18 +506,6 @@ __global__ void forward_kernel_e_with_storage_bf16(
     bool const ca_requires_grad,
     bool const cb_requires_grad) {
 
-#if FD_PAD > 1
-  // Shared-memory tiling for Hx/Hz stencil loads.
-  // Assumes blockDim.z == 1 (one shot per block).
-  extern __shared__ TIDE_DTYPE shmem[];
-  int64_t const tile_w = (int64_t)blockDim.x + 2 * (int64_t)FD_PAD;
-  int64_t const tile_h = (int64_t)blockDim.y + 2 * (int64_t)FD_PAD;
-  int64_t const tile_pitch = tile_w;
-  int64_t const tile_numel = tile_w * tile_h;
-  TIDE_DTYPE *__restrict const tile_hx = shmem;
-  TIDE_DTYPE *__restrict const tile_hz = shmem + tile_numel;
-#endif
-
   int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
               (int64_t)threadIdx.x + FD_PAD;
   int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
@@ -684,38 +515,8 @@ __global__ void forward_kernel_e_with_storage_bf16(
 
   if (shot_idx >= n_shots) return;
 
-#if FD_PAD > 1
-  int64_t const x0 = (int64_t)blockIdx.x * (int64_t)blockDim.x + FD_PAD;
-  int64_t const y0 = (int64_t)blockIdx.y * (int64_t)blockDim.y + FD_PAD;
-  int64_t const base = shot_idx * shot_numel;
-  int64_t const t = (int64_t)threadIdx.y * (int64_t)blockDim.x +
-                    (int64_t)threadIdx.x;
-  int64_t const nthreads = (int64_t)blockDim.x * (int64_t)blockDim.y;
-  // Original scalar loading (optimization 2.1: vectorized loading disabled due to overhead)
-  for (int64_t idx = t; idx < tile_numel; idx += nthreads) {
-    int64_t const ly = idx / tile_w;
-    int64_t const lx = idx - ly * tile_w;
-    int64_t const gx = x0 - FD_PAD + lx;
-    int64_t const gy = y0 - FD_PAD + ly;
-    if (0 <= gx && gx < nx && 0 <= gy && gy < ny) {
-      int64_t const g = base + gy * nx + gx;
-      int64_t const offset = ly * tile_pitch + lx;
-      tile_hx[offset] = __ldg(&hx[g]);
-      tile_hz[offset] = __ldg(&hz[g]);
-    } else {
-      int64_t const offset = ly * tile_pitch + lx;
-      tile_hx[offset] = (TIDE_DTYPE)0;
-      tile_hz[offset] = (TIDE_DTYPE)0;
-    }
-  }
-  __syncthreads();
-
-#define HX_L(dy, dx) tile_hx[((int64_t)threadIdx.y + (int64_t)FD_PAD + (dy)) * tile_pitch + ((int64_t)threadIdx.x + (int64_t)FD_PAD + (dx))]
-#define HZ_L(dy, dx) tile_hz[((int64_t)threadIdx.y + (int64_t)FD_PAD + (dy)) * tile_pitch + ((int64_t)threadIdx.x + (int64_t)FD_PAD + (dx))]
-#else
 #define HX_L(dy, dx) HX(dy, dx)
 #define HZ_L(dy, dx) HZ(dy, dx)
-#endif
 
   if (y < ny - FD_PAD + 1 && x < nx - FD_PAD + 1 && shot_idx < n_shots) {
     int64_t j = y * nx + x;
@@ -790,18 +591,6 @@ __global__ void forward_kernel_e_with_storage_fp8(
     bool const ca_requires_grad,
     bool const cb_requires_grad) {
 
-#if FD_PAD > 1
-  // Shared-memory tiling for Hx/Hz stencil loads.
-  // Assumes blockDim.z == 1 (one shot per block).
-  extern __shared__ TIDE_DTYPE shmem[];
-  int64_t const tile_w = (int64_t)blockDim.x + 2 * (int64_t)FD_PAD;
-  int64_t const tile_h = (int64_t)blockDim.y + 2 * (int64_t)FD_PAD;
-  int64_t const tile_pitch = tile_w;
-  int64_t const tile_numel = tile_w * tile_h;
-  TIDE_DTYPE *__restrict const tile_hx = shmem;
-  TIDE_DTYPE *__restrict const tile_hz = shmem + tile_numel;
-#endif
-
   int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
               (int64_t)threadIdx.x + FD_PAD;
   int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
@@ -811,38 +600,9 @@ __global__ void forward_kernel_e_with_storage_fp8(
 
   if (shot_idx >= n_shots) return;
 
-#if FD_PAD > 1
-  int64_t const x0 = (int64_t)blockIdx.x * (int64_t)blockDim.x + FD_PAD;
-  int64_t const y0 = (int64_t)blockIdx.y * (int64_t)blockDim.y + FD_PAD;
-  int64_t const base = shot_idx * shot_numel;
-  int64_t const t = (int64_t)threadIdx.y * (int64_t)blockDim.x +
-                    (int64_t)threadIdx.x;
-  int64_t const nthreads = (int64_t)blockDim.x * (int64_t)blockDim.y;
-  for (int64_t idx = t; idx < tile_numel; idx += nthreads) {
-    int64_t const ly = idx / tile_w;
-    int64_t const lx = idx - ly * tile_w;
-    int64_t const gx = x0 - FD_PAD + lx;
-    int64_t const gy = y0 - FD_PAD + ly;
-    if (0 <= gx && gx < nx && 0 <= gy && gy < ny) {
-      int64_t const g = base + gy * nx + gx;
-      int64_t const offset = ly * tile_pitch + lx;
-      tile_hx[offset] = __ldg(&hx[g]);
-      tile_hz[offset] = __ldg(&hz[g]);
-    } else {
-      int64_t const offset = ly * tile_pitch + lx;
-      tile_hx[offset] = (TIDE_DTYPE)0;
-      tile_hz[offset] = (TIDE_DTYPE)0;
-    }
-  }
-  __syncthreads();
-
-#define HX_L(dy, dx) tile_hx[((int64_t)threadIdx.y + (int64_t)FD_PAD + (dy)) * tile_pitch + ((int64_t)threadIdx.x + (int64_t)FD_PAD + (dx))]
-#define HZ_L(dy, dx) tile_hz[((int64_t)threadIdx.y + (int64_t)FD_PAD + (dy)) * tile_pitch + ((int64_t)threadIdx.x + (int64_t)FD_PAD + (dx))]
-#else
 #define HX_L(dy, dx) HX(dy, dx)
 #define HZ_L(dy, dx) HZ(dy, dx)
-#endif
-
+    
   if (y < ny - FD_PAD + 1 && x < nx - FD_PAD + 1 && shot_idx < n_shots) {
     int64_t j = y * nx + x;
     int64_t i = shot_idx * shot_numel + j;
@@ -1503,7 +1263,7 @@ extern "C" void FUNC(forward)(
   size_t const shmem_h_bytes =
       (size_t)(dimBlock.x + 2 * FD_PAD) * (size_t)(dimBlock.y + 2 * FD_PAD) *
       sizeof(TIDE_DTYPE);
-  size_t const shmem_e_bytes = 2 * shmem_h_bytes;
+  size_t const shmem_e_bytes = 0;
 #else
   size_t const shmem_h_bytes = 0;
   size_t const shmem_e_bytes = 0;
@@ -1870,7 +1630,6 @@ extern "C" void FUNC(forward_with_storage)(
 
   gpuErrchk(cudaPeekAtLastError());
 }
-
 
 
 extern "C" void FUNC(backward)(

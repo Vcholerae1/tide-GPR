@@ -1,10 +1,10 @@
 [project]
 name = "tide-GPR"
-version = "0.0.17"
+version = "0.0.18"
 description = "Torch-based Inversion & Development Engine for electromagnetic wave propagation"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [
     {name = "V.cholerae", email = "v.cholerae1@gmail.com"}
 ]

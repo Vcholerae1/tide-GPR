@@ -4,7 +4,7 @@ import platform
 import site
 import sys
 from importlib import resources
-from ctypes import c_bool, c_double, c_float, c_int64, c_void_p
+from ctypes import c_bool, c_double, c_float, c_int, c_int64, c_void_p
 from typing import Any, Callable, Optional, TypeAlias
 
 import torch
@@ -76,6 +76,35 @@ def get_dll() -> ctypes.CDLL:
             f"Expected library at: {_lib_path}"
         )
     return _dll
+
+
+def get_library_path() -> pathlib.Path:
+    """Return the resolved shared library path."""
+    return _lib_path
+
+
+def cuda_fp8_enabled() -> bool:
+    """Return True if the compiled CUDA backend includes FP8 support."""
+    if _dll is None or not hasattr(_dll, "tide_cuda_fp8_enabled"):
+        return False
+    func = _dll.tide_cuda_fp8_enabled
+    func.restype = c_int
+    return bool(func())
+
+
+def cuda_build_arches() -> Optional[str]:
+    """Return the CUDA arch list the backend was compiled for, if available."""
+    if _dll is None or not hasattr(_dll, "tide_cuda_arches"):
+        return None
+    func = _dll.tide_cuda_arches
+    func.restype = ctypes.c_char_p
+    value = func()
+    if not value:
+        return None
+    try:
+        return value.decode("utf-8")
+    except Exception:
+        return None
 
 
 # Check if was compiled with OpenMP support

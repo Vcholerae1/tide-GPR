@@ -7,6 +7,14 @@ option(TIDE_ENABLE_CUDA "Enable CUDA backend" ON)
 
 # Detect and enable CUDA if present and enabled
 if(TIDE_ENABLE_CUDA)
+    # Prefer a modern CUDA toolkit if present. This matters for newer ISA
+    # features (e.g. FP8 convert instructions on SM89+).
+    if(NOT DEFINED CUDAToolkit_ROOT AND EXISTS "/usr/local/cuda")
+        set(CUDAToolkit_ROOT "/usr/local/cuda" CACHE PATH "CUDA toolkit root" FORCE)
+    endif()
+    if(NOT DEFINED CMAKE_CUDA_COMPILER AND EXISTS "/usr/local/cuda/bin/nvcc")
+        set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc" CACHE FILEPATH "CUDA compiler" FORCE)
+    endif()
     find_package(CUDAToolkit)
     if(CUDAToolkit_FOUND)
         # On Windows, CUDA needs MSVC cl.exe as host compiler, even if C/C++ uses Clang
@@ -148,6 +156,57 @@ macro(add_tide_cpu_object_library BASENAME ACCURACY DTYPE)
 endmacro()
 
 if(CUDAToolkit_FOUND)
+    # Use explicit architectures. Some CMake defaults resolve to 75 even on
+    # Ada GPUs. Prefer "all but sm_4x" (and only those supported by nvcc)
+    # by default unless the user explicitly sets it.
+    if(NOT CMAKE_CUDA_ARCHITECTURES
+       OR CMAKE_CUDA_ARCHITECTURES STREQUAL ""
+       OR CMAKE_CUDA_ARCHITECTURES STREQUAL "52"
+       OR CMAKE_CUDA_ARCHITECTURES STREQUAL "75")
+        set(_TIDE_ARCH_CANDIDATES "50;52;53;60;61;62;70;72;75;80;86;87;89;90")
+        set(_TIDE_SUPPORTED_ARCHES "")
+        set(_TIDE_ARCH_PROBE "${CMAKE_BINARY_DIR}/tide_cuda_arch_probe.cu")
+        file(WRITE "${_TIDE_ARCH_PROBE}" "__global__ void tide_arch_probe() {}\n")
+        foreach(_arch IN LISTS _TIDE_ARCH_CANDIDATES)
+            execute_process(
+                COMMAND "${CMAKE_CUDA_COMPILER}" -arch=sm_${_arch} -x cu -c
+                        "${_TIDE_ARCH_PROBE}"
+                        -o "${CMAKE_BINARY_DIR}/tide_cuda_arch_probe_${_arch}.o"
+                RESULT_VARIABLE _TIDE_ARCH_OK
+                OUTPUT_QUIET
+                ERROR_QUIET
+            )
+            if(_TIDE_ARCH_OK EQUAL 0)
+                list(APPEND _TIDE_SUPPORTED_ARCHES "${_arch}")
+            endif()
+        endforeach()
+        if(_TIDE_SUPPORTED_ARCHES STREQUAL "")
+            message(WARNING "Could not detect supported CUDA architectures; defaulting to 89.")
+            set(_TIDE_SUPPORTED_ARCHES "89")
+        endif()
+        set(CMAKE_CUDA_ARCHITECTURES "${_TIDE_SUPPORTED_ARCHES}"
+            CACHE STRING "CUDA architectures" FORCE)
+        unset(_TIDE_ARCH_CANDIDATES)
+        unset(_TIDE_SUPPORTED_ARCHES)
+        unset(_TIDE_ARCH_PROBE)
+        unset(_TIDE_ARCH_OK)
+    endif()
+    set(TIDE_CUDA_ARCHES "${CMAKE_CUDA_ARCHITECTURES}")
+    string(REPLACE ";" "," TIDE_CUDA_ARCHES_STR "${TIDE_CUDA_ARCHES}")
+
+    # Detect whether FP8 instructions are available for the compiled arch set.
+    set(TIDE_CUDA_FP8_ENABLED 0)
+    if(TIDE_CUDA_ARCHES STREQUAL "native" OR TIDE_CUDA_ARCHES STREQUAL "all")
+        set(TIDE_CUDA_FP8_ENABLED 1)
+    else()
+        foreach(_arch IN LISTS TIDE_CUDA_ARCHES)
+            string(REGEX MATCH "^[0-9]+" _arch_num "${_arch}")
+            if(_arch_num AND _arch_num GREATER_EQUAL 89)
+                set(TIDE_CUDA_FP8_ENABLED 1)
+            endif()
+        endforeach()
+    endif()
+
     macro(add_tide_cuda_object_library BASENAME ACCURACY DTYPE)
         set(TARGET_NAME "${BASENAME}_${ACCURACY}_${DTYPE}_cuda_obj")
         add_library(${TARGET_NAME} OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/${BASENAME}.cu)
@@ -162,16 +221,12 @@ if(CUDAToolkit_FOUND)
             TIDE_DTYPE=${DTYPE}
             TIDE_DEVICE=cuda
             TIDE_DTYPE_FLOAT=${IS_FLOAT}
+            TIDE_CUDA_FP8_ENABLED=${TIDE_CUDA_FP8_ENABLED}
         )
         target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         list(APPEND TIDE_OBJECTS $<TARGET_OBJECTS:${TARGET_NAME}>)
         
-        # Use "all" or specific architectures
-        if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-            set_target_properties(${TARGET_NAME} PROPERTIES CUDA_ARCHITECTURES "89")
-        else()
-            set_target_properties(${TARGET_NAME} PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
-        endif()
+        set_target_properties(${TARGET_NAME} PROPERTIES CUDA_ARCHITECTURES "${TIDE_CUDA_ARCHES}")
 
         if(CMAKE_BUILD_TYPE MATCHES Release)
             target_compile_options(${TARGET_NAME} PRIVATE
@@ -226,7 +281,7 @@ if(CUDAToolkit_FOUND)
 
     # --- Storage utilities ---
     set(STORAGE_UTILS_CUDA_SRC ${CMAKE_CURRENT_SOURCE_DIR}/storage_utils.cu)
-    set_source_files_properties(${STORAGE_UTILS_CUDA_SRC} PROPERTIES CUDA_ARCHITECTURES "89")
+    set_source_files_properties(${STORAGE_UTILS_CUDA_SRC} PROPERTIES CUDA_ARCHITECTURES "${TIDE_CUDA_ARCHES}")
 endif()
 
 # --- Final Library Build ---
@@ -250,6 +305,13 @@ endif()
 
 if(HAVE_AVX2)
     target_compile_definitions(tide_C PRIVATE HAVE_AVX2)
+endif()
+
+if(CUDAToolkit_FOUND)
+    target_compile_definitions(tide_C PRIVATE
+        TIDE_CUDA_FP8_ENABLED=${TIDE_CUDA_FP8_ENABLED}
+        TIDE_CUDA_ARCHES_STR="${TIDE_CUDA_ARCHES_STR}"
+    )
 endif()
 
 # Set output directory to the tide package directory

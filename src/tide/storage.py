@@ -9,11 +9,14 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
+import warnings
 from pathlib import Path
 from typing import Union
 from uuid import uuid4
 
 import torch
+
+from .backend_utils import cuda_build_arches, cuda_fp8_enabled, get_library_path
 
 # Snapshot storage modes: prefer DEVICE, fall back to CPU or DISK; NONE disables snapshotting
 STORAGE_DEVICE = 0  # Keep snapshots on the accelerator (fastest, uses device memory)
@@ -81,7 +84,41 @@ def _resolve_storage_compression(
             raise NotImplementedError(
                 f"{context} (FP8 storage) is not supported in this path."
             )
-        # FP8 now supported on both CUDA and CPU
+        if not cuda_fp8_enabled():
+            arches = cuda_build_arches()
+            lib_path = get_library_path()
+            details = []
+            if arches:
+                details.append(f"compiled archs: {arches}")
+            if lib_path:
+                details.append(f"lib: {lib_path}")
+            detail_suffix = f" ({', '.join(details)})" if details else ""
+            warnings.warn(
+                f"{context} requested FP8 storage, but the CUDA backend was "
+                f"not built with FP8 support{detail_suffix}. Falling back to BF16. "
+                "Rebuild with CMAKE_CUDA_ARCHITECTURES=89 (or 'native') to enable FP8.",
+                RuntimeWarning,
+            )
+            if dtype != torch.float32:
+                raise NotImplementedError(
+                    f"{context} (BF16 storage) is only supported for float32."
+                )
+            return "bf16", torch.bfloat16, 2
+        # FP8 storage requires NVIDIA HW FP8 support (no software fallback).
+        #
+        # Note: FP8 tensor core *math* support and FP8 *convert* instructions are
+        # not the same thing. For this backend, FP8 storage uses native GPU FP8
+        # convert instructions (no software fallback).
+        if device.type != "cuda":
+            raise NotImplementedError(
+                f"{context} (FP8 storage) requires a CUDA device with HW FP8 support."
+            )
+        major, minor = torch.cuda.get_device_capability(device)
+        if (major, minor) < (8, 9):
+            raise NotImplementedError(
+                f"{context} (FP8 storage) requires NVIDIA SM89 (Ada) or newer, "
+                f"but got compute capability {major}.{minor}."
+            )
         if dtype != torch.float32:
             raise NotImplementedError(
                 f"{context} (FP8 storage) is only supported for float32."

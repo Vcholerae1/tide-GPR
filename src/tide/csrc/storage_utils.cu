@@ -6,6 +6,13 @@
 
 #include "storage_utils.h"
 
+#ifndef TIDE_CUDA_FP8_ENABLED
+#define TIDE_CUDA_FP8_ENABLED 0
+#endif
+#ifndef TIDE_CUDA_ARCHES_STR
+#define TIDE_CUDA_ARCHES_STR "unknown"
+#endif
+
 static bool read_exact(FILE* fp, void* dst, size_t nbytes) {
   size_t total = 0;
   while (total < nbytes) {
@@ -46,6 +53,14 @@ static void report_cuda_error(const char* op, cudaError_t err) {
 }
 
 extern "C" {
+
+int tide_cuda_fp8_enabled(void) {
+  return TIDE_CUDA_FP8_ENABLED ? 1 : 0;
+}
+
+const char* tide_cuda_arches(void) {
+  return TIDE_CUDA_ARCHES_STR;
+}
 
 void storage_save_snapshot_gpu(
     void* store_1, void* store_3, FILE* fp, int64_t storage_mode,
