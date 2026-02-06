@@ -52,17 +52,31 @@ source_locations = torch.zeros(n_shots, 1, 2, dtype=torch.long, device=device)
 source_locations[:, 0, 0] = source_depth
 source_locations[:, 0, 1] = source_x
 
+receiver_offset = 1
 receiver_locations = torch.zeros(n_shots, 1, 2, dtype=torch.long, device=device)
 receiver_locations[:, 0, 0] = source_depth
-receiver_locations[:, 0, 1] = source_x + 1
+receiver_locations[:, 0, 1] = source_x + receiver_offset
 
 n_shots_per_batch = batch_size
 
-base_forward_freq = 600e6
+assumed_freq = 600e6
+assumed_peak = 1.0 / assumed_freq
+obs_freq = 750e6
+obs_peak = 1.0 / obs_freq + 0.5 / obs_freq
+base_forward_freq = obs_freq
 filter_specs = {
-    "lp250": {"lowpass_mhz": 200, "desc": "600 MHz forward result low-pass to 200 MHz"},
-    "lp500": {"lowpass_mhz": 400, "desc": "600 MHz forward result low-pass to 400 MHz"},
-    "lp700": {"lowpass_mhz": 600, "desc": "600 MHz forward result low-pass to 600 MHz"},
+    "lp250": {
+        "lowpass_mhz": 200,
+        "desc": f"{int(base_forward_freq / 1e6)} MHz observed low-pass to 200 MHz",
+    },
+    "lp500": {
+        "lowpass_mhz": 400,
+        "desc": f"{int(base_forward_freq / 1e6)} MHz observed low-pass to 400 MHz",
+    },
+    "lp700": {
+        "lowpass_mhz": 600,
+        "desc": f"{int(base_forward_freq / 1e6)} MHz observed low-pass to 600 MHz",
+    },
 }
 inversion_schedule = [
     {"data_key": "lp250", "adamw_epochs": 40, "lbfgs_epochs": 6},
@@ -70,7 +84,14 @@ inversion_schedule = [
     {"data_key": "lp700", "adamw_epochs": 10, "lbfgs_epochs": 6},
 ]
 
-print(f"Base forward frequency: {base_forward_freq / 1e6:.0f} MHz")
+print(
+    "Observed wavelet: "
+    f"{obs_freq / 1e6:.0f} MHz, peak {obs_peak * 1e9:.3f} ns"
+)
+print(
+    "Inversion wavelet: "
+    f"{assumed_freq / 1e6:.0f} MHz, peak {assumed_peak * 1e9:.3f} ns"
+)
 print("FIR low-pass schedule on observed data:")
 for key, spec in filter_specs.items():
     print(f"  {key}: {spec['desc']} (cutoff {spec['lowpass_mhz']} MHz)")
@@ -83,7 +104,9 @@ for item in inversion_schedule:
 
 lowpass_tag = "-".join(str(spec["lowpass_mhz"]) for spec in filter_specs.values())
 output_dir = Path("outputs") / (
-    f"multiscale_fir_base{int(base_forward_freq / 1e6)}MHz_lp{lowpass_tag}_shots{n_shots}_bs{batch_size}_nt{nt}"
+    "multiscale_crosscorr_wrongwavelet_"
+    f"obs{int(obs_freq / 1e6)}MHz_inv{int(assumed_freq / 1e6)}MHz_"
+    f"lp{lowpass_tag}_shots{n_shots}_bs{batch_size}_nt{nt}"
 )
 output_dir.mkdir(parents=True, exist_ok=True)
 print(f"Saving figures to: {output_dir}")
@@ -172,10 +195,70 @@ def apply_fir_lowpass(data: torch.Tensor, dt: float, cutoff_hz: float) -> torch.
     )
 
 
-def save_filter_comparison(
-    observed_base: torch.Tensor, observed_sets: dict, output_dir: Path
+def save_wavelet_comparison(
+    wavelet_obs: torch.Tensor, wavelet_inv: torch.Tensor, output_dir: Path
 ) -> None:
-    """Save base vs filtered data comparison figure."""
+    t_ns = (torch.arange(nt, device=wavelet_obs.device, dtype=wavelet_obs.dtype) * dt * 1e9)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(t_ns.cpu().numpy(), wavelet_obs.detach().cpu().numpy(), label="Observed")
+    ax.plot(t_ns.cpu().numpy(), wavelet_inv.detach().cpu().numpy(), label="Inversion")
+    ax.set_title("Wavelet Mismatch (Observed vs Inversion)")
+    ax.set_xlabel("Time (ns)")
+    ax.set_ylabel("Amplitude")
+    ax.grid(True)
+    ax.legend()
+    plt.tight_layout()
+    filename = output_dir / "wavelet_mismatch.jpg"
+    plt.savefig(filename, dpi=150)
+    plt.close(fig)
+    print(f"Saved wavelet comparison to '{filename}'")
+
+
+def xcorr_loss_global_wavelet(
+    d_obs: torch.Tensor,
+    d_pred: torch.Tensor,
+    eps: float = 1e-10,
+) -> torch.Tensor:
+    """Use stacked traces to estimate an effective wavelet, then cross-correlate."""
+    if d_obs.dim() == 3:
+        d_obs = d_obs.squeeze(1)
+        d_pred = d_pred.squeeze(1)
+
+    if d_obs.dim() != 2 or d_pred.dim() != 2:
+        raise ValueError("Expected d_obs and d_pred with shape [ns, nt].")
+
+    ns, nt_local = d_obs.shape
+
+    stack_obs = d_obs.sum(dim=0)
+    stack_pred = d_pred.sum(dim=0)
+
+    stack_obs = stack_obs / (torch.norm(stack_obs) + eps)
+    stack_pred = stack_pred / (torch.norm(stack_pred) + eps)
+
+    d_obs_conv = F.conv1d(
+        d_obs.unsqueeze(1),
+        stack_pred.view(1, 1, -1).flip([2]),
+        padding=nt_local - 1,
+    ).squeeze(1)
+
+    d_pred_conv = F.conv1d(
+        d_pred.unsqueeze(1),
+        stack_obs.view(1, 1, -1).flip([2]),
+        padding=nt_local - 1,
+    ).squeeze(1)
+
+    d_obs_norm = d_obs_conv / (torch.norm(d_obs_conv) + eps)
+    d_pred_norm = d_pred_conv / (torch.norm(d_pred_conv) + eps)
+
+    return -torch.sum(d_obs_norm * d_pred_norm)
+
+
+def save_filter_comparison(
+    observed_base: torch.Tensor,
+    observed_sets: dict,
+    output_dir: Path,
+) -> None:
+    """Save base vs filtered common-offset comparison figure."""
     base_np = observed_base.detach().cpu().numpy()[:, :, 0]
     filtered_arrays = []
     for key in filter_specs:
@@ -253,15 +336,17 @@ def forward_shots(
         storage_mode=storage_mode,
         storage_compression=storage_compression,
     )
-    return out[-1]  # [nt, shots_in_batch, 1]
+    return out[-1]  # [nt, shots_in_batch, n_receivers]
 
 
 def generate_base_and_filtered_observed():
     with torch.no_grad():
-        wavelet = tide.ricker(
-            base_forward_freq, nt, dt, peak_time=1.0 / base_forward_freq
-        ).to(device)
-        src_amp_full = wavelet.view(1, 1, nt).repeat(n_shots, 1, 1)
+        wavelet_obs = tide.ricker(obs_freq, nt, dt, peak_time=obs_peak).to(device)
+        wavelet_inv = tide.ricker(assumed_freq, nt, dt, peak_time=assumed_peak).to(
+            device
+        )
+        src_amp_obs = wavelet_obs.view(1, 1, nt).repeat(n_shots, 1, 1)
+        src_amp_inv = wavelet_inv.view(1, 1, nt).repeat(n_shots, 1, 1)
 
         obs_list = []
         for shot_indices in make_shot_batches():
@@ -271,7 +356,7 @@ def generate_base_and_filtered_observed():
                     sigma_true,
                     mu_true,
                     shot_indices,
-                    src_amp_full,
+                    src_amp_obs,
                     requires_grad=False,
                 )
             )
@@ -292,7 +377,7 @@ def generate_base_and_filtered_observed():
                 "desc": spec["desc"],
             }
 
-    return observed_base, observed_sets, src_amp_full
+    return observed_base, observed_sets, wavelet_obs, wavelet_inv, src_amp_inv
 
 
 sigma_smooth = 8
@@ -315,17 +400,24 @@ mu_fixed = torch.ones_like(epsilon_inv)
 air_mask = torch.zeros_like(epsilon_inv, dtype=torch.bool)
 air_mask[:air_layer, :] = True
 
-loss_fn = torch.nn.MSELoss()
 all_losses = []
 stage_breaks = []
 
-print("Starting multiscale filtered inversion")
+print("Starting multiscale cross-correlation inversion")
 time_start_all = time.time()
 
 print("Generating base observed data once, then FIR filtering...")
-observed_raw, observed_sets, src_amp_full = generate_base_and_filtered_observed()
-print(f"Base forward modeled at {base_forward_freq / 1e6:.0f} MHz.")
+(
+    observed_raw,
+    observed_sets,
+    wavelet_obs,
+    wavelet_inv,
+    src_amp_inv,
+) = generate_base_and_filtered_observed()
+print(f"Observed data modeled at {obs_freq / 1e6:.0f} MHz.")
+print(f"Inversion modeled at {assumed_freq / 1e6:.0f} MHz.")
 report_pde_totals("After observed generation: ")
+save_wavelet_comparison(wavelet_obs, wavelet_inv, output_dir)
 save_filter_comparison(observed_raw, observed_sets, output_dir)
 
 vmin_stage = epsilon_true_np.min()
@@ -357,14 +449,15 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
                 sigma_fixed,
                 mu_fixed,
                 shot_indices,
-                src_amp_full,
+                src_amp_inv,
                 requires_grad=True,
             )
             add_pde_counts(int(shot_indices.numel()), forward=True)
             syn_filtered = apply_fir_lowpass(syn, dt=dt, cutoff_hz=lowpass_hz)
             obs_batch = observed_filtered[:, shot_indices, :]
-
-            loss = loss_fn(syn_filtered, obs_batch)
+            obs_batch = obs_batch.permute(1, 2, 0)
+            syn_batch = syn_filtered.permute(1, 2, 0)
+            loss = xcorr_loss_global_wavelet(obs_batch, syn_batch)
             loss.backward()
             add_pde_counts(int(shot_indices.numel()), adjoint=True)
             epoch_loss += loss.item()
@@ -390,7 +483,7 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
     optimizer_lbfgs = torch.optim.LBFGS(
         [epsilon_inv],
         lr=1.0,
-        history_size=5,
+        history_size=10,
         max_iter=5,
         line_search_fn="strong_wolfe",
     )
@@ -404,14 +497,15 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
                 sigma_fixed,
                 mu_fixed,
                 shot_indices,
-                src_amp_full,
+                src_amp_inv,
                 requires_grad=True,
             )
             add_pde_counts(int(shot_indices.numel()), forward=True)
             syn_filtered = apply_fir_lowpass(syn, dt=dt, cutoff_hz=lowpass_hz)
             obs_batch = observed_filtered[:, shot_indices, :]
-
-            loss = loss_fn(syn_filtered, obs_batch)
+            obs_batch = obs_batch.permute(1, 2, 0)
+            syn_batch = syn_filtered.permute(1, 2, 0)
+            loss = xcorr_loss_global_wavelet(obs_batch, syn_batch)
             loss.backward()
             add_pde_counts(int(shot_indices.numel()), adjoint=True)
             total_loss = total_loss + loss
@@ -469,23 +563,23 @@ plt.colorbar(im, ax=ax, label="εr")
 
 ax = axes[1, 0]
 im = ax.imshow(eps_result, aspect="auto", vmin=vmin, vmax=vmax)
-ax.set_title("Multiscale Filtered Result")
+ax.set_title("Multiscale Cross-correlation Result")
 ax.set_xlabel("X (grid points)")
 ax.set_ylabel("Y (grid points)")
 plt.colorbar(im, ax=ax, label="εr")
 
 ax = axes[1, 1]
-ax.semilogy(all_losses, label="Loss")
+ax.plot(all_losses, label="Cross-correlation loss")
 for idx in stage_breaks:
     ax.axvline(idx, color="r", linestyle="--", alpha=0.5)
 ax.set_title("Loss Curve (AdamW -> LBFGS stages)")
 ax.set_xlabel("Epoch")
-ax.set_ylabel("MSE Loss")
+ax.set_ylabel("Cross-correlation loss")
 ax.grid(True)
 ax.legend()
 
 plt.tight_layout()
-final_plot = output_dir / "multiscale_filtered_summary.jpg"
+final_plot = output_dir / "multiscale_crosscorr_summary.jpg"
 plt.savefig(final_plot, dpi=150)
 print(f"\nResults saved to '{final_plot}'")
 

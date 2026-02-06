@@ -54,19 +54,6 @@
 #define NUM_BUFFERS 3
 #endif
 
-// Profiling support: enable with -DTIDE_PROFILING during compilation
-#ifdef TIDE_PROFILING
-#define PROF_EVENT_CREATE(e) cudaEventCreate(&(e))
-#define PROF_RECORD(e, s) cudaEventRecord((e), (s))
-#define PROF_ELAPSED(start, end, ms) cudaEventElapsedTime(&(ms), (start), (end))
-#define PROF_PRINT(name, ms) fprintf(stderr, "[TIDE PROF] %s: %.3f ms\n", (name), (ms))
-#else
-#define PROF_EVENT_CREATE(e) ((void)0)
-#define PROF_RECORD(e, s) ((void)0)
-#define PROF_ELAPSED(start, end, ms) ((void)0)
-#define PROF_PRINT(name, ms) ((void)0)
-#endif
-
 #define CAT_I(name, accuracy, dtype, device) \
   maxwell_tm_##accuracy##_##dtype##_##name##_##device
 #define CAT(name, accuracy, dtype, device) \
@@ -1379,29 +1366,12 @@ extern "C" void FUNC(forward_with_storage)(
   bool copy_in_flight[NUM_BUFFERS];
   for (int i = 0; i < NUM_BUFFERS; i++) copy_in_flight[i] = false;
 
-#ifdef TIDE_PROFILING
-  cudaEvent_t prof_wait_start, prof_wait_end, prof_copy_start, prof_copy_end;
-  float total_wait_ms = 0.0f, total_copy_ms = 0.0f;
-  int n_waits = 0, n_copies = 0;
-#endif
-
   if (storage_mode_h == STORAGE_CPU) {
     gpuErrchk(cudaStreamCreateWithFlags(&copy_stream, cudaStreamNonBlocking));
-#ifdef TIDE_PROFILING
-    PROF_EVENT_CREATE(store_ready);
-    PROF_EVENT_CREATE(prof_wait_start);
-    PROF_EVENT_CREATE(prof_wait_end);
-    PROF_EVENT_CREATE(prof_copy_start);
-    PROF_EVENT_CREATE(prof_copy_end);
-    for (int i = 0; i < NUM_BUFFERS; i++) {
-      PROF_EVENT_CREATE(copy_done[i]);
-    }
-#else
     gpuErrchk(cudaEventCreateWithFlags(&store_ready, cudaEventDisableTiming));
     for (int i = 0; i < NUM_BUFFERS; i++) {
       gpuErrchk(cudaEventCreateWithFlags(&copy_done[i], cudaEventDisableTiming));
     }
-#endif
   }
 
   // Copy constants to device with caching to avoid redundant copies
@@ -1507,18 +1477,7 @@ extern "C" void FUNC(forward_with_storage)(
       int64_t const step_idx = t / step_ratio_h;
       int const store_buf = (storage_mode_h == STORAGE_CPU) ? (int)(step_idx % NUM_BUFFERS) : 0;
       if (storage_mode_h == STORAGE_CPU && copy_in_flight[store_buf]) {
-#ifdef TIDE_PROFILING
-        PROF_RECORD(prof_wait_start, 0);
-#endif
         gpuErrchk(cudaStreamWaitEvent(0, copy_done[store_buf], 0));
-#ifdef TIDE_PROFILING
-        PROF_RECORD(prof_wait_end, 0);
-        gpuErrchk(cudaDeviceSynchronize());
-        float wait_ms;
-        PROF_ELAPSED(prof_wait_start, prof_wait_end, wait_ms);
-        total_wait_ms += wait_ms;
-        n_waits++;
-#endif
         copy_in_flight[store_buf] = false;
       }
       size_t const store1_offset = store1_offset_bytes(step_idx);
@@ -1562,9 +1521,6 @@ extern "C" void FUNC(forward_with_storage)(
       if (storage_mode_h == STORAGE_CPU) {
         gpuErrchk(cudaEventRecord(store_ready, 0));
         gpuErrchk(cudaStreamWaitEvent(copy_stream, store_ready, 0));
-#ifdef TIDE_PROFILING
-        PROF_RECORD(prof_copy_start, copy_stream);
-#endif
         if (store_ey) {
           gpuErrchk(cudaMemcpyAsync(
               ey_store_3_t, ey_store_1_t, bytes_per_step_store,
@@ -1575,14 +1531,8 @@ extern "C" void FUNC(forward_with_storage)(
               curl_store_3_t, curl_store_1_t, bytes_per_step_store,
               cudaMemcpyDeviceToHost, copy_stream));
         }
-#ifdef TIDE_PROFILING
-        PROF_RECORD(prof_copy_end, copy_stream);
-#endif
         gpuErrchk(cudaEventRecord(copy_done[store_buf], copy_stream));
         copy_in_flight[store_buf] = true;
-#ifdef TIDE_PROFILING
-        n_copies++;
-#endif
       } else {
         if (store_ey) {
           storage_save_snapshot_gpu(
@@ -1710,27 +1660,11 @@ extern "C" void FUNC(backward)(
   bool copy_in_flight[NUM_BUFFERS];
   for (int i = 0; i < NUM_BUFFERS; i++) copy_in_flight[i] = false;
 
-#ifdef TIDE_PROFILING
-  cudaEvent_t prof_prefetch_start, prof_prefetch_end, prof_wait_start, prof_wait_end;
-  float total_prefetch_ms = 0.0f, total_wait_ms = 0.0f;
-  int n_prefetches = 0, n_waits = 0;
-#endif
-
   if (storage_mode_h == STORAGE_CPU) {
     gpuErrchk(cudaStreamCreateWithFlags(&copy_stream, cudaStreamNonBlocking));
-#ifdef TIDE_PROFILING
-    PROF_EVENT_CREATE(prof_prefetch_start);
-    PROF_EVENT_CREATE(prof_prefetch_end);
-    PROF_EVENT_CREATE(prof_wait_start);
-    PROF_EVENT_CREATE(prof_wait_end);
-    for (int i = 0; i < NUM_BUFFERS; i++) {
-      PROF_EVENT_CREATE(copy_done[i]);
-    }
-#else
     for (int i = 0; i < NUM_BUFFERS; i++) {
       gpuErrchk(cudaEventCreateWithFlags(&copy_done[i], cudaEventDisableTiming));
     }
-#endif
   }
 
   // Copy constants to device with caching to avoid redundant copies
@@ -1827,9 +1761,6 @@ extern "C" void FUNC(backward)(
     if (copy_in_flight[store_buf]) {
       gpuErrchk(cudaStreamWaitEvent(copy_stream, copy_done[store_buf], 0));
     }
-#ifdef TIDE_PROFILING
-    PROF_RECORD(prof_prefetch_start, copy_stream);
-#endif
     size_t const store1_offset = store1_offset_bytes(store_idx);
     size_t const store3_offset = store3_offset_bytes(store_idx);
     void *ey_store_1_t = (uint8_t *)ey_store_1 + store1_offset;
@@ -1846,14 +1777,8 @@ extern "C" void FUNC(backward)(
           curl_store_1_t, curl_store_3_t, bytes_per_step_store,
           cudaMemcpyHostToDevice, copy_stream));
     }
-#ifdef TIDE_PROFILING
-    PROF_RECORD(prof_prefetch_end, copy_stream);
-#endif
     gpuErrchk(cudaEventRecord(copy_done[store_buf], copy_stream));
     copy_in_flight[store_buf] = true;
-#ifdef TIDE_PROFILING
-    n_prefetches++;
-#endif
   };
 
   int64_t const t_min = start_t - nt;
@@ -1907,18 +1832,7 @@ extern "C" void FUNC(backward)(
       if (!copy_in_flight[store_buf]) {
         prefetch_snapshots(store_idx, grad_ey, grad_curl);
       }
-#ifdef TIDE_PROFILING
-      PROF_RECORD(prof_wait_start, 0);
-#endif
       gpuErrchk(cudaStreamWaitEvent(0, copy_done[store_buf], 0));
-#ifdef TIDE_PROFILING
-      PROF_RECORD(prof_wait_end, 0);
-      gpuErrchk(cudaDeviceSynchronize());
-      float wait_ms;
-      PROF_ELAPSED(prof_wait_start, prof_wait_end, wait_ms);
-      total_wait_ms += wait_ms;
-      n_waits++;
-#endif
       copy_in_flight[store_buf] = false;
     } else if (storage_mode_h == STORAGE_DISK) {
       if (grad_ey) {
@@ -1995,28 +1909,6 @@ extern "C" void FUNC(backward)(
 
   if (storage_mode_h == STORAGE_CPU) {
     gpuErrchk(cudaStreamSynchronize(copy_stream));
-#ifdef TIDE_PROFILING
-    // Compute and print profiling statistics
-    if (n_prefetches > 0) {
-      gpuErrchk(cudaDeviceSynchronize());
-      float avg_prefetch_ms = 0.0f;
-      for (int i = 0; i < NUM_BUFFERS; i++) {
-        float ms;
-        // Note: per-copy timing would require more events
-      }
-      PROF_PRINT("Backward H2D prefetch count", (float)n_prefetches);
-    }
-    if (n_waits > 0) {
-      float avg_wait_ms = total_wait_ms / n_waits;
-      PROF_PRINT("Backward avg wait time", avg_wait_ms);
-      PROF_PRINT("Backward total wait time", total_wait_ms);
-    }
-    PROF_EVENT_CREATE(prof_prefetch_start); // Dummy to avoid unused warning
-    cudaEventDestroy(prof_prefetch_start);
-    cudaEventDestroy(prof_prefetch_end);
-    cudaEventDestroy(prof_wait_start);
-    cudaEventDestroy(prof_wait_end);
-#endif
     for (int i = 0; i < NUM_BUFFERS; i++) {
       gpuErrchk(cudaEventDestroy(copy_done[i]));
     }

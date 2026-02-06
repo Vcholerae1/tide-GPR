@@ -27,6 +27,24 @@ model_gradient_sampling_interval = 5
 storage_mode = "device"
 storage_compression = "fp8"
 
+# Empirical conductivity model (sigma) from permittivity (epsilon)
+sigma_min = 0.0
+sigma_k = 1e-4
+sigma_p = 2.0
+sigma_max = 0.005
+sigma_init_scale = 1.0
+
+# Optimizer learning rates
+lr_eps = 1e-2
+lr_sigma = 1e-2
+lbfgs_lr = 1
+
+# Sigma parameter scaling (x stores sigma_hat = sigma / (sigma0 * beta_scale)).
+sigma0 = 1.0 / 377.0
+beta_scale = 0.7
+gamma_sigma = 0.25
+sigma_scale = sigma0 * beta_scale
+
 model_path = "examples/data/OverThrust.npy"
 epsilon_true_raw = np.load(model_path)
 print(f"Loaded model shape: {epsilon_true_raw.shape}")
@@ -38,8 +56,17 @@ ny, nx = epsilon_true_raw.shape
 epsilon_true_np = epsilon_true_raw.copy()
 epsilon_true_np[:air_layer, :] = 1.0
 
-sigma_true_np = np.ones_like(epsilon_true_np) * 1e-3
+def sigma_from_epsilon_np(eps: np.ndarray) -> np.ndarray:
+    eps_eff = np.maximum(eps - 1.0, 0.0)
+    sigma = sigma_min + sigma_k * np.power(eps_eff, sigma_p)
+    return np.clip(sigma, 0.0, sigma_max)
+
+
+sigma_true_np = sigma_from_epsilon_np(epsilon_true_np)
 sigma_true_np[:air_layer, :] = 0.0
+print(
+    f"Sigma range (empirical): {sigma_true_np.min():.2e} - {sigma_true_np.max():.2e}"
+)
 
 epsilon_true = torch.tensor(epsilon_true_np, dtype=torch.float32, device=device)
 sigma_true = torch.tensor(sigma_true_np, dtype=torch.float32, device=device)
@@ -80,10 +107,19 @@ for item in inversion_schedule:
         f"  {item['data_key']}: AdamW {item['adamw_epochs']}e  "
         f"LBFGS {item['lbfgs_epochs']}e"
     )
+print("Stage strategy: all stages = joint epsilon + sigma")
+print(
+    "Sigma empirical model: "
+    f"sigma = clamp({sigma_min} + {sigma_k} * max(eps-1,0)^{sigma_p}, 0, {sigma_max})"
+)
+print(
+    f"Sigma parameterization: sigma_hat = sigma / (sigma0*beta), "
+    f"sigma0={sigma0:.6e}, beta={beta_scale:.3f}, gamma={gamma_sigma:.3f}"
+)
 
 lowpass_tag = "-".join(str(spec["lowpass_mhz"]) for spec in filter_specs.values())
 output_dir = Path("outputs") / (
-    f"multiscale_fir_base{int(base_forward_freq / 1e6)}MHz_lp{lowpass_tag}_shots{n_shots}_bs{batch_size}_nt{nt}"
+    f"multiscale_fir_joint_eps_sigma_base{int(base_forward_freq / 1e6)}MHz_lp{lowpass_tag}_shots{n_shots}_bs{batch_size}_nt{nt}"
 )
 output_dir.mkdir(parents=True, exist_ok=True)
 print(f"Saving figures to: {output_dir}")
@@ -119,6 +155,10 @@ def report_pde_delta(prefix: str, forward_start: float, adjoint_start: float) ->
     forward = pde_counts["forward"] - forward_start
     adjoint = pde_counts["adjoint"] - adjoint_start
     print(f"{prefix}PDE solves: {format_pde_counts(forward, adjoint)}")
+
+
+def sigma_scaled_to_physical(sigma_scaled: torch.Tensor) -> torch.Tensor:
+    return sigma_scaled * sigma_scale
 
 
 def make_shot_batches() -> list[torch.Tensor]:
@@ -215,14 +255,19 @@ def save_filter_comparison(
 
 
 def save_model_snapshot(
-    eps_array: np.ndarray, title: str, filename: Path, vmin: float, vmax: float
+    array: np.ndarray,
+    title: str,
+    filename: Path,
+    vmin: float,
+    vmax: float,
+    cbar_label: str,
 ) -> None:
     fig, ax = plt.subplots(figsize=(7, 5))
-    im = ax.imshow(eps_array, aspect="auto", vmin=vmin, vmax=vmax)
+    im = ax.imshow(array, aspect="auto", vmin=vmin, vmax=vmax)
     ax.set_title(title)
     ax.set_xlabel("X (grid points)")
     ax.set_ylabel("Y (grid points)")
-    plt.colorbar(im, ax=ax, label="εr")
+    plt.colorbar(im, ax=ax, label=cbar_label)
     plt.tight_layout()
     plt.savefig(filename, dpi=150)
     plt.close(fig)
@@ -300,26 +345,59 @@ epsilon_init_raw = gaussian_filter(epsilon_true_raw, sigma=sigma_smooth)
 epsilon_init_np = epsilon_init_raw.copy()
 epsilon_init_np[:air_layer, :] = 1.0
 
-sigma_init_np = np.ones_like(epsilon_init_np) * 0
-sigma_init_np[:air_layer, :] = 0.0
+# Build sigma initial model in physical domain first.
+sigma_init_base_np = sigma_from_epsilon_np(epsilon_init_np) * sigma_init_scale
+sigma_init_base_np = np.clip(sigma_init_base_np, 0.0, sigma_max)
+sigma_init_base_np[:air_layer, :] = 0.0
+
+# Apply smoothing after parameter scaling (sigma_hat domain).
+sigma_init_scaled_np = sigma_init_base_np / sigma_scale
+sigma_init_scaled_np[air_layer:, :] = gaussian_filter(
+    sigma_init_scaled_np[air_layer:, :], sigma=sigma_smooth
+)
+sigma_init_scaled_np = np.maximum(sigma_init_scaled_np, 0.0)
+sigma_init_scaled_np[:air_layer, :] = 0.0
+sigma_init_np = sigma_init_scaled_np * sigma_scale
 
 epsilon_init = torch.tensor(epsilon_init_np, dtype=torch.float32, device=device)
 sigma_init = torch.tensor(sigma_init_np, dtype=torch.float32, device=device)
+sigma_init_scaled = torch.tensor(
+    sigma_init_scaled_np, dtype=torch.float32, device=device
+)
 
 epsilon_inv = epsilon_init.clone().detach()
 epsilon_inv.requires_grad_(True)
 
-sigma_fixed = sigma_init.clone().detach()
+sigma_fixed = sigma_init_scaled.clone().detach()
+sigma_inv = sigma_init_scaled.clone().detach()
+sigma_inv.requires_grad_(False)
 mu_fixed = torch.ones_like(epsilon_inv)
 
 air_mask = torch.zeros_like(epsilon_inv, dtype=torch.bool)
 air_mask[:air_layer, :] = True
 
+eps_min = 1.0
+eps_max = 81.0
+sigma_floor = 1e-8
+sigma_floor_scaled = sigma_floor / sigma_scale
+
+
+def project_model_parameters(optimize_sigma: bool) -> None:
+    with torch.no_grad():
+        epsilon_inv.nan_to_num_(nan=eps_min, posinf=eps_max, neginf=eps_min)
+        epsilon_inv.clamp_(eps_min, eps_max)
+        epsilon_inv[air_mask] = 1.0
+        if optimize_sigma:
+            sigma_inv[~torch.isfinite(sigma_inv)] = sigma_floor_scaled
+            sigma_inv.clamp_min_(sigma_floor_scaled)
+            sigma_inv[air_mask] = 0.0
+
+
 loss_fn = torch.nn.MSELoss()
 all_losses = []
 stage_breaks = []
 
-print("Starting multiscale filtered inversion")
+print("Starting multiscale joint epsilon-sigma inversion")
 time_start_all = time.time()
 
 print("Generating base observed data once, then FIR filtering...")
@@ -328,8 +406,10 @@ print(f"Base forward modeled at {base_forward_freq / 1e6:.0f} MHz.")
 report_pde_totals("After observed generation: ")
 save_filter_comparison(observed_raw, observed_sets, output_dir)
 
-vmin_stage = epsilon_true_np.min()
-vmax_stage = epsilon_true_np.max()
+vmin_eps = epsilon_true_np.min()
+vmax_eps = epsilon_true_np.max()
+vmin_sigma = sigma_true_np.min()
+vmax_sigma = sigma_true_np.max()
 
 for stage_idx, cfg in enumerate(inversion_schedule, 1):
     data_key = cfg["data_key"]
@@ -338,14 +418,33 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
     n_epochs_lbfgs = int(cfg["lbfgs_epochs"])
     lowpass_hz = obs_cfg["lowpass_hz"]
 
-    print(f"\n==== Stage {stage_idx}: {obs_cfg['desc']} ====")
+    optimize_sigma = True
+    sigma_inv.requires_grad_(True)
+    sigma_current = sigma_inv
+    stage_mode = "joint eps+sigma"
+    project_model_parameters(optimize_sigma)
+
+    print(f"\n==== Stage {stage_idx}: {obs_cfg['desc']} ({stage_mode}) ====")
     observed_filtered = obs_cfg["data"]
     stage_forward_start = pde_counts["forward"]
     stage_adjoint_start = pde_counts["adjoint"]
 
     # Stage 1: AdamW
     optimizer_adamw = torch.optim.AdamW(
-        [epsilon_inv], lr=0.01, betas=(0.9, 0.99), weight_decay=1e-3
+        [
+            {
+                "params": [epsilon_inv],
+                "lr": lr_eps,
+                "betas": (0.9, 0.99),
+                "weight_decay": 1e-3,
+            },
+            {
+                "params": [sigma_inv],
+                "lr": lr_sigma,
+                "betas": (0.9, 0.99),
+                "weight_decay": 1e-3,
+            },
+        ]
     )
     for epoch in range(n_epochs_adamw):
         optimizer_adamw.zero_grad()
@@ -354,7 +453,7 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
         for shot_indices in make_shot_batches():
             syn = forward_shots(
                 epsilon_inv,
-                sigma_fixed,
+                sigma_scaled_to_physical(sigma_current),
                 mu_fixed,
                 shot_indices,
                 src_amp_full,
@@ -375,33 +474,40 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
             if valid_grads.numel() > 0:
                 clip_val = torch.quantile(valid_grads, 0.98)
                 torch.nn.utils.clip_grad_value_([epsilon_inv], clip_val.item())
+        if optimize_sigma and sigma_inv.grad is not None:
+            sigma_inv.grad[air_mask] = 0.0
+            valid_sigma = sigma_inv.grad[~air_mask].abs()
+            if valid_sigma.numel() > 0:
+                clip_val = torch.quantile(valid_sigma, 0.98)
+                torch.nn.utils.clip_grad_value_([sigma_inv], clip_val.item())
+            sigma_inv.grad.mul_(gamma_sigma)
 
         optimizer_adamw.step()
-
-        with torch.no_grad():
-            epsilon_inv.clamp_(1.0, 9.0)
-            epsilon_inv[air_mask] = 1.0
+        project_model_parameters(optimize_sigma)
 
         all_losses.append(epoch_loss)
         if (epoch + 1) % 1 == 0 or epoch == 0:
             print(f"  AdamW epoch {epoch + 1}/{n_epochs_adamw}  Loss={epoch_loss:.6e}")
 
     # Stage 2: L-BFGS
+    lbfgs_params = [epsilon_inv, sigma_inv]
     optimizer_lbfgs = torch.optim.LBFGS(
-        [epsilon_inv],
-        lr=1.0,
+        lbfgs_params,
+        lr=lbfgs_lr,
         history_size=5,
         max_iter=5,
         line_search_fn="strong_wolfe",
     )
+    lbfgs_sigma_scale = gamma_sigma
 
     def closure():
+        project_model_parameters(optimize_sigma)
         optimizer_lbfgs.zero_grad()
         total_loss = torch.zeros((), device=device)
         for shot_indices in make_shot_batches():
             syn = forward_shots(
                 epsilon_inv,
-                sigma_fixed,
+                sigma_scaled_to_physical(sigma_current),
                 mu_fixed,
                 shot_indices,
                 src_amp_full,
@@ -422,13 +528,18 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
             if valid_grads.numel() > 0:
                 clip_val = torch.quantile(valid_grads, 0.98)
                 torch.nn.utils.clip_grad_value_([epsilon_inv], clip_val.item())
+        if optimize_sigma and sigma_inv.grad is not None:
+            sigma_inv.grad[air_mask] = 0.0
+            valid_sigma = sigma_inv.grad[~air_mask].abs()
+            if valid_sigma.numel() > 0:
+                clip_val = torch.quantile(valid_sigma, 0.98)
+                torch.nn.utils.clip_grad_value_([sigma_inv], clip_val.item())
+            sigma_inv.grad.mul_(lbfgs_sigma_scale)
         return total_loss
 
     for epoch in range(n_epochs_lbfgs):
         loss = optimizer_lbfgs.step(closure)
-        with torch.no_grad():
-            epsilon_inv.clamp_(1.0, 9.0)
-            epsilon_inv[air_mask] = 1.0
+        project_model_parameters(optimize_sigma)
         loss_value = loss.item()
         all_losses.append(loss_value)
         print(f"  LBFGS epoch {epoch + 1}/{n_epochs_lbfgs}  Loss={loss_value:.6e}")
@@ -436,9 +547,23 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
     stage_breaks.append(len(all_losses) - 1)
     report_pde_delta(f"Stage {stage_idx} ", stage_forward_start, stage_adjoint_start)
     eps_stage = epsilon_inv.detach().cpu().numpy()
-    stage_title = f"{obs_cfg['desc']} inversion result"
-    stage_fname = output_dir / f"epsilon_stage_{data_key}.jpg"
-    save_model_snapshot(eps_stage, stage_title, stage_fname, vmin_stage, vmax_stage)
+    sigma_stage = sigma_scaled_to_physical(sigma_inv).detach().cpu().numpy()
+    stage_title_eps = f"{obs_cfg['desc']} epsilon inversion result"
+    stage_fname_eps = output_dir / f"epsilon_stage_{data_key}.jpg"
+    save_model_snapshot(
+        eps_stage, stage_title_eps, stage_fname_eps, vmin_eps, vmax_eps, "εr"
+    )
+    sigma_suffix = "inversion result"
+    stage_title_sigma = f"{obs_cfg['desc']} sigma {sigma_suffix}"
+    stage_fname_sigma = output_dir / f"sigma_stage_{data_key}.jpg"
+    save_model_snapshot(
+        sigma_stage,
+        stage_title_sigma,
+        stage_fname_sigma,
+        vmin_sigma,
+        vmax_sigma,
+        "σ (S/m)",
+    )
 
 time_all = time.time() - time_start_all
 print(f"\nTotal inversion time: {time_all:.2f}s")
@@ -448,33 +573,60 @@ eps_true = epsilon_true.cpu().numpy()
 eps_init = epsilon_init.cpu().numpy()
 eps_result = epsilon_inv.detach().cpu().numpy()
 
-vmin = eps_true.min()
-vmax = eps_true.max()
+sigma_true_arr = sigma_true.cpu().numpy()
+sigma_init_arr = sigma_init.cpu().numpy()
+sigma_result = sigma_scaled_to_physical(sigma_inv).detach().cpu().numpy()
 
-fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
 ax = axes[0, 0]
-im = ax.imshow(eps_true, aspect="auto", vmin=vmin, vmax=vmax)
-ax.set_title("True Model")
+im = ax.imshow(eps_true, aspect="auto", vmin=vmin_eps, vmax=vmax_eps)
+ax.set_title("Epsilon True")
 ax.set_xlabel("X (grid points)")
 ax.set_ylabel("Y (grid points)")
 plt.colorbar(im, ax=ax, label="εr")
 
 ax = axes[0, 1]
-im = ax.imshow(eps_init, aspect="auto", vmin=vmin, vmax=vmax)
-ax.set_title("Initial Model (Smoothed)")
+im = ax.imshow(eps_init, aspect="auto", vmin=vmin_eps, vmax=vmax_eps)
+ax.set_title("Epsilon Init (Smoothed)")
+ax.set_xlabel("X (grid points)")
+ax.set_ylabel("Y (grid points)")
+plt.colorbar(im, ax=ax, label="εr")
+
+ax = axes[0, 2]
+im = ax.imshow(eps_result, aspect="auto", vmin=vmin_eps, vmax=vmax_eps)
+ax.set_title("Epsilon Result")
 ax.set_xlabel("X (grid points)")
 ax.set_ylabel("Y (grid points)")
 plt.colorbar(im, ax=ax, label="εr")
 
 ax = axes[1, 0]
-im = ax.imshow(eps_result, aspect="auto", vmin=vmin, vmax=vmax)
-ax.set_title("Multiscale Filtered Result")
+im = ax.imshow(sigma_true_arr, aspect="auto", vmin=vmin_sigma, vmax=vmax_sigma)
+ax.set_title("Sigma True")
 ax.set_xlabel("X (grid points)")
 ax.set_ylabel("Y (grid points)")
-plt.colorbar(im, ax=ax, label="εr")
+plt.colorbar(im, ax=ax, label="σ (S/m)")
 
 ax = axes[1, 1]
+im = ax.imshow(sigma_init_arr, aspect="auto", vmin=vmin_sigma, vmax=vmax_sigma)
+ax.set_title("Sigma Init")
+ax.set_xlabel("X (grid points)")
+ax.set_ylabel("Y (grid points)")
+plt.colorbar(im, ax=ax, label="σ (S/m)")
+
+ax = axes[1, 2]
+im = ax.imshow(sigma_result, aspect="auto", vmin=vmin_sigma, vmax=vmax_sigma)
+ax.set_title("Sigma Result")
+ax.set_xlabel("X (grid points)")
+ax.set_ylabel("Y (grid points)")
+plt.colorbar(im, ax=ax, label="σ (S/m)")
+
+plt.tight_layout()
+final_plot = output_dir / "multiscale_joint_eps_sigma_summary.jpg"
+plt.savefig(final_plot, dpi=150)
+print(f"\nResults saved to '{final_plot}'")
+
+fig, ax = plt.subplots(figsize=(8, 5))
 ax.semilogy(all_losses, label="Loss")
 for idx in stage_breaks:
     ax.axvline(idx, color="r", linestyle="--", alpha=0.5)
@@ -483,23 +635,31 @@ ax.set_xlabel("Epoch")
 ax.set_ylabel("MSE Loss")
 ax.grid(True)
 ax.legend()
-
 plt.tight_layout()
-final_plot = output_dir / "multiscale_filtered_summary.jpg"
-plt.savefig(final_plot, dpi=150)
-print(f"\nResults saved to '{final_plot}'")
+loss_plot = output_dir / "multiscale_joint_eps_sigma_loss.jpg"
+plt.savefig(loss_plot, dpi=150)
+print(f"Saved loss curve to '{loss_plot}'")
 
-# Save inverted model for metrics computation
+# Save inverted models for metrics computation
 np.save(output_dir / "epsilon_inverted.npy", eps_result)
+np.save(output_dir / "sigma_inverted.npy", sigma_result)
 print(f"Saved inverted model to '{output_dir / 'epsilon_inverted.npy'}'")
+print(f"Saved inverted model to '{output_dir / 'sigma_inverted.npy'}'")
 
 mask = ~(air_mask.cpu().numpy())
-rms_init = np.sqrt(np.mean((eps_init[mask] - eps_true[mask]) ** 2))
-rms_result = np.sqrt(np.mean((eps_result[mask] - eps_true[mask]) ** 2))
+rms_init_eps = np.sqrt(np.mean((eps_init[mask] - eps_true[mask]) ** 2))
+rms_result_eps = np.sqrt(np.mean((eps_result[mask] - eps_true[mask]) ** 2))
+rms_init_sigma = np.sqrt(np.mean((sigma_init_arr[mask] - sigma_true_arr[mask]) ** 2))
+rms_result_sigma = np.sqrt(
+    np.mean((sigma_result[mask] - sigma_true_arr[mask]) ** 2)
+)
 
-print(f"RMS Error (Initial):  {rms_init:.4f}")
-print(f"RMS Error (Inverted): {rms_result:.4f}")
-print(f"Improvement: {(1 - rms_result / rms_init) * 100:.1f}%")
+print(f"RMS Error ε (Initial):  {rms_init_eps:.4f}")
+print(f"RMS Error ε (Inverted): {rms_result_eps:.4f}")
+print(f"ε Improvement: {(1 - rms_result_eps / rms_init_eps) * 100:.1f}%")
+print(f"RMS Error σ (Initial):  {rms_init_sigma:.4e}")
+print(f"RMS Error σ (Inverted): {rms_result_sigma:.4e}")
+print(f"σ Improvement: {(1 - rms_result_sigma / rms_init_sigma) * 100:.1f}%")
 
 print("\n=== Timing Summary ===")
 print(f"Total inversion time: {time_all:.2f}s")

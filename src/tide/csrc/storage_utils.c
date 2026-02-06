@@ -76,3 +76,4 @@ void storage_load_snapshot_cpu(void* store_1, FILE* fp, int64_t storage_mode,
     }
   }
 }
+
