@@ -45,7 +45,7 @@ epsilon_true = torch.tensor(epsilon_true_np, dtype=torch.float32, device=device)
 sigma_true = torch.tensor(sigma_true_np, dtype=torch.float32, device=device)
 mu_true = torch.ones_like(epsilon_true)
 
-source_depth = air_layer + 1
+source_depth = air_layer - 1
 source_x = torch.arange(n_shots, device=device) * d_source + first_source
 
 source_locations = torch.zeros(n_shots, 1, 2, dtype=torch.long, device=device)
