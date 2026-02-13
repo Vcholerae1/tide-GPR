@@ -288,6 +288,13 @@ def maxwelltm(
     freq_taper_frac = validate_freq_taper_frac(freq_taper_frac)
     time_pad_frac = validate_time_pad_frac(time_pad_frac)
 
+    # MPS (Apple GPU) dtype guard: Metal does not support float64
+    if epsilon.device.type == "mps" and epsilon.dtype == torch.float64:
+        raise TypeError(
+            "Apple MPS backend does not support float64 (double precision). "
+            "Please use float32 tensors, e.g.: epsilon.float()"
+        )
+
     # Check inputs
     if source_location is not None and source_location.numel() > 0:
         if source_location[..., 0].max() >= epsilon.shape[-2]:
@@ -447,8 +454,24 @@ def maxwell_func(
     global _update_E_jit, _update_E_compile, _update_E_opt
     global _update_H_jit, _update_H_compile, _update_H_opt
 
+    # Detect device from the first positional arg (epsilon tensor)
+    _device_type = args[0].device.type if len(args) > 0 and isinstance(args[0], torch.Tensor) else "cpu"
+
     # Check if we should use Python backend or C/CUDA backend
     use_python = python_backend
+
+    # MPS (Apple GPU): prefer the compiled Metal backend when available.
+    # Falls back to the Python/PyTorch backend only when Metal kernels are
+    # not compiled into the shared library.
+    if _device_type == "mps" and not use_python:
+        try:
+            from . import backend_utils
+
+            if not backend_utils.metal_available():
+                use_python = True
+        except ImportError:
+            use_python = True
+
     if not use_python:
         # Try to use C/CUDA backend
         try:
@@ -1199,6 +1222,41 @@ def maxwell_c_cuda(
     dtype = epsilon.dtype
     model_ny, model_nx = epsilon.shape  # Original model dimensions
 
+    # MPS (Apple GPU) bridging: The Metal C bridge creates its own MTLBuffers
+    # internally, so we need tensors with valid CPU data_ptr() values.
+    # MPS tensor data_ptr() returns Metal GPU buffer handles that cannot be
+    # read from host code. Moving to CPU on Apple Silicon unified memory is
+    # near-zero-cost (metadata change only, no data copy).
+    _original_device = device
+    # _backend_device: used for get_backend_function() symbol lookup.
+    # For MPS, tensors live on CPU but we dispatch to the _mps symbols.
+    _backend_device = device
+    if device.type == "mps":
+        device = torch.device("cpu")
+        epsilon = epsilon.to(device)
+        sigma = sigma.to(device)
+        mu = mu.to(device)
+        if source_amplitude is not None:
+            source_amplitude = source_amplitude.to(device)
+        if source_location is not None:
+            source_location = source_location.to(device)
+        if receiver_location is not None:
+            receiver_location = receiver_location.to(device)
+        if Ey_0 is not None:
+            Ey_0 = Ey_0.to(device)
+        if Hx_0 is not None:
+            Hx_0 = Hx_0.to(device)
+        if Hz_0 is not None:
+            Hz_0 = Hz_0.to(device)
+        if m_Ey_x_0 is not None:
+            m_Ey_x_0 = m_Ey_x_0.to(device)
+        if m_Ey_z_0 is not None:
+            m_Ey_z_0 = m_Ey_z_0.to(device)
+        if m_Hx_z_0 is not None:
+            m_Hx_z_0 = m_Hx_z_0.to(device)
+        if m_Hz_x_0 is not None:
+            m_Hz_x_0 = m_Hz_x_0.to(device)
+
     # Normalize grid_spacing to list
     grid_spacing = _normalize_grid_spacing_2d(grid_spacing)
     dy, dx = grid_spacing
@@ -1574,6 +1632,7 @@ def maxwell_c_cuda(
             m_Hx_z,
             m_Hz_x,
             n_threads_val,
+            _backend_device,
         )
         # Unpack result (drop context handle if present)
         if len(result) == 9:
@@ -1612,7 +1671,7 @@ def maxwell_c_cuda(
             ),
         )
 
-        return (
+        result = (
             Ey_out[s],
             Hx_out[s],
             Hz_out[s],
@@ -1622,12 +1681,15 @@ def maxwell_c_cuda(
             m_Hz_x_out[s],
             receiver_amplitudes,
         )
+        if _original_device != device:
+            result = tuple(t.to(_original_device) for t in result)
+        return result
     else:
         # Direct call without autograd for inference
         # Get the backend function
         try:
             forward_func = backend_utils.get_backend_function(
-                "maxwell_tm", "forward", stencil, dtype, device
+                "maxwell_tm", "forward", stencil, dtype, _backend_device
             )
         except AttributeError as e:
             raise RuntimeError(
@@ -1748,7 +1810,7 @@ def maxwell_c_cuda(
             ),
         )
 
-        return (
+        result = (
             Ey[s],
             Hx[s],
             Hz[s],
@@ -1758,6 +1820,9 @@ def maxwell_c_cuda(
             m_Hz_x[s],
             receiver_amplitudes,
         )
+        if _original_device != device:
+            result = tuple(t.to(_original_device) for t in result)
+        return result
 
 
 class MaxwellTMForwardFunc(torch.autograd.Function):
@@ -1827,12 +1892,14 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         m_Hx_z: torch.Tensor,
         m_Hz_x: torch.Tensor,
         n_threads: int,
+        backend_device: torch.device,
     ) -> tuple[Any, ...]:
         """Performs the forward propagation of the Maxwell TM equations."""
         from . import backend_utils
 
         device = Ey.device
         dtype = Ey.dtype
+        _backend_device = backend_device
 
         ca_requires_grad = ca.requires_grad
         cb_requires_grad = cb.requires_grad
@@ -1958,7 +2025,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
 
             # Get the backend function with storage
             forward_func = backend_utils.get_backend_function(
-                "maxwell_tm", "forward_with_storage", accuracy, dtype, device
+                "maxwell_tm", "forward_with_storage", accuracy, dtype, _backend_device
             )
 
             # Determine effective callback frequency
@@ -2061,7 +2128,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         else:
             # Use regular forward without storage
             forward_func = backend_utils.get_backend_function(
-                "maxwell_tm", "forward", accuracy, dtype, device
+                "maxwell_tm", "forward", accuracy, dtype, _backend_device
             )
 
             # Call the C/CUDA function
@@ -2194,6 +2261,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             _m_Hx_z,
             _m_Hz_x,
             n_threads,
+            _backend_device,
         ) = inputs
 
         outputs = output if isinstance(output, tuple) else (output,)
@@ -2282,6 +2350,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         ctx.callback_frequency = callback_frequency
         ctx.source_amplitudes_scaled = ctx_data["source_amplitudes_scaled"]
         ctx.n_threads = n_threads
+        ctx._backend_device = _backend_device
 
     @staticmethod
     def backward(
@@ -2330,6 +2399,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
 
         device = ca.device
         dtype = ca.dtype
+        _backend_device = ctx._backend_device
 
         rdy = ctx.rdy
         rdx = ctx.rdx
@@ -2451,7 +2521,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
 
         # Get the backend function
         backward_func = backend_utils.get_backend_function(
-            "maxwell_tm", "backward", accuracy, dtype, device
+            "maxwell_tm", "backward", accuracy, dtype, _backend_device
         )
 
         # Determine effective callback frequency
@@ -2648,4 +2718,5 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             None,
             None,  # m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x
             None,  # n_threads
+            None,  # _backend_device
         )

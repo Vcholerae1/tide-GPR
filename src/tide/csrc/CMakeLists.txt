@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.18)
 project(tide_backend LANGUAGES C CXX)
 
 option(TIDE_ENABLE_CUDA "Enable CUDA backend" ON)
+option(TIDE_ENABLE_METAL "Enable Metal backend (Apple GPU)" ON)
 
 # Detect and enable CUDA if present and enabled
 if(TIDE_ENABLE_CUDA)
@@ -284,9 +285,48 @@ if(CUDAToolkit_FOUND)
     set_source_files_properties(${STORAGE_UTILS_CUDA_SRC} PROPERTIES CUDA_ARCHITECTURES "${TIDE_CUDA_ARCHES}")
 endif()
 
+# --- Metal backend (Apple GPU) ---
+# Uses runtime shader compilation (no offline Metal compiler needed).
+# The .metal source is loaded and compiled by the Metal framework at first use.
+set(TIDE_METAL_FOUND FALSE)
+if(TIDE_ENABLE_METAL AND APPLE)
+    set(TIDE_METAL_FOUND TRUE)
+    message(STATUS "Metal backend enabled (runtime shader compilation)")
+
+    # Compile Obj-C++ bridge
+    set(METAL_BRIDGE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/maxwell_metal.mm)
+    set(METAL_BRIDGE_TARGET maxwell_metal_obj)
+    add_library(${METAL_BRIDGE_TARGET} OBJECT ${METAL_BRIDGE_SRC})
+    set_target_properties(${METAL_BRIDGE_TARGET} PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+    )
+    target_compile_options(${METAL_BRIDGE_TARGET} PRIVATE
+        -fobjc-arc -std=c++17
+    )
+    if(CMAKE_BUILD_TYPE MATCHES Release)
+        target_compile_options(${METAL_BRIDGE_TARGET} PRIVATE -O2)
+    endif()
+    target_include_directories(${METAL_BRIDGE_TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    list(APPEND TIDE_OBJECTS $<TARGET_OBJECTS:${METAL_BRIDGE_TARGET}>)
+endif()
+
 # --- Final Library Build ---
 # Combine all objects into a single shared library
 add_library(tide_C SHARED ${TIDE_OBJECTS} ${STORAGE_UTILS_CUDA_SRC} ${STORAGE_UTILS_CPU_SRC})
+
+# Link Metal frameworks and copy shader source if Metal backend is enabled
+if(TIDE_METAL_FOUND)
+    target_link_libraries(tide_C PRIVATE "-framework Metal" "-framework Foundation")
+    # Copy .metal shader source next to the shared library for runtime loading
+    set(METAL_SHADER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/maxwell.metal)
+    set(METAL_OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
+    add_custom_command(TARGET tide_C POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${METAL_SHADER_SRC}
+                ${METAL_OUTPUT_DIR}/maxwell.metal
+        COMMENT "Copying maxwell.metal shader source to output directory"
+    )
+endif()
 
 if(WIN32)
     set_target_properties(tide_C PROPERTIES OUTPUT_NAME "libtide_C")
@@ -332,6 +372,11 @@ if(CUDAToolkit_FOUND)
 else()
     message(STATUS "  CUDA: OFF")
 endif()
+if(TIDE_METAL_FOUND)
+    message(STATUS "  Metal: ON")
+else()
+    message(STATUS "  Metal: OFF")
+endif()
 message(STATUS "  Output Directory: ${CMAKE_CURRENT_SOURCE_DIR}/..")
 message(STATUS "")
 
@@ -341,6 +386,11 @@ install(TARGETS tide_C
     ARCHIVE DESTINATION tide
     RUNTIME DESTINATION tide
 )
+
+# Install .metal shader source alongside the library
+if(TIDE_METAL_FOUND)
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/maxwell.metal DESTINATION tide)
+endif()
 
 # Bundle OpenMP runtime on Windows (Clang's libomp.dll)
 if(WIN32)

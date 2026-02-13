@@ -9,7 +9,7 @@ from scipy.ndimage import gaussian_filter
 
 import tide
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 print(f"Using device: {device}")
 
 dx = 0.02
@@ -22,10 +22,9 @@ n_shots = 100
 d_source = 4
 first_source = 0
 # Shots per batch (batch size).
-batch_size = 16
+batch_size = 8
 model_gradient_sampling_interval = 5
-storage_mode = "device"
-storage_compression = "fp8"
+
 
 # Empirical conductivity model (sigma) from permittivity (epsilon)
 sigma_min = 0.0
@@ -36,7 +35,7 @@ sigma_init_scale = 1.0
 
 # Optimizer learning rates
 lr_eps = 1e-2
-lr_sigma = 1e-2
+lr_sigma = 1e-3
 lbfgs_lr = 1
 
 # Sigma parameter scaling (x stores sigma_hat = sigma / (sigma0 * beta_scale)).
@@ -222,10 +221,12 @@ def save_filter_comparison(
         data_np = observed_sets[key]["data"].detach().cpu().numpy()[:, :, 0]
         filtered_arrays.append((key, data_np, observed_sets[key]["desc"]))
 
-    absmax = max(
-        np.abs(base_np).max(), *(np.abs(arr).max() for _, arr, _ in filtered_arrays)
+    percentile = 90
+    abs_percentile = max(
+        np.nanpercentile(np.abs(base_np), percentile),
+        *(np.nanpercentile(np.abs(arr), percentile) for _, arr, _ in filtered_arrays),
     )
-    vlim = (-absmax, absmax)
+    vlim = (-abs_percentile, abs_percentile)
 
     n_cols = 1 + len(filtered_arrays)
     fig, axes = plt.subplots(
@@ -295,8 +296,6 @@ def forward_shots(
         model_gradient_sampling_interval=model_gradient_sampling_interval
         if requires_grad
         else 1,
-        storage_mode=storage_mode,
-        storage_compression=storage_compression,
     )
     return out[-1]  # [nt, shots_in_batch, 1]
 
