@@ -110,6 +110,15 @@ def cuda_build_arches() -> Optional[str]:
 # Check if was compiled with OpenMP support
 USE_OPENMP = _dll is not None and hasattr(_dll, "omp_get_num_threads")
 
+
+def metal_available() -> bool:
+    """Return True if the compiled backend includes Metal (Apple GPU) support."""
+    if _dll is None or not hasattr(_dll, "tide_metal_available"):
+        return False
+    func = _dll.tide_metal_available
+    func.restype = c_int
+    return bool(func())
+
 # Define ctypes argument type templates to reduce repetition while preserving order.
 # A placeholder will be replaced by the appropriate float type (c_float or c_double).
 FLOAT_TYPE: type = c_float
@@ -463,7 +472,7 @@ def _assign_argtypes(
     float_type = c_float if dtype == "float" else c_double
     argtypes = _get_argtypes(template_name, float_type)
 
-    for device in ["cpu", "cuda"]:
+    for device in ["cpu", "cuda", "mps"]:
         func_name = f"{propagator}_{accuracy}_{dtype}_{direction}_{device}"
         try:
             func = getattr(_dll, func_name)
