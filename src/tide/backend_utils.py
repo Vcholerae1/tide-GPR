@@ -469,7 +469,7 @@ def _assign_argtypes(
         return
 
     template_name = f"{propagator}_{direction}"
-    float_type = c_float if dtype == "float" else c_double
+    float_type = c_float if dtype in {"float", "half"} else c_double
     argtypes = _get_argtypes(template_name, float_type)
 
     for device in ["cpu", "cuda", "mps"]:
@@ -503,7 +503,8 @@ def get_backend_function(
 
     Raises:
         AttributeError: If the function is not found in the shared library.
-        TypeError: If the dtype is not torch.float32 or torch.float64.
+        TypeError: If the dtype is not torch.float16, torch.float32, or
+            torch.float64.
         RuntimeError: If the backend is not available.
 
     """
@@ -511,6 +512,8 @@ def get_backend_function(
 
     if dtype == torch.float32:
         dtype_str = "float"
+    elif dtype == torch.float16:
+        dtype_str = "half"
     elif dtype == torch.float64:
         dtype_str = "double"
     else:
@@ -561,7 +564,7 @@ def ensure_contiguous(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
 # Initialize argtypes for all available functions when the module loads
 if _dll is not None:
     for current_accuracy in [2, 4, 6, 8]:
-        for current_dtype in ["float", "double"]:
+        for current_dtype in ["half", "float", "double"]:
             _assign_argtypes("maxwell_tm", current_accuracy, current_dtype, "forward")
             _assign_argtypes(
                 "maxwell_tm", current_accuracy, current_dtype, "forward_with_storage"

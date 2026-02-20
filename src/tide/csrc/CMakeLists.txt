@@ -5,6 +5,7 @@ project(tide_backend LANGUAGES C CXX)
 
 option(TIDE_ENABLE_CUDA "Enable CUDA backend" ON)
 option(TIDE_ENABLE_METAL "Enable Metal backend (Apple GPU)" ON)
+option(TIDE_ENABLE_NATIVE_ARCH "Enable native CPU tuning flags (-march=native)" OFF)
 
 # Detect and enable CUDA if present and enabled
 if(TIDE_ENABLE_CUDA)
@@ -75,13 +76,47 @@ if(WIN32 AND CMAKE_C_COMPILER_ID MATCHES "Clang")
         endif()
     endif()
 else()
-    find_package(OpenMP QUIET)
-    if(OpenMP_C_FOUND)
-        target_link_libraries(Tide_OpenMP_Interface INTERFACE OpenMP::OpenMP_C)
-        set(OPENMP_CONFIGURED TRUE)
-        message(STATUS "OpenMP enabled.")
+    # AppleClang on macOS usually needs explicit Homebrew libomp hints.
+    if(APPLE AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+        find_path(TIDE_LIBOMP_INCLUDE_DIR
+            NAMES omp.h
+            PATHS
+                /opt/homebrew/opt/libomp/include
+                /usr/local/opt/libomp/include
+        )
+        find_library(TIDE_LIBOMP_LIBRARY
+            NAMES omp libomp
+            PATHS
+                /opt/homebrew/opt/libomp/lib
+                /usr/local/opt/libomp/lib
+        )
+        if(TIDE_LIBOMP_INCLUDE_DIR AND TIDE_LIBOMP_LIBRARY)
+            get_filename_component(TIDE_LIBOMP_LIBDIR "${TIDE_LIBOMP_LIBRARY}" DIRECTORY)
+            target_compile_options(Tide_OpenMP_Interface INTERFACE -Xclang -fopenmp)
+            target_include_directories(Tide_OpenMP_Interface INTERFACE "${TIDE_LIBOMP_INCLUDE_DIR}")
+            target_link_libraries(Tide_OpenMP_Interface INTERFACE "${TIDE_LIBOMP_LIBRARY}")
+            target_link_options(Tide_OpenMP_Interface INTERFACE "-Wl,-rpath,${TIDE_LIBOMP_LIBDIR}")
+            set(OPENMP_CONFIGURED TRUE)
+            message(STATUS "OpenMP enabled (AppleClang + Homebrew libomp).")
+        else()
+            find_package(OpenMP QUIET)
+            if(OpenMP_C_FOUND)
+                target_link_libraries(Tide_OpenMP_Interface INTERFACE OpenMP::OpenMP_C)
+                set(OPENMP_CONFIGURED TRUE)
+                message(STATUS "OpenMP enabled.")
+            else()
+                message(STATUS "OpenMP not found.")
+            endif()
+        endif()
     else()
-        message(STATUS "OpenMP not found.")
+        find_package(OpenMP QUIET)
+        if(OpenMP_C_FOUND)
+            target_link_libraries(Tide_OpenMP_Interface INTERFACE OpenMP::OpenMP_C)
+            set(OPENMP_CONFIGURED TRUE)
+            message(STATUS "OpenMP enabled.")
+        else()
+            message(STATUS "OpenMP not found.")
+        endif()
     endif()
 endif()
 
@@ -126,6 +161,10 @@ if(CMAKE_BUILD_TYPE MATCHES Release)
             set(C_RELEASE_FLAGS "/O2" "/fp:fast")
         else()
             set(C_RELEASE_FLAGS "-Ofast")
+            if(TIDE_ENABLE_NATIVE_ARCH)
+                list(APPEND C_RELEASE_FLAGS "-march=native" "-mtune=native")
+                message(STATUS "Native CPU tuning enabled (-march=native -mtune=native).")
+            endif()
             set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Ofast")
         endif()
     endif()
@@ -246,7 +285,11 @@ endif()
 set(TIDE_OBJECTS)
 set(CPU_TARGETS)
 set(ACCURACIES 2 4 6 8)
-set(DTYPES float double)
+set(CPU_DTYPES float double)
+set(CUDA_DTYPES float double)
+if(CUDAToolkit_FOUND)
+    list(APPEND CUDA_DTYPES half)
+endif()
 
 # --- Storage utilities ---
 set(STORAGE_UTILS_CPU_SRC ${CMAKE_CURRENT_SOURCE_DIR}/storage_utils.c)
@@ -254,7 +297,7 @@ set(STORAGE_UTILS_CUDA_SRC "")
 
 # --- CPU object libraries ---
 foreach(ACCURACY ${ACCURACIES})
-    foreach(DTYPE ${DTYPES})
+    foreach(DTYPE ${CPU_DTYPES})
         add_tide_cpu_object_library(maxwell ${ACCURACY} ${DTYPE})
     endforeach()
 endforeach()
@@ -275,7 +318,7 @@ if(CUDAToolkit_FOUND)
     endif()
 
     foreach(ACCURACY ${ACCURACIES})
-        foreach(DTYPE ${DTYPES})
+        foreach(DTYPE ${CUDA_DTYPES})
             add_tide_cuda_object_library(maxwell ${ACCURACY} ${DTYPE})
         endforeach()
     endforeach()
