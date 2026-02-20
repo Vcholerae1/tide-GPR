@@ -88,16 +88,38 @@ id<MTLDevice> g_device = nil;
 id<MTLCommandQueue> g_queue = nil;
 id<MTLLibrary> g_library = nil;
 
-id<MTLComputePipelineState> g_pso_forward_h = nil;
-id<MTLComputePipelineState> g_pso_forward_e = nil;
+constexpr int kStencilVariants = 4;
+
+id<MTLComputePipelineState> g_pso_forward_h[kStencilVariants] = {nil, nil, nil,
+                                                                  nil};
+id<MTLComputePipelineState> g_pso_forward_e[kStencilVariants] = {nil, nil, nil,
+                                                                  nil};
 id<MTLComputePipelineState> g_pso_add_sources = nil;
 id<MTLComputePipelineState> g_pso_record_recv = nil;
-id<MTLComputePipelineState> g_pso_forward_e_storage = nil;
-id<MTLComputePipelineState> g_pso_backward_h = nil;
-id<MTLComputePipelineState> g_pso_backward_e_grad = nil;
+id<MTLComputePipelineState> g_pso_forward_e_storage[kStencilVariants] = {
+    nil, nil, nil, nil};
+id<MTLComputePipelineState> g_pso_backward_h[kStencilVariants] = {nil, nil, nil,
+                                                                   nil};
+id<MTLComputePipelineState> g_pso_backward_e_grad[kStencilVariants] = {
+    nil, nil, nil, nil};
 id<MTLComputePipelineState> g_pso_convert_grad = nil;
 
 std::once_flag g_init_flag;
+
+inline int stencil_index_from_fd_pad(int64_t fd_pad) {
+  switch (fd_pad) {
+    case 1:
+      return 0; // stencil 2
+    case 2:
+      return 1; // stencil 4
+    case 3:
+      return 2; // stencil 6
+    case 4:
+      return 3; // stencil 8
+    default:
+      return -1;
+  }
+}
 
 // Find the maxwell.metal shader source file
 NSString *find_metal_source() {
@@ -192,21 +214,68 @@ void metal_init() {
       return pso;
     };
 
-    g_pso_forward_h = make_pso("forward_kernel_h");
-    g_pso_forward_e = make_pso("forward_kernel_e");
+    auto make_stencil_pso = [&](const char *base_name,
+                                const char *suffix)
+        -> id<MTLComputePipelineState> {
+      char func_name[128];
+      snprintf(func_name, sizeof(func_name), "%s_%s", base_name, suffix);
+      return make_pso(func_name);
+    };
+
+    g_pso_forward_h[0] = make_stencil_pso("forward_kernel_h", "2");
+    g_pso_forward_h[1] = make_stencil_pso("forward_kernel_h", "4");
+    g_pso_forward_h[2] = make_stencil_pso("forward_kernel_h", "6");
+    g_pso_forward_h[3] = make_stencil_pso("forward_kernel_h", "8");
+
+    g_pso_forward_e[0] = make_stencil_pso("forward_kernel_e", "2");
+    g_pso_forward_e[1] = make_stencil_pso("forward_kernel_e", "4");
+    g_pso_forward_e[2] = make_stencil_pso("forward_kernel_e", "6");
+    g_pso_forward_e[3] = make_stencil_pso("forward_kernel_e", "8");
+
     g_pso_add_sources = make_pso("add_sources_ey");
     g_pso_record_recv = make_pso("record_receivers_ey");
-    g_pso_forward_e_storage = make_pso("forward_kernel_e_with_storage");
-    g_pso_backward_h = make_pso("backward_kernel_lambda_h");
-    g_pso_backward_e_grad = make_pso("backward_kernel_lambda_e_with_grad");
+
+    g_pso_forward_e_storage[0] =
+        make_stencil_pso("forward_kernel_e_with_storage", "2");
+    g_pso_forward_e_storage[1] =
+        make_stencil_pso("forward_kernel_e_with_storage", "4");
+    g_pso_forward_e_storage[2] =
+        make_stencil_pso("forward_kernel_e_with_storage", "6");
+    g_pso_forward_e_storage[3] =
+        make_stencil_pso("forward_kernel_e_with_storage", "8");
+
+    g_pso_backward_h[0] = make_stencil_pso("backward_kernel_lambda_h", "2");
+    g_pso_backward_h[1] = make_stencil_pso("backward_kernel_lambda_h", "4");
+    g_pso_backward_h[2] = make_stencil_pso("backward_kernel_lambda_h", "6");
+    g_pso_backward_h[3] = make_stencil_pso("backward_kernel_lambda_h", "8");
+
+    g_pso_backward_e_grad[0] =
+        make_stencil_pso("backward_kernel_lambda_e_with_grad", "2");
+    g_pso_backward_e_grad[1] =
+        make_stencil_pso("backward_kernel_lambda_e_with_grad", "4");
+    g_pso_backward_e_grad[2] =
+        make_stencil_pso("backward_kernel_lambda_e_with_grad", "6");
+    g_pso_backward_e_grad[3] =
+        make_stencil_pso("backward_kernel_lambda_e_with_grad", "8");
+
     g_pso_convert_grad = make_pso("convert_grad_kernel");
   }
 }
 
 inline bool ensure_metal() {
   std::call_once(g_init_flag, metal_init);
-  return (g_device && g_queue && g_library && g_pso_forward_h &&
-          g_pso_forward_e && g_pso_add_sources && g_pso_record_recv);
+  if (!(g_device && g_queue && g_library && g_pso_add_sources &&
+        g_pso_record_recv && g_pso_convert_grad)) {
+    return false;
+  }
+  for (int i = 0; i < kStencilVariants; ++i) {
+    if (!(g_pso_forward_h[i] && g_pso_forward_e[i] &&
+          g_pso_forward_e_storage[i] && g_pso_backward_h[i] &&
+          g_pso_backward_e_grad[i])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Create an MTLBuffer by copying data in (safe for any alignment)
@@ -269,6 +338,14 @@ static void maxwell_tm_float_forward_mps_impl(
     fprintf(stderr, "[TIDE Metal] Metal backend not available.\n");
     return;
   }
+  int const stencil_idx = stencil_index_from_fd_pad(fd_pad);
+  if (stencil_idx < 0) {
+    fprintf(stderr, "[TIDE Metal] Unsupported fd_pad=%lld\n",
+            (long long)fd_pad);
+    return;
+  }
+  id<MTLComputePipelineState> pso_forward_h = g_pso_forward_h[stencil_idx];
+  id<MTLComputePipelineState> pso_forward_e = g_pso_forward_e[stencil_idx];
 
   int64_t const shot_numel_h = ny_h * nx_h;
 
@@ -359,12 +436,6 @@ static void maxwell_tm_float_forward_mps_impl(
                               ? make_buffer(r, r_total_bytes)
                               : nil;
 
-    // GridParams constant buffer
-    id<MTLBuffer> buf_params =
-        [g_device newBufferWithBytes:&params
-                              length:sizeof(GridParams)
-                             options:MTLResourceStorageModeShared];
-
     // ---- Compute grid dimensions ----
     int64_t grid_x = nx_h - 2 * fd_pad + 2;
     int64_t grid_y = ny_h - 2 * fd_pad + 2;
@@ -376,8 +447,8 @@ static void maxwell_tm_float_forward_mps_impl(
     MTLSize gridSize_field = MTLSizeMake((NSUInteger)grid_x, (NSUInteger)grid_y,
                                          (NSUInteger)n_shots_h);
 
-    NSUInteger tw = g_pso_forward_h.threadExecutionWidth;
-    NSUInteger th_max = g_pso_forward_h.maxTotalThreadsPerThreadgroup;
+    NSUInteger tw = pso_forward_h.threadExecutionWidth;
+    NSUInteger th_max = pso_forward_h.maxTotalThreadsPerThreadgroup;
     NSUInteger tg_x = tw;
     NSUInteger tg_y = th_max / tw;
     if (tg_y < 1)
@@ -400,7 +471,8 @@ static void maxwell_tm_float_forward_mps_impl(
 
     // ---- Time stepping loop ----
     int64_t const total_steps = nt;
-    int64_t const batch_size = MIN(total_steps, (int64_t)256);
+    int64_t const max_steps_per_cmd = 2048;
+    int64_t const batch_size = MIN(total_steps, max_steps_per_cmd);
 
     for (int64_t t_start = 0; t_start < total_steps; t_start += batch_size) {
       int64_t t_end = MIN(t_start + batch_size, total_steps);
@@ -413,7 +485,7 @@ static void maxwell_tm_float_forward_mps_impl(
         // ---- forward_kernel_h ----
         {
           id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-          [enc setComputePipelineState:g_pso_forward_h];
+          [enc setComputePipelineState:pso_forward_h];
           [enc setBuffer:buf_cq offset:0 atIndex:0];
           [enc setBuffer:buf_ey offset:0 atIndex:1];
           [enc setBuffer:buf_hx offset:0 atIndex:2];
@@ -432,7 +504,7 @@ static void maxwell_tm_float_forward_mps_impl(
           [enc setBuffer:buf_kyh offset:0 atIndex:15];
           [enc setBuffer:buf_kx offset:0 atIndex:16];
           [enc setBuffer:buf_kxh offset:0 atIndex:17];
-          [enc setBuffer:buf_params offset:0 atIndex:18];
+          [enc setBytes:&params length:sizeof(GridParams) atIndex:18];
           [enc dispatchThreads:gridSize_field
               threadsPerThreadgroup:threadGroupSize_field];
           [enc endEncoding];
@@ -441,7 +513,7 @@ static void maxwell_tm_float_forward_mps_impl(
         // ---- forward_kernel_e ----
         {
           id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-          [enc setComputePipelineState:g_pso_forward_e];
+          [enc setComputePipelineState:pso_forward_e];
           [enc setBuffer:buf_ca offset:0 atIndex:0];
           [enc setBuffer:buf_cb offset:0 atIndex:1];
           [enc setBuffer:buf_hx offset:0 atIndex:2];
@@ -461,7 +533,7 @@ static void maxwell_tm_float_forward_mps_impl(
           [enc setBuffer:buf_kyh offset:0 atIndex:16];
           [enc setBuffer:buf_kx offset:0 atIndex:17];
           [enc setBuffer:buf_kxh offset:0 atIndex:18];
-          [enc setBuffer:buf_params offset:0 atIndex:19];
+          [enc setBytes:&params length:sizeof(GridParams) atIndex:19];
           [enc dispatchThreads:gridSize_field
               threadsPerThreadgroup:threadGroupSize_field];
           [enc endEncoding];
@@ -476,7 +548,7 @@ static void maxwell_tm_float_forward_mps_impl(
           [enc setBuffer:buf_ey offset:0 atIndex:0];
           [enc setBuffer:buf_f offset:f_offset atIndex:1];
           [enc setBuffer:buf_sources_i offset:0 atIndex:2];
-          [enc setBuffer:buf_params offset:0 atIndex:3];
+          [enc setBytes:&params length:sizeof(GridParams) atIndex:3];
           [enc dispatchThreads:gridSize_src
               threadsPerThreadgroup:threadGroupSize_src];
           [enc endEncoding];
@@ -491,7 +563,7 @@ static void maxwell_tm_float_forward_mps_impl(
           [enc setBuffer:buf_r offset:r_offset atIndex:0];
           [enc setBuffer:buf_ey offset:0 atIndex:1];
           [enc setBuffer:buf_receivers_i offset:0 atIndex:2];
-          [enc setBuffer:buf_params offset:0 atIndex:3];
+          [enc setBytes:&params length:sizeof(GridParams) atIndex:3];
           [enc dispatchThreads:gridSize_rec
               threadsPerThreadgroup:threadGroupSize_rec];
           [enc endEncoding];
@@ -594,15 +666,15 @@ static BackwardParams make_bparams(int64_t ny, int64_t nx, int64_t n_shots,
 // Helper: encode forward_kernel_h (shared between forward_with_storage and
 // forward)
 static void encode_forward_h(
-    id<MTLComputeCommandEncoder> enc, id<MTLBuffer> buf_cq,
-    id<MTLBuffer> buf_ey, id<MTLBuffer> buf_hx, id<MTLBuffer> buf_hz,
-    id<MTLBuffer> buf_m_ey_x, id<MTLBuffer> buf_m_ey_z, id<MTLBuffer> buf_ay,
-    id<MTLBuffer> buf_ayh, id<MTLBuffer> buf_ax, id<MTLBuffer> buf_axh,
-    id<MTLBuffer> buf_by, id<MTLBuffer> buf_byh, id<MTLBuffer> buf_bx,
-    id<MTLBuffer> buf_bxh, id<MTLBuffer> buf_ky, id<MTLBuffer> buf_kyh,
-    id<MTLBuffer> buf_kx, id<MTLBuffer> buf_kxh, id<MTLBuffer> buf_params,
-    MTLSize gridSize, MTLSize tgSize) {
-  [enc setComputePipelineState:g_pso_forward_h];
+    id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> pso,
+    id<MTLBuffer> buf_cq, id<MTLBuffer> buf_ey, id<MTLBuffer> buf_hx,
+    id<MTLBuffer> buf_hz, id<MTLBuffer> buf_m_ey_x, id<MTLBuffer> buf_m_ey_z,
+    id<MTLBuffer> buf_ay, id<MTLBuffer> buf_ayh, id<MTLBuffer> buf_ax,
+    id<MTLBuffer> buf_axh, id<MTLBuffer> buf_by, id<MTLBuffer> buf_byh,
+    id<MTLBuffer> buf_bx, id<MTLBuffer> buf_bxh, id<MTLBuffer> buf_ky,
+    id<MTLBuffer> buf_kyh, id<MTLBuffer> buf_kx, id<MTLBuffer> buf_kxh,
+    const GridParams &params, MTLSize gridSize, MTLSize tgSize) {
+  [enc setComputePipelineState:pso];
   [enc setBuffer:buf_cq offset:0 atIndex:0];
   [enc setBuffer:buf_ey offset:0 atIndex:1];
   [enc setBuffer:buf_hx offset:0 atIndex:2];
@@ -621,7 +693,7 @@ static void encode_forward_h(
   [enc setBuffer:buf_kyh offset:0 atIndex:15];
   [enc setBuffer:buf_kx offset:0 atIndex:16];
   [enc setBuffer:buf_kxh offset:0 atIndex:17];
-  [enc setBuffer:buf_params offset:0 atIndex:18];
+  [enc setBytes:&params length:sizeof(GridParams) atIndex:18];
   [enc dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
   [enc endEncoding];
 }
@@ -657,6 +729,15 @@ static void maxwell_tm_float_forward_with_storage_mps_impl(
     fprintf(stderr, "[TIDE Metal] Metal backend not available.\n");
     return;
   }
+  int const stencil_idx = stencil_index_from_fd_pad(fd_pad);
+  if (stencil_idx < 0) {
+    fprintf(stderr, "[TIDE Metal] Unsupported fd_pad=%lld\n",
+            (long long)fd_pad);
+    return;
+  }
+  id<MTLComputePipelineState> pso_forward_h = g_pso_forward_h[stencil_idx];
+  id<MTLComputePipelineState> pso_forward_e_storage =
+      g_pso_forward_e_storage[stencil_idx];
 
   int64_t const shot_numel = ny * nx;
   int64_t const store_size = n_shots * shot_numel;
@@ -745,11 +826,6 @@ static void maxwell_tm_float_forward_with_storage_mps_impl(
     id<MTLBuffer> buf_curl_store =
         (curl_store_bytes > 0) ? make_zero_buffer(curl_store_bytes) : nil;
 
-    id<MTLBuffer> buf_gp =
-        [g_device newBufferWithBytes:&gp
-                              length:sizeof(GridParams)
-                             options:MTLResourceStorageModeShared];
-
     int64_t grid_x = nx - 2 * fd_pad + 2;
     if (grid_x <= 0)
       grid_x = 1;
@@ -758,8 +834,8 @@ static void maxwell_tm_float_forward_with_storage_mps_impl(
       grid_y = 1;
     MTLSize gridSize_field = MTLSizeMake((NSUInteger)grid_x, (NSUInteger)grid_y,
                                          (NSUInteger)n_shots);
-    NSUInteger tw = g_pso_forward_h.threadExecutionWidth;
-    NSUInteger th_max = g_pso_forward_h.maxTotalThreadsPerThreadgroup;
+    NSUInteger tw = pso_forward_h.threadExecutionWidth;
+    NSUInteger th_max = pso_forward_h.maxTotalThreadsPerThreadgroup;
     MTLSize tgSize_field =
         MTLSizeMake(tw, th_max / tw > 0 ? th_max / tw : 1, 1);
     MTLSize gridSize_src =
@@ -771,7 +847,7 @@ static void maxwell_tm_float_forward_with_storage_mps_impl(
     MTLSize tgSize_rec =
         MTLSizeMake(MIN((NSUInteger)MAX(n_rec, 1), (NSUInteger)64), 1, 1);
 
-    int64_t batch = MIN(nt, (int64_t)256);
+    int64_t batch = MIN(nt, (int64_t)1024);
     for (int64_t t_start = 0; t_start < nt; t_start += batch) {
       int64_t t_end = MIN(t_start + batch, nt);
       id<MTLCommandBuffer> cmdBuf = [g_queue commandBuffer];
@@ -782,10 +858,11 @@ static void maxwell_tm_float_forward_with_storage_mps_impl(
         // forward_kernel_h
         {
           id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-          encode_forward_h(enc, buf_cq, buf_ey, buf_hx, buf_hz, buf_m_ey_x,
-                           buf_m_ey_z, buf_ay, buf_ayh, buf_ax, buf_axh, buf_by,
-                           buf_byh, buf_bx, buf_bxh, buf_ky, buf_kyh, buf_kx,
-                           buf_kxh, buf_gp, gridSize_field, tgSize_field);
+          encode_forward_h(enc, pso_forward_h, buf_cq, buf_ey, buf_hx, buf_hz,
+                           buf_m_ey_x, buf_m_ey_z, buf_ay, buf_ayh, buf_ax,
+                           buf_axh, buf_by, buf_byh, buf_bx, buf_bxh, buf_ky,
+                           buf_kyh, buf_kx, buf_kxh, gp, gridSize_field,
+                           tgSize_field);
         }
 
         // forward_kernel_e_with_storage
@@ -805,12 +882,8 @@ static void maxwell_tm_float_forward_with_storage_mps_impl(
           bp.store_ey = s_ey;
           bp.store_curl = s_curl;
 
-          id<MTLBuffer> buf_bp =
-              [g_device newBufferWithBytes:&bp
-                                    length:sizeof(BackwardParams)
-                                   options:MTLResourceStorageModeShared];
           id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-          [enc setComputePipelineState:g_pso_forward_e_storage];
+          [enc setComputePipelineState:pso_forward_e_storage];
           [enc setBuffer:buf_ca offset:0 atIndex:0];
           [enc setBuffer:buf_cb offset:0 atIndex:1];
           [enc setBuffer:buf_hx offset:0 atIndex:2];
@@ -836,7 +909,7 @@ static void maxwell_tm_float_forward_with_storage_mps_impl(
           [enc setBuffer:(buf_curl_store ? buf_curl_store : buf_ey)
                   offset:0
                  atIndex:20];
-          [enc setBuffer:buf_bp offset:0 atIndex:21];
+          [enc setBytes:&bp length:sizeof(BackwardParams) atIndex:21];
           [enc dispatchThreads:gridSize_field
               threadsPerThreadgroup:tgSize_field];
           [enc endEncoding];
@@ -850,7 +923,7 @@ static void maxwell_tm_float_forward_with_storage_mps_impl(
           [enc setBuffer:buf_ey offset:0 atIndex:0];
           [enc setBuffer:buf_f offset:f_off atIndex:1];
           [enc setBuffer:buf_src_i offset:0 atIndex:2];
-          [enc setBuffer:buf_gp offset:0 atIndex:3];
+          [enc setBytes:&gp length:sizeof(GridParams) atIndex:3];
           [enc dispatchThreads:gridSize_src threadsPerThreadgroup:tgSize_src];
           [enc endEncoding];
         }
@@ -863,7 +936,7 @@ static void maxwell_tm_float_forward_with_storage_mps_impl(
           [enc setBuffer:buf_r offset:r_off atIndex:0];
           [enc setBuffer:buf_ey offset:0 atIndex:1];
           [enc setBuffer:buf_rec_i offset:0 atIndex:2];
-          [enc setBuffer:buf_gp offset:0 atIndex:3];
+          [enc setBytes:&gp length:sizeof(GridParams) atIndex:3];
           [enc dispatchThreads:gridSize_rec threadsPerThreadgroup:tgSize_rec];
           [enc endEncoding];
         }
@@ -924,6 +997,15 @@ static void maxwell_tm_float_backward_mps_impl(
     fprintf(stderr, "[TIDE Metal] Metal backend not available.\n");
     return;
   }
+  int const stencil_idx = stencil_index_from_fd_pad(fd_pad);
+  if (stencil_idx < 0) {
+    fprintf(stderr, "[TIDE Metal] Unsupported fd_pad=%lld\n",
+            (long long)fd_pad);
+    return;
+  }
+  id<MTLComputePipelineState> pso_backward_h = g_pso_backward_h[stencil_idx];
+  id<MTLComputePipelineState> pso_backward_e_grad =
+      g_pso_backward_e_grad[stencil_idx];
 
   int64_t const shot_numel = ny * nx;
   int64_t const store_size = n_shots * shot_numel;
@@ -1019,11 +1101,6 @@ static void maxwell_tm_float_backward_mps_impl(
         (curl_store_bytes > 0) ? make_buffer(curl_store_1, curl_store_bytes)
                                : nil;
 
-    id<MTLBuffer> buf_gp =
-        [g_device newBufferWithBytes:&gp
-                              length:sizeof(GridParams)
-                             options:MTLResourceStorageModeShared];
-
     int64_t grid_x = nx - 2 * fd_pad + 2;
     if (grid_x <= 0)
       grid_x = 1;
@@ -1032,8 +1109,8 @@ static void maxwell_tm_float_backward_mps_impl(
       grid_y = 1;
     MTLSize gridSize_field = MTLSizeMake((NSUInteger)grid_x, (NSUInteger)grid_y,
                                          (NSUInteger)n_shots);
-    NSUInteger tw = g_pso_backward_h.threadExecutionWidth;
-    NSUInteger th_max = g_pso_backward_h.maxTotalThreadsPerThreadgroup;
+    NSUInteger tw = pso_backward_h.threadExecutionWidth;
+    NSUInteger th_max = pso_backward_h.maxTotalThreadsPerThreadgroup;
     MTLSize tgSize_field =
         MTLSizeMake(tw, th_max / tw > 0 ? th_max / tw : 1, 1);
     MTLSize gridSize_src =
@@ -1046,7 +1123,7 @@ static void maxwell_tm_float_backward_mps_impl(
         MTLSizeMake(MIN((NSUInteger)MAX(n_rec, 1), (NSUInteger)64), 1, 1);
 
     // Time-reversed loop
-    int64_t batch = MIN(nt, (int64_t)64);
+    int64_t batch = MIN(nt, (int64_t)512);
     for (int64_t t_start_rev = 0; t_start_rev < nt; t_start_rev += batch) {
       int64_t t_end_rev = MIN(t_start_rev + batch, nt);
       id<MTLCommandBuffer> cmdBuf = [g_queue commandBuffer];
@@ -1069,11 +1146,7 @@ static void maxwell_tm_float_backward_mps_impl(
           // Need GridParams with n_sources = n_rec for this kernel
           GridParams gp_rec = gp;
           gp_rec.n_sources_per_shot = n_rec;
-          id<MTLBuffer> buf_gp_rec =
-              [g_device newBufferWithBytes:&gp_rec
-                                    length:sizeof(GridParams)
-                                   options:MTLResourceStorageModeShared];
-          [enc setBuffer:buf_gp_rec offset:0 atIndex:3];
+          [enc setBytes:&gp_rec length:sizeof(GridParams) atIndex:3];
           [enc dispatchThreads:gridSize_rec threadsPerThreadgroup:tgSize_rec];
           [enc endEncoding];
         }
@@ -1088,11 +1161,7 @@ static void maxwell_tm_float_backward_mps_impl(
           [enc setBuffer:buf_src_i offset:0 atIndex:2];
           GridParams gp_src = gp;
           gp_src.n_receivers_per_shot = n_src;
-          id<MTLBuffer> buf_gp_src =
-              [g_device newBufferWithBytes:&gp_src
-                                    length:sizeof(GridParams)
-                                   options:MTLResourceStorageModeShared];
-          [enc setBuffer:buf_gp_src offset:0 atIndex:3];
+          [enc setBytes:&gp_src length:sizeof(GridParams) atIndex:3];
           [enc dispatchThreads:gridSize_src threadsPerThreadgroup:tgSize_src];
           [enc endEncoding];
         }
@@ -1106,12 +1175,8 @@ static void maxwell_tm_float_backward_mps_impl(
           bp.store_offset = s_off;
           bp.store_ey = do_grad && ca_rg;
           bp.store_curl = do_grad && cb_rg;
-          id<MTLBuffer> buf_bp =
-              [g_device newBufferWithBytes:&bp
-                                    length:sizeof(BackwardParams)
-                                   options:MTLResourceStorageModeShared];
           id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-          [enc setComputePipelineState:g_pso_backward_e_grad];
+          [enc setComputePipelineState:pso_backward_e_grad];
           [enc setBuffer:buf_ca offset:0 atIndex:0];
           [enc setBuffer:buf_cq offset:0 atIndex:1];
           [enc setBuffer:buf_lambda_hx offset:0 atIndex:2];
@@ -1143,7 +1208,7 @@ static void maxwell_tm_float_backward_mps_impl(
           [enc setBuffer:buf_kyh offset:0 atIndex:20];
           [enc setBuffer:buf_kx offset:0 atIndex:21];
           [enc setBuffer:buf_kxh offset:0 atIndex:22];
-          [enc setBuffer:buf_bp offset:0 atIndex:23];
+          [enc setBytes:&bp length:sizeof(BackwardParams) atIndex:23];
           [enc dispatchThreads:gridSize_field
               threadsPerThreadgroup:tgSize_field];
           [enc endEncoding];
@@ -1155,12 +1220,8 @@ static void maxwell_tm_float_backward_mps_impl(
               make_bparams(ny, nx, n_shots, n_src, n_rec, pml_y0, pml_y1,
                            pml_x0, pml_x1, fd_pad, rdy_h, rdx_h, dt_h, ca_bat,
                            cb_bat, cq_bat, ca_rg, cb_rg, step_ratio);
-          id<MTLBuffer> buf_bp =
-              [g_device newBufferWithBytes:&bp
-                                    length:sizeof(BackwardParams)
-                                   options:MTLResourceStorageModeShared];
           id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-          [enc setComputePipelineState:g_pso_backward_h];
+          [enc setComputePipelineState:pso_backward_h];
           [enc setBuffer:buf_cb offset:0 atIndex:0];
           [enc setBuffer:buf_lambda_ey offset:0 atIndex:1];
           [enc setBuffer:buf_lambda_hx offset:0 atIndex:2];
@@ -1179,7 +1240,7 @@ static void maxwell_tm_float_backward_mps_impl(
           [enc setBuffer:buf_kyh offset:0 atIndex:15];
           [enc setBuffer:buf_kx offset:0 atIndex:16];
           [enc setBuffer:buf_kxh offset:0 atIndex:17];
-          [enc setBuffer:buf_bp offset:0 atIndex:18];
+          [enc setBytes:&bp length:sizeof(BackwardParams) atIndex:18];
           [enc dispatchThreads:gridSize_field
               threadsPerThreadgroup:tgSize_field];
           [enc endEncoding];
@@ -1198,10 +1259,6 @@ static void maxwell_tm_float_backward_mps_impl(
       BackwardParams bp = make_bparams(
           ny, nx, n_shots, n_src, n_rec, pml_y0, pml_y1, pml_x0, pml_x1, fd_pad,
           rdy_h, rdx_h, dt_h, ca_bat, cb_bat, cq_bat, ca_rg, cb_rg, step_ratio);
-      id<MTLBuffer> buf_bp =
-          [g_device newBufferWithBytes:&bp
-                                length:sizeof(BackwardParams)
-                               options:MTLResourceStorageModeShared];
       int64_t out_shots = ca_bat ? n_shots : 1;
       MTLSize gridSize_grad =
           MTLSizeMake((NSUInteger)nx, (NSUInteger)ny, (NSUInteger)out_shots);
@@ -1216,7 +1273,7 @@ static void maxwell_tm_float_backward_mps_impl(
       [enc setBuffer:(buf_grad_sigma ? buf_grad_sigma : buf_ca)
               offset:0
              atIndex:5];
-      [enc setBuffer:buf_bp offset:0 atIndex:6];
+      [enc setBytes:&bp length:sizeof(BackwardParams) atIndex:6];
       [enc dispatchThreads:gridSize_grad threadsPerThreadgroup:tgSize_field];
       [enc endEncoding];
       [cmdBuf commit];

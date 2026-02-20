@@ -16,6 +16,7 @@ TIDE is a PyTorch-based library for  high frequa electromagnetic wave propagatio
 - **Flexible Storage**: Multiple storage modes for gradient computation (memory/disk/optional BF16 compressed)
 - **Staggered Grid**: Industry-standard FDTD staggered grid implementation
 - **PML Boundaries**: Perfectly Matched Layer absorbing boundaries
+- **Mixed Precision (CUDA)**: `compute_dtype="fp16"` with internal nondimensional scaling
 
 ## Installation
 
@@ -105,6 +106,31 @@ print(f"Recorded data shape: {receiver_data.shape}")
 - **`tide.padding`**: Padding and interior masking helpers
 - **`tide.validation`**: Input validation helpers
 - **`tide.storage`**: Gradient checkpointing and storage management
+
+## Mixed Precision
+
+`tide.maxwelltm` provides a mixed-precision interface:
+
+```python
+out = tide.maxwelltm(
+    epsilon,
+    sigma,
+    mu,
+    grid_spacing=0.02,
+    dt=4e-11,
+    source_amplitude=src,
+    source_location=src_loc,
+    receiver_location=rec_loc,
+    compute_dtype="fp16",      # "fp32" (default) or "fp16"
+    mp_mode="throughput",      # "throughput" | "balanced" | "robust"
+)
+```
+
+Notes:
+- `compute_dtype="fp16"` is currently CUDA-only.
+- External API remains SI-compatible (`epsilon_r`, `mu_r`, `sigma`, `dx/dy`, `dt`).
+- Internal updates use nondimensional scaling for better reduced-precision stability.
+- Current C/CUDA kernels execute in fp32 with fp16 mixed-precision I/O/scaling.
 
 ## Examples
 

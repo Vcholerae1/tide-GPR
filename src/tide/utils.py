@@ -1,4 +1,5 @@
 import math
+from dataclasses import dataclass
 from typing import Sequence
 
 import torch
@@ -7,6 +8,73 @@ import torch
 EP0 = 8.8541878128e-12  # vacuum permittivity
 MU0 = 1.2566370614359173e-06  # vacuum permeability
 C0 = 1.0 / math.sqrt(EP0 * MU0)  # speed of light in vacuum
+
+
+@dataclass(frozen=True)
+class NondimContext:
+    """Reference scales for SI -> nondimensional Maxwell updates."""
+
+    L0: float
+    T0: float
+    Zref: float
+    eps_ref_abs: float
+    mu_ref_abs: float
+    eps_ref_r: float
+    mu_ref_r: float
+    dy_hat: float
+    dx_hat: float
+    dt_hat: float
+    source_scale: float
+
+
+def build_nondim_context(
+    epsilon_r: torch.Tensor,
+    mu_r: torch.Tensor,
+    grid_spacing: Sequence[float],
+    dt: float,
+) -> NondimContext:
+    """Build nondimensional scaling context from SI inputs.
+
+    Note:
+        Reference scales are detached constants, so min(...) does not enter
+        the gradient graph.
+    """
+    dy = float(grid_spacing[0])
+    dx = float(grid_spacing[1])
+    L0 = min(dy, dx)
+
+    eps_ref_r = float(epsilon_r.detach().min().item())
+    mu_ref_r = float(mu_r.detach().min().item())
+    if eps_ref_r <= 0.0:
+        raise ValueError("epsilon must be strictly positive for nondimensional scaling.")
+    if mu_ref_r <= 0.0:
+        raise ValueError("mu must be strictly positive for nondimensional scaling.")
+
+    eps_ref_abs = eps_ref_r * EP0
+    mu_ref_abs = mu_ref_r * MU0
+    cmax = 1.0 / math.sqrt(eps_ref_abs * mu_ref_abs)
+    T0 = L0 / cmax
+    Zref = math.sqrt(mu_ref_abs / eps_ref_abs)
+
+    dy_hat = dy / L0
+    dx_hat = dx / L0
+    dt_hat = float(dt) / T0
+
+    # src_hat = src * T0 / (eps_ref_abs * L0^2)
+    source_scale = T0 / (eps_ref_abs * L0 * L0)
+    return NondimContext(
+        L0=L0,
+        T0=T0,
+        Zref=Zref,
+        eps_ref_abs=eps_ref_abs,
+        mu_ref_abs=mu_ref_abs,
+        eps_ref_r=eps_ref_r,
+        mu_ref_r=mu_ref_r,
+        dy_hat=dy_hat,
+        dx_hat=dx_hat,
+        dt_hat=dt_hat,
+        source_scale=source_scale,
+    )
 
 
 def prepare_parameters(
@@ -40,6 +108,20 @@ def prepare_parameters(
     return ca, cb, cq
 
 
+def prepare_parameters_nondim(
+    epsilon_hat: torch.Tensor,
+    sigma_hat: torch.Tensor,
+    mu_hat: torch.Tensor,
+    dt_hat: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare nondimensional update coefficients for Maxwell equations."""
+    denom = 1.0 + sigma_hat * dt_hat / (2.0 * epsilon_hat)
+    ca = (1.0 - sigma_hat * dt_hat / (2.0 * epsilon_hat)) / denom
+    cb = (dt_hat / epsilon_hat) / denom
+    cq = dt_hat / mu_hat
+    return ca, cb, cq
+
+
 def setup_pml(
     pml_width: Sequence[int],
     pml_start: Sequence[float],
@@ -55,6 +137,7 @@ def setup_pml(
     n_power: int = 4,
     eps: float = 1e-9,
     grid_spacing: float = 1.0,
+    eps_scale: float = EP0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Creates a, b, and k profiles for electromagnetic C-PML.
 
@@ -130,8 +213,8 @@ def setup_pml(
         # Apply to left region
         k = torch.where(mask_left, k_left, k)
 
-        # Calculate b = exp(-(sigma/k + alpha) * dt / epsilon0)
-        b_left = torch.exp(-(sigma_left / k_left + alpha_left) * dt / EP0)
+        # Calculate b = exp(-(sigma/k + alpha) * dt / eps_scale)
+        b_left = torch.exp(-(sigma_left / k_left + alpha_left) * dt / eps_scale)
         b = torch.where(mask_left, b_left, b)
 
         # Calculate a = sigma * (b - 1) / (k * (sigma + k * alpha))
@@ -161,8 +244,8 @@ def setup_pml(
         # Apply to right region
         k = torch.where(mask_right, k_right, k)
 
-        # Calculate b = exp(-(sigma/k + alpha) * dt / epsilon0)
-        b_right = torch.exp(-(sigma_right / k_right + alpha_right) * dt / EP0)
+        # Calculate b = exp(-(sigma/k + alpha) * dt / eps_scale)
+        b_right = torch.exp(-(sigma_right / k_right + alpha_right) * dt / eps_scale)
         b = torch.where(mask_right, b_right, b)
 
         # Calculate a = sigma * (b - 1) / (k * (sigma + k * alpha))
@@ -189,6 +272,7 @@ def setup_pml_half(
     n_power: int = 4,
     eps: float = 1e-9,
     grid_spacing: float = 1.0,
+    eps_scale: float = EP0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Creates a, b, and k profiles for C-PML at half grid points.
 
@@ -234,8 +318,8 @@ def setup_pml_half(
 
         k = torch.where(mask_left, k_left, k)
 
-        # b = exp(-(sigma/k + alpha) * dt / epsilon0)
-        b_left = torch.exp(-(sigma_left / k_left + alpha_left) * dt / EP0)
+        # b = exp(-(sigma/k + alpha) * dt / eps_scale)
+        b_left = torch.exp(-(sigma_left / k_left + alpha_left) * dt / eps_scale)
         b = torch.where(mask_left, b_left, b)
 
         # a = sigma * (b - 1) / (k * (sigma + k * alpha))
@@ -261,8 +345,8 @@ def setup_pml_half(
 
         k = torch.where(mask_right, k_right, k)
 
-        # b = exp(-(sigma/k + alpha) * dt / epsilon0)
-        b_right = torch.exp(-(sigma_right / k_right + alpha_right) * dt / EP0)
+        # b = exp(-(sigma/k + alpha) * dt / eps_scale)
+        b_right = torch.exp(-(sigma_right / k_right + alpha_right) * dt / eps_scale)
         b = torch.where(mask_right, b_right, b)
 
         # a = sigma * (b - 1) / (k * (sigma + k * alpha))

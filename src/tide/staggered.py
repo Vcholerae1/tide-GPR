@@ -17,6 +17,7 @@ def set_pml_profiles(
     pml_freq: float,
     ny: int,
     nx: int,
+    eps_scale: float = utils.EP0,
 ) -> list[torch.Tensor]:
     """Sets up PML profiles for a staggered grid.
 
@@ -70,6 +71,7 @@ def set_pml_profiles(
         pml_freq,
         start=0.0,
         grid_spacing=grid_spacing[0],
+        eps_scale=eps_scale,
     )
     ax, bx, kx = utils.setup_pml(
         pml_width[2:],
@@ -83,6 +85,7 @@ def set_pml_profiles(
         pml_freq,
         start=0.0,
         grid_spacing=grid_spacing[1],
+        eps_scale=eps_scale,
     )
 
     # Half grid PML profiles
@@ -98,6 +101,7 @@ def set_pml_profiles(
         pml_freq,
         start=0.0,
         grid_spacing=grid_spacing[0],
+        eps_scale=eps_scale,
     )
     axh, bxh, kxh = utils.setup_pml_half(
         pml_width[2:],
@@ -111,6 +115,7 @@ def set_pml_profiles(
         pml_freq,
         start=0.0,
         grid_spacing=grid_spacing[1],
+        eps_scale=eps_scale,
     )
 
     # Reshape for broadcasting: [batch, ny, nx]
@@ -195,6 +200,7 @@ def set_pml_profiles_3d(
     nz: int,
     ny: int,
     nx: int,
+    eps_scale: float = utils.EP0,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Sets up 3D PML profiles for a staggered grid.
 
@@ -249,6 +255,7 @@ def set_pml_profiles_3d(
         pml_freq,
         start=0.0,
         grid_spacing=dz,
+        eps_scale=eps_scale,
     )
     ay, by, ky = utils.setup_pml(
         pml_width[2:4],
@@ -262,6 +269,7 @@ def set_pml_profiles_3d(
         pml_freq,
         start=0.0,
         grid_spacing=dy,
+        eps_scale=eps_scale,
     )
     ax, bx, kx = utils.setup_pml(
         pml_width[4:],
@@ -275,6 +283,7 @@ def set_pml_profiles_3d(
         pml_freq,
         start=0.0,
         grid_spacing=dx,
+        eps_scale=eps_scale,
     )
 
     azh, bzh, kzh = utils.setup_pml_half(
@@ -289,6 +298,7 @@ def set_pml_profiles_3d(
         pml_freq,
         start=0.0,
         grid_spacing=dz,
+        eps_scale=eps_scale,
     )
     ayh, byh, kyh = utils.setup_pml_half(
         pml_width[2:4],
@@ -302,6 +312,7 @@ def set_pml_profiles_3d(
         pml_freq,
         start=0.0,
         grid_spacing=dy,
+        eps_scale=eps_scale,
     )
     axh, bxh, kxh = utils.setup_pml_half(
         pml_width[4:],
@@ -315,6 +326,7 @@ def set_pml_profiles_3d(
         pml_freq,
         start=0.0,
         grid_spacing=dx,
+        eps_scale=eps_scale,
     )
 
     az = az[None, :, None, None]

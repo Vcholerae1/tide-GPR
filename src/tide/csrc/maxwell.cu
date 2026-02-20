@@ -32,7 +32,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <climits>
+#include <type_traits>
 #include <math.h>
+#include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #if defined(__CUDACC__)
 #include <cuda_fp8.h>
@@ -95,14 +97,19 @@
 
 #define MAX(a, b) (a > b ? a : b)
 
-// Vacuum permittivity (F/m) to convert dL/d(epsilon_abs) -> dL/d(epsilon_r)
-#define EP0 ((TIDE_DTYPE)8.8541878128e-12)
+using field_t = TIDE_DTYPE;
+using accum_t =
+    typename std::conditional<std::is_same<field_t, half>::value, float, field_t>::type;
+using scalar_t =
+    typename std::conditional<std::is_same<field_t, half>::value, float, field_t>::type;
+constexpr bool kFieldIsHalf = std::is_same<field_t, half>::value;
+constexpr accum_t kEp0 = (accum_t)8.8541878128e-12;
 
 namespace {
 
 // Device constants
-__constant__ TIDE_DTYPE rdy;
-__constant__ TIDE_DTYPE rdx;
+__constant__ scalar_t rdy;
+__constant__ scalar_t rdx;
 __constant__ int64_t n_shots;
 __constant__ int64_t ny;
 __constant__ int64_t nx;
@@ -1055,6 +1062,264 @@ __global__ void backward_kernel_lambda_e(
   }
 }
 
+// Exact CPML adjoint helpers: prepare transformed fluxes, then apply transposed
+// spatial operators in a separate kernel to preserve discrete consistency.
+__global__ void backward_kernel_lambda_h_prepare_exact(
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const lambda_ey,
+    TIDE_DTYPE *__restrict const m_lambda_ey_x,
+    TIDE_DTYPE *__restrict const m_lambda_ey_z,
+    TIDE_DTYPE *__restrict const work_x,
+    TIDE_DTYPE *__restrict const work_z,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kx) {
+  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
+              (int64_t)threadIdx.x + FD_PAD;
+  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
+              (int64_t)threadIdx.y + FD_PAD;
+  int64_t shot_idx = (int64_t)blockIdx.z * (int64_t)blockDim.z +
+                     (int64_t)threadIdx.z;
+  if (y < ny - FD_PAD + 1 && x < nx - FD_PAD + 1 && shot_idx < n_shots) {
+    int64_t const pml_y0h = pml_y0;
+    int64_t const pml_y1h = MAX(pml_y0, pml_y1 - 1);
+    int64_t const pml_x0h = pml_x0;
+    int64_t const pml_x1h = MAX(pml_x0, pml_x1 - 1);
+    bool const pml_y = y < pml_y0h || y >= pml_y1h;
+    bool const pml_x = x < pml_x0h || x >= pml_x1h;
+
+    int64_t j = y * nx + x;
+    int64_t i = shot_idx * shot_numel + j;
+    TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];
+    TIDE_DTYPE const g = cb_val * lambda_ey[i];
+    if (pml_x) {
+      TIDE_DTYPE const tmp_x = m_lambda_ey_x[i] + g;
+      work_x[i] = g / __ldg(&kx[x]) + __ldg(&ax[x]) * tmp_x;
+      m_lambda_ey_x[i] = __ldg(&bx[x]) * tmp_x;
+    } else {
+      work_x[i] = g;
+    }
+    if (pml_y) {
+      TIDE_DTYPE const tmp_z = m_lambda_ey_z[i] + g;
+      work_z[i] = g / __ldg(&ky[y]) + __ldg(&ay[y]) * tmp_z;
+      m_lambda_ey_z[i] = __ldg(&by[y]) * tmp_z;
+    } else {
+      work_z[i] = g;
+    }
+  }
+}
+
+__global__ void backward_kernel_lambda_h_apply_exact(
+    TIDE_DTYPE const *__restrict const work_x,
+    TIDE_DTYPE const *__restrict const work_z,
+    TIDE_DTYPE *__restrict const lambda_hx,
+    TIDE_DTYPE *__restrict const lambda_hz) {
+  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
+              (int64_t)threadIdx.x + FD_PAD;
+  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
+              (int64_t)threadIdx.y + FD_PAD;
+  int64_t shot_idx = (int64_t)blockIdx.z * (int64_t)blockDim.z +
+                     (int64_t)threadIdx.z;
+  if (y < ny - FD_PAD + 1 && x < nx - FD_PAD + 1 && shot_idx < n_shots) {
+    int64_t j = y * nx + x;
+    int64_t i = shot_idx * shot_numel + j;
+#define ONE(dy, dx) ((TIDE_DTYPE)1)
+#define WORK_X_L(dy, dx) work_x[ND_INDEX(i, dy, dx)]
+#define WORK_Z_L(dy, dx) work_z[ND_INDEX(i, dy, dx)]
+    if (y < ny - FD_PAD) {
+      lambda_hx[i] -= DIFFY1_ADJ(ONE, WORK_Z_L);
+    }
+    if (x < nx - FD_PAD) {
+      lambda_hz[i] += DIFFX1_ADJ(ONE, WORK_X_L);
+    }
+#undef ONE
+#undef WORK_X_L
+#undef WORK_Z_L
+  }
+}
+
+__global__ void backward_kernel_lambda_e_prepare_exact(
+    TIDE_DTYPE const *__restrict const cq,
+    TIDE_DTYPE const *__restrict const lambda_hx,
+    TIDE_DTYPE const *__restrict const lambda_hz,
+    TIDE_DTYPE *__restrict const m_lambda_hx_z,
+    TIDE_DTYPE *__restrict const m_lambda_hz_x,
+    TIDE_DTYPE *__restrict const work_x,
+    TIDE_DTYPE *__restrict const work_z,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kxh) {
+  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
+              (int64_t)threadIdx.x + FD_PAD;
+  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
+              (int64_t)threadIdx.y + FD_PAD;
+  int64_t shot_idx = (int64_t)blockIdx.z * (int64_t)blockDim.z +
+                     (int64_t)threadIdx.z;
+  if (y < ny - FD_PAD + 1 && x < nx - FD_PAD + 1 && shot_idx < n_shots) {
+    bool const pml_y = y < pml_y0 || y >= pml_y1;
+    bool const pml_x = x < pml_x0 || x >= pml_x1;
+    int64_t j = y * nx + x;
+    int64_t i = shot_idx * shot_numel + j;
+    TIDE_DTYPE const cq_val = cq_batched ? cq[i] : cq[j];
+    TIDE_DTYPE const g_x = cq_val * lambda_hz[i];
+    TIDE_DTYPE const g_z = -cq_val * lambda_hx[i];
+    if (pml_x) {
+      TIDE_DTYPE const tmp_x = m_lambda_hz_x[i] + g_x;
+      work_x[i] = g_x / __ldg(&kxh[x]) + __ldg(&axh[x]) * tmp_x;
+      m_lambda_hz_x[i] = __ldg(&bxh[x]) * tmp_x;
+    } else {
+      work_x[i] = g_x;
+    }
+    if (pml_y) {
+      TIDE_DTYPE const tmp_z = m_lambda_hx_z[i] + g_z;
+      work_z[i] = g_z / __ldg(&kyh[y]) + __ldg(&ayh[y]) * tmp_z;
+      m_lambda_hx_z[i] = __ldg(&byh[y]) * tmp_z;
+    } else {
+      work_z[i] = g_z;
+    }
+  }
+}
+
+__global__ void backward_kernel_lambda_e_apply_exact(
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const work_x,
+    TIDE_DTYPE const *__restrict const work_z,
+    TIDE_DTYPE *__restrict const lambda_ey,
+    TIDE_DTYPE const *__restrict const ey_store,
+    TIDE_DTYPE const *__restrict const curl_h_store,
+    TIDE_DTYPE *__restrict const grad_ca_shot,
+    TIDE_DTYPE *__restrict const grad_cb_shot,
+    bool const ca_requires_grad,
+    bool const cb_requires_grad,
+    int64_t const step_ratio_val) {
+  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
+              (int64_t)threadIdx.x + FD_PAD;
+  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
+              (int64_t)threadIdx.y + FD_PAD;
+  int64_t shot_idx = (int64_t)blockIdx.z * (int64_t)blockDim.z +
+                     (int64_t)threadIdx.z;
+  if (y < ny - FD_PAD + 1 && x < nx - FD_PAD + 1 && shot_idx < n_shots) {
+    bool const pml_y = y < pml_y0 || y >= pml_y1;
+    bool const pml_x = x < pml_x0 || x >= pml_x1;
+    int64_t j = y * nx + x;
+    int64_t i = shot_idx * shot_numel + j;
+    TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
+#define ONE(dy, dx) ((TIDE_DTYPE)1)
+#define WORK_X_L(dy, dx) work_x[ND_INDEX(i, dy, dx)]
+#define WORK_Z_L(dy, dx) work_z[ND_INDEX(i, dy, dx)]
+    TIDE_DTYPE const curl_lambda_h =
+        DIFFXH1_ADJ(ONE, WORK_X_L) + DIFFYH1_ADJ(ONE, WORK_Z_L);
+#undef WORK_X_L
+#undef WORK_Z_L
+#undef ONE
+    TIDE_DTYPE const lambda_ey_curr = lambda_ey[i];
+    lambda_ey[i] = ca_val * lambda_ey_curr + curl_lambda_h;
+    if (!pml_y && !pml_x && ca_requires_grad && ey_store != nullptr) {
+      grad_ca_shot[i] += lambda_ey_curr * ey_store[i] * (TIDE_DTYPE)step_ratio_val;
+    }
+    if (!pml_y && !pml_x && cb_requires_grad && curl_h_store != nullptr) {
+      grad_cb_shot[i] +=
+          lambda_ey_curr * curl_h_store[i] * (TIDE_DTYPE)step_ratio_val;
+    }
+  }
+}
+
+__global__ void backward_kernel_lambda_e_apply_exact_bf16(
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const work_x,
+    TIDE_DTYPE const *__restrict const work_z,
+    TIDE_DTYPE *__restrict const lambda_ey,
+    __nv_bfloat16 const *__restrict const ey_store,
+    __nv_bfloat16 const *__restrict const curl_h_store,
+    TIDE_DTYPE *__restrict const grad_ca_shot,
+    TIDE_DTYPE *__restrict const grad_cb_shot,
+    bool const ca_requires_grad,
+    bool const cb_requires_grad,
+    int64_t const step_ratio_val) {
+  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
+              (int64_t)threadIdx.x + FD_PAD;
+  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
+              (int64_t)threadIdx.y + FD_PAD;
+  int64_t shot_idx = (int64_t)blockIdx.z * (int64_t)blockDim.z +
+                     (int64_t)threadIdx.z;
+  if (y < ny - FD_PAD + 1 && x < nx - FD_PAD + 1 && shot_idx < n_shots) {
+    bool const pml_y = y < pml_y0 || y >= pml_y1;
+    bool const pml_x = x < pml_x0 || x >= pml_x1;
+    int64_t j = y * nx + x;
+    int64_t i = shot_idx * shot_numel + j;
+    TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
+#define ONE(dy, dx) ((TIDE_DTYPE)1)
+#define WORK_X_L(dy, dx) work_x[ND_INDEX(i, dy, dx)]
+#define WORK_Z_L(dy, dx) work_z[ND_INDEX(i, dy, dx)]
+    TIDE_DTYPE const curl_lambda_h =
+        DIFFXH1_ADJ(ONE, WORK_X_L) + DIFFYH1_ADJ(ONE, WORK_Z_L);
+#undef WORK_X_L
+#undef WORK_Z_L
+#undef ONE
+    TIDE_DTYPE const lambda_ey_curr = lambda_ey[i];
+    lambda_ey[i] = ca_val * lambda_ey_curr + curl_lambda_h;
+    if (!pml_y && !pml_x && ca_requires_grad && ey_store != nullptr) {
+      TIDE_DTYPE const ey_n = (TIDE_DTYPE)__bfloat162float(ey_store[i]);
+      grad_ca_shot[i] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio_val;
+    }
+    if (!pml_y && !pml_x && cb_requires_grad && curl_h_store != nullptr) {
+      TIDE_DTYPE const curl_h_n = (TIDE_DTYPE)__bfloat162float(curl_h_store[i]);
+      grad_cb_shot[i] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio_val;
+    }
+  }
+}
+
+__global__ void backward_kernel_lambda_e_apply_exact_fp8(
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const work_x,
+    TIDE_DTYPE const *__restrict const work_z,
+    TIDE_DTYPE *__restrict const lambda_ey,
+    uint8_t const *__restrict const ey_store,
+    uint8_t const *__restrict const curl_h_store,
+    TIDE_DTYPE *__restrict const grad_ca_shot,
+    TIDE_DTYPE *__restrict const grad_cb_shot,
+    bool const ca_requires_grad,
+    bool const cb_requires_grad,
+    int64_t const step_ratio_val) {
+  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
+              (int64_t)threadIdx.x + FD_PAD;
+  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
+              (int64_t)threadIdx.y + FD_PAD;
+  int64_t shot_idx = (int64_t)blockIdx.z * (int64_t)blockDim.z +
+                     (int64_t)threadIdx.z;
+  if (y < ny - FD_PAD + 1 && x < nx - FD_PAD + 1 && shot_idx < n_shots) {
+    bool const pml_y = y < pml_y0 || y >= pml_y1;
+    bool const pml_x = x < pml_x0 || x >= pml_x1;
+    int64_t j = y * nx + x;
+    int64_t i = shot_idx * shot_numel + j;
+    TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
+#define ONE(dy, dx) ((TIDE_DTYPE)1)
+#define WORK_X_L(dy, dx) work_x[ND_INDEX(i, dy, dx)]
+#define WORK_Z_L(dy, dx) work_z[ND_INDEX(i, dy, dx)]
+    TIDE_DTYPE const curl_lambda_h =
+        DIFFXH1_ADJ(ONE, WORK_X_L) + DIFFYH1_ADJ(ONE, WORK_Z_L);
+#undef WORK_X_L
+#undef WORK_Z_L
+#undef ONE
+    TIDE_DTYPE const lambda_ey_curr = lambda_ey[i];
+    lambda_ey[i] = ca_val * lambda_ey_curr + curl_lambda_h;
+    if (!pml_y && !pml_x && ca_requires_grad && ey_store != nullptr) {
+      TIDE_DTYPE const ey_n = (TIDE_DTYPE)fp8_e4m3_to_float(ey_store[i]);
+      grad_ca_shot[i] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio_val;
+    }
+    if (!pml_y && !pml_x && cb_requires_grad && curl_h_store != nullptr) {
+      TIDE_DTYPE const curl_h_n = (TIDE_DTYPE)fp8_e4m3_to_float(curl_h_store[i]);
+      grad_cb_shot[i] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio_val;
+    }
+  }
+}
+
 // Combine per-shot gradients into final gradient (sum across shots)
 __global__ void combine_grad(TIDE_DTYPE *__restrict const grad,
                              TIDE_DTYPE const *__restrict const grad_shot) {
@@ -1083,7 +1348,7 @@ __global__ void convert_grad_ca_cb_to_eps_sigma(
     TIDE_DTYPE const *__restrict const grad_cb_shot,
     TIDE_DTYPE *__restrict const grad_eps,
     TIDE_DTYPE *__restrict const grad_sigma,
-    TIDE_DTYPE const dt,
+    scalar_t const dt,
     bool const ca_requires_grad,
     bool const cb_requires_grad,
     bool const ca_batched_h,
@@ -1110,7 +1375,7 @@ __global__ void convert_grad_ca_cb_to_eps_sigma(
   TIDE_DTYPE const ca_val = ca[ca_idx];
   TIDE_DTYPE const cb_val = cb[cb_idx];
   TIDE_DTYPE const cb_sq = cb_val * cb_val;
-  TIDE_DTYPE const inv_dt = (TIDE_DTYPE)1 / dt;
+  TIDE_DTYPE const inv_dt = (TIDE_DTYPE)1 / (TIDE_DTYPE)dt;
 
   TIDE_DTYPE grad_ca_val = 0;
   if (ca_requires_grad) {
@@ -1129,7 +1394,7 @@ __global__ void convert_grad_ca_cb_to_eps_sigma(
 
   if (grad_eps != nullptr) {
     TIDE_DTYPE const grad_e = grad_ca_val * dca_de + grad_cb_val * dcb_de;
-    grad_eps[out_idx] = grad_e * EP0;
+    grad_eps[out_idx] = grad_e * (TIDE_DTYPE)kEp0;
   }
   if (grad_sigma != nullptr) {
     grad_sigma[out_idx] = grad_ca_val * dca_ds + grad_cb_val * dcb_ds;
@@ -1166,9 +1431,9 @@ extern "C" void FUNC(forward)(
     TIDE_DTYPE const *const kxh,
     int64_t const *const sources_i,
     int64_t const *const receivers_i,
-    TIDE_DTYPE const rdy_h,
-    TIDE_DTYPE const rdx_h,
-    TIDE_DTYPE const dt_h,
+    scalar_t const rdy_h,
+    scalar_t const rdx_h,
+    scalar_t const dt_h,
     int64_t const nt,
     int64_t const n_shots_h,
     int64_t const ny_h,
@@ -1195,7 +1460,7 @@ extern "C" void FUNC(forward)(
   int64_t const shot_numel_h = ny_h * nx_h;
 
   // Copy constants to device with caching to avoid redundant copies
-  static TIDE_DTYPE cached_rdy = 0, cached_rdx = 0;
+  static scalar_t cached_rdy = 0, cached_rdx = 0;
   static int64_t cached_n_shots = -1, cached_ny = -1, cached_nx = -1;
   static int64_t cached_shot_numel = -1, cached_n_sources_per_shot = -1, cached_n_receivers_per_shot = -1;
   static int64_t cached_pml_y0 = -1, cached_pml_y1 = -1;
@@ -1213,8 +1478,8 @@ extern "C" void FUNC(forward)(
       cached_ca_batched != ca_batched_h || cached_cb_batched != cb_batched_h ||
       cached_cq_batched != cq_batched_h) {
     
-    cudaMemcpyToSymbol(rdy, &rdy_h, sizeof(TIDE_DTYPE));
-    cudaMemcpyToSymbol(rdx, &rdx_h, sizeof(TIDE_DTYPE));
+    cudaMemcpyToSymbol(rdy, &rdy_h, sizeof(scalar_t));
+    cudaMemcpyToSymbol(rdx, &rdx_h, sizeof(scalar_t));
     cudaMemcpyToSymbol(n_shots, &n_shots_h, sizeof(int64_t));
     cudaMemcpyToSymbol(ny, &ny_h, sizeof(int64_t));
     cudaMemcpyToSymbol(nx, &nx_h, sizeof(int64_t));
@@ -1327,9 +1592,9 @@ extern "C" void FUNC(forward_with_storage)(
     TIDE_DTYPE const *const kxh,
     int64_t const *const sources_i,
     int64_t const *const receivers_i,
-    TIDE_DTYPE const rdy_h,
-    TIDE_DTYPE const rdx_h,
-    TIDE_DTYPE const dt_h,
+    scalar_t const rdy_h,
+    scalar_t const rdx_h,
+    scalar_t const dt_h,
     int64_t const nt,
     int64_t const n_shots_h,
     int64_t const ny_h,
@@ -1358,7 +1623,8 @@ extern "C" void FUNC(forward_with_storage)(
   int64_t const shot_numel_h = ny_h * nx_h;
   size_t const bytes_per_step_store =
       (size_t)shot_bytes_uncomp_h * (size_t)n_shots_h;
-  bool const storage_bf16_h = (shot_bytes_uncomp_h == shot_numel_h * 2);
+  bool const storage_bf16_h =
+      (!kFieldIsHalf) && (shot_bytes_uncomp_h == shot_numel_h * 2);
   bool const storage_fp8_h = (shot_bytes_uncomp_h == shot_numel_h);
   cudaStream_t copy_stream = nullptr;
   cudaEvent_t store_ready;
@@ -1375,7 +1641,7 @@ extern "C" void FUNC(forward_with_storage)(
   }
 
   // Copy constants to device with caching to avoid redundant copies
-  static TIDE_DTYPE cached_rdy2 = 0, cached_rdx2 = 0;
+  static scalar_t cached_rdy2 = 0, cached_rdx2 = 0;
   static int64_t cached_n_shots2 = -1, cached_ny2 = -1, cached_nx2 = -1;
   static int64_t cached_shot_numel2 = -1, cached_n_sources_per_shot2 = -1, cached_n_receivers_per_shot2 = -1;
   static int64_t cached_pml_y02 = -1, cached_pml_y12 = -1;
@@ -1393,8 +1659,8 @@ extern "C" void FUNC(forward_with_storage)(
       cached_ca_batched2 != ca_batched_h || cached_cb_batched2 != cb_batched_h ||
       cached_cq_batched2 != cq_batched_h) {
     
-    cudaMemcpyToSymbol(rdy, &rdy_h, sizeof(TIDE_DTYPE));
-    cudaMemcpyToSymbol(rdx, &rdx_h, sizeof(TIDE_DTYPE));
+    cudaMemcpyToSymbol(rdy, &rdy_h, sizeof(scalar_t));
+    cudaMemcpyToSymbol(rdx, &rdx_h, sizeof(scalar_t));
     cudaMemcpyToSymbol(n_shots, &n_shots_h, sizeof(int64_t));
     cudaMemcpyToSymbol(ny, &ny_h, sizeof(int64_t));
     cudaMemcpyToSymbol(nx, &nx_h, sizeof(int64_t));
@@ -1621,9 +1887,9 @@ extern "C" void FUNC(backward)(
     TIDE_DTYPE const *const kxh,
     int64_t const *const sources_i,
     int64_t const *const receivers_i,
-    TIDE_DTYPE const rdy_h,
-    TIDE_DTYPE const rdx_h,
-    TIDE_DTYPE const dt_h,
+    scalar_t const rdy_h,
+    scalar_t const rdx_h,
+    scalar_t const dt_h,
     int64_t const nt,
     int64_t const n_shots_h,
     int64_t const ny_h,
@@ -1653,7 +1919,8 @@ extern "C" void FUNC(backward)(
   int64_t const shot_numel_h = ny_h * nx_h;
   size_t const bytes_per_step_store =
       (size_t)shot_bytes_uncomp_h * (size_t)n_shots_h;
-  bool const storage_bf16_h = (shot_bytes_uncomp_h == shot_numel_h * 2);
+  bool const storage_bf16_h =
+      (!kFieldIsHalf) && (shot_bytes_uncomp_h == shot_numel_h * 2);
   bool const storage_fp8_h = (shot_bytes_uncomp_h == shot_numel_h);
   cudaStream_t copy_stream = nullptr;
   cudaEvent_t copy_done[NUM_BUFFERS];
@@ -1668,7 +1935,7 @@ extern "C" void FUNC(backward)(
   }
 
   // Copy constants to device with caching to avoid redundant copies
-  static TIDE_DTYPE cached_rdy3 = 0, cached_rdx3 = 0;
+  static scalar_t cached_rdy3 = 0, cached_rdx3 = 0;
   static int64_t cached_n_shots3 = -1, cached_ny3 = -1, cached_nx3 = -1;
   static int64_t cached_shot_numel3 = -1, cached_n_sources_per_shot3 = -1, cached_n_receivers_per_shot3 = -1;
   static int64_t cached_pml_y03 = -1, cached_pml_y13 = -1;
@@ -1686,8 +1953,8 @@ extern "C" void FUNC(backward)(
       cached_ca_batched3 != ca_batched_h || cached_cb_batched3 != cb_batched_h ||
       cached_cq_batched3 != cq_batched_h) {
     
-    cudaMemcpyToSymbol(rdy, &rdy_h, sizeof(TIDE_DTYPE));
-    cudaMemcpyToSymbol(rdx, &rdx_h, sizeof(TIDE_DTYPE));
+    cudaMemcpyToSymbol(rdy, &rdy_h, sizeof(scalar_t));
+    cudaMemcpyToSymbol(rdx, &rdx_h, sizeof(scalar_t));
     cudaMemcpyToSymbol(n_shots, &n_shots_h, sizeof(int64_t));
     cudaMemcpyToSymbol(ny, &ny_h, sizeof(int64_t));
     cudaMemcpyToSymbol(nx, &nx_h, sizeof(int64_t));
@@ -1736,6 +2003,13 @@ extern "C" void FUNC(backward)(
     if (ca_requires_grad) fp_ey = fopen(ey_filenames[0], "rb");
     if (cb_requires_grad) fp_curl = fopen(curl_filenames[0], "rb");
   }
+
+  size_t const adj_work_bytes =
+      (size_t)n_shots_h * (size_t)shot_numel_h * sizeof(TIDE_DTYPE);
+  TIDE_DTYPE *lambda_work_x = nullptr;
+  TIDE_DTYPE *lambda_work_z = nullptr;
+  gpuErrchk(cudaMalloc((void **)&lambda_work_x, adj_work_bytes));
+  gpuErrchk(cudaMalloc((void **)&lambda_work_z, adj_work_bytes));
 
   auto store1_offset_bytes = [&](int64_t store_idx) -> size_t {
     if (storage_mode_h == STORAGE_DEVICE) {
@@ -1847,55 +2121,44 @@ extern "C" void FUNC(backward)(
       }
     }
 
-    // Backward λ_H fields update
-    backward_kernel_lambda_h<<<dimGrid, dimBlock>>>(
-        cb, lambda_ey, lambda_hx, lambda_hz,
-        m_lambda_ey_x, m_lambda_ey_z,
-        ay, ayh, ax, axh, by, byh, bx, bxh,
-        ky, kyh, kx, kxh);
+    gpuErrchk(cudaMemset(lambda_work_x, 0, adj_work_bytes));
+    gpuErrchk(cudaMemset(lambda_work_z, 0, adj_work_bytes));
+    backward_kernel_lambda_h_prepare_exact<<<dimGrid, dimBlock>>>(
+        cb, lambda_ey, m_lambda_ey_x, m_lambda_ey_z,
+        lambda_work_x, lambda_work_z, ay, ax, by, bx, ky, kx);
+    backward_kernel_lambda_h_apply_exact<<<dimGrid, dimBlock>>>(
+        lambda_work_x, lambda_work_z, lambda_hx, lambda_hz);
 
-    // Backward λ_Ey update (specialized kernel when no gradient is needed).
+    gpuErrchk(cudaMemset(lambda_work_x, 0, adj_work_bytes));
+    gpuErrchk(cudaMemset(lambda_work_z, 0, adj_work_bytes));
+    backward_kernel_lambda_e_prepare_exact<<<dimGrid, dimBlock>>>(
+        cq, lambda_hx, lambda_hz, m_lambda_hx_z, m_lambda_hz_x,
+        lambda_work_x, lambda_work_z, ayh, axh, byh, bxh, kyh, kxh);
+
     if (grad_ey || grad_curl) {
       if (storage_fp8_h) {
-        backward_kernel_lambda_e_with_grad_fp8<<<dimGrid, dimBlock>>>(
-            ca, cq, lambda_hx, lambda_hz, lambda_ey,
-            m_lambda_hx_z, m_lambda_hz_x,
+        backward_kernel_lambda_e_apply_exact_fp8<<<dimGrid, dimBlock>>>(
+            ca, lambda_work_x, lambda_work_z, lambda_ey,
             grad_ey ? (uint8_t const *)ey_store_1_t : nullptr,
             grad_curl ? (uint8_t const *)curl_store_1_t : nullptr,
-            grad_ca_shot, grad_cb_shot,
-            ay, ayh, ax, axh, by, byh, bx, bxh,
-            ky, kyh, kx, kxh,
-            grad_ey, grad_curl,
-            step_ratio_h);
+            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h);
       } else if (storage_bf16_h) {
-        backward_kernel_lambda_e_with_grad_bf16<<<dimGrid, dimBlock>>>(
-            ca, cq, lambda_hx, lambda_hz, lambda_ey,
-            m_lambda_hx_z, m_lambda_hz_x,
+        backward_kernel_lambda_e_apply_exact_bf16<<<dimGrid, dimBlock>>>(
+            ca, lambda_work_x, lambda_work_z, lambda_ey,
             grad_ey ? (__nv_bfloat16 const *)ey_store_1_t : nullptr,
             grad_curl ? (__nv_bfloat16 const *)curl_store_1_t : nullptr,
-            grad_ca_shot, grad_cb_shot,
-            ay, ayh, ax, axh, by, byh, bx, bxh,
-            ky, kyh, kx, kxh,
-            grad_ey, grad_curl,
-            step_ratio_h);
+            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h);
       } else {
-        backward_kernel_lambda_e_with_grad<<<dimGrid, dimBlock>>>(
-            ca, cq, lambda_hx, lambda_hz, lambda_ey,
-            m_lambda_hx_z, m_lambda_hz_x,
+        backward_kernel_lambda_e_apply_exact<<<dimGrid, dimBlock>>>(
+            ca, lambda_work_x, lambda_work_z, lambda_ey,
             grad_ey ? (TIDE_DTYPE const *)ey_store_1_t : nullptr,
             grad_curl ? (TIDE_DTYPE const *)curl_store_1_t : nullptr,
-            grad_ca_shot, grad_cb_shot,
-            ay, ayh, ax, axh, by, byh, bx, bxh,
-            ky, kyh, kx, kxh,
-            grad_ey, grad_curl,
-            step_ratio_h);
+            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h);
       }
     } else {
-      backward_kernel_lambda_e<<<dimGrid, dimBlock>>>(
-          ca, cq, lambda_hx, lambda_hz, lambda_ey,
-          m_lambda_hx_z, m_lambda_hz_x,
-          ay, ayh, ax, axh, by, byh, bx, bxh,
-          ky, kyh, kx, kxh);
+      backward_kernel_lambda_e_apply_exact<<<dimGrid, dimBlock>>>(
+          ca, lambda_work_x, lambda_work_z, lambda_ey,
+          nullptr, nullptr, grad_ca_shot, grad_cb_shot, false, false, 1);
     }
 
     if (storage_mode_h == STORAGE_CPU && do_grad &&
@@ -1943,6 +2206,9 @@ extern "C" void FUNC(backward)(
         ca_requires_grad, cb_requires_grad,
         ca_batched_h, cb_batched_h);
   }
+
+  gpuErrchk(cudaFree(lambda_work_x));
+  gpuErrchk(cudaFree(lambda_work_z));
 
   gpuErrchk(cudaPeekAtLastError());
 }

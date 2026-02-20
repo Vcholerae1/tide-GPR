@@ -218,7 +218,7 @@ static void convert_grad_ca_cb_to_eps_sigma(
   TIDE_DTYPE const inv_dt = (TIDE_DTYPE)1 / dt;
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(out_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < out_shots; ++shot_idx) {
     int64_t const shot_offset = shot_idx * shot_numel;
     int64_t const out_offset = ca_batched ? shot_offset : 0;
@@ -268,7 +268,7 @@ static void add_sources_ey(
     int64_t const n_sources_per_shot) {
   
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
 TIDE_OMP_SIMD
     for (int64_t source_idx = 0; source_idx < n_sources_per_shot; ++source_idx) {
@@ -289,7 +289,7 @@ static void subtract_sources_ey(
     int64_t const n_sources_per_shot) {
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
 TIDE_OMP_SIMD
     for (int64_t source_idx = 0; source_idx < n_sources_per_shot; ++source_idx) {
@@ -311,7 +311,7 @@ static void record_receivers_ey(
     int64_t const n_receivers_per_shot) {
   
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
 TIDE_OMP_SIMD
     for (int64_t receiver_idx = 0; receiver_idx < n_receivers_per_shot; ++receiver_idx) {
@@ -336,7 +336,7 @@ static void gather_boundary_3_cpu(
     int64_t const shot_numel) {
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
 TIDE_OMP_SIMD
     for (int64_t bi = 0; bi < boundary_numel; ++bi) {
@@ -359,7 +359,7 @@ static void scatter_boundary_cpu(
     int64_t const shot_numel) {
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
 TIDE_OMP_SIMD
     for (int64_t bi = 0; bi < boundary_numel; ++bi) {
@@ -382,7 +382,7 @@ static void scatter_boundary_2_cpu(
     int64_t const shot_numel) {
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
 TIDE_OMP_SIMD
     for (int64_t bi = 0; bi < boundary_numel; ++bi) {
@@ -408,7 +408,7 @@ static void gather_boundary_3_cpu_bf16(
     int64_t const shot_numel) {
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
 TIDE_OMP_SIMD
     for (int64_t bi = 0; bi < boundary_numel; ++bi) {
@@ -431,7 +431,7 @@ static void scatter_boundary_cpu_bf16(
     int64_t const shot_numel) {
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
 TIDE_OMP_SIMD
     for (int64_t bi = 0; bi < boundary_numel; ++bi) {
@@ -454,7 +454,7 @@ static void scatter_boundary_2_cpu_bf16(
     int64_t const shot_numel) {
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
 TIDE_OMP_SIMD
     for (int64_t bi = 0; bi < boundary_numel; ++bi) {
@@ -481,7 +481,7 @@ static void gather_boundary_3_cpu_fp8(
     int64_t const shot_numel) {
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
 TIDE_OMP_SIMD
     for (int64_t bi = 0; bi < boundary_numel; ++bi) {
@@ -504,7 +504,7 @@ static void scatter_boundary_cpu_fp8(
     int64_t const shot_numel) {
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
 TIDE_OMP_SIMD
     for (int64_t bi = 0; bi < boundary_numel; ++bi) {
@@ -527,7 +527,7 @@ static void scatter_boundary_2_cpu_fp8(
     int64_t const shot_numel) {
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
 TIDE_OMP_SIMD
     for (int64_t bi = 0; bi < boundary_numel; ++bi) {
@@ -556,6 +556,37 @@ static inline void *boundary_store_ptr(
     return (uint8_t *)store_3 + offset_bytes;
   }
   return (uint8_t *)store_1;
+}
+
+/*
+ * work_* buffers are fully overwritten in [FD_PAD, ny-FD_PAD] x [FD_PAD, nx-FD_PAD].
+ * Only derivative halos need explicit zeroing each backward step.
+ */
+static inline void clear_work_halo(
+    TIDE_DTYPE *__restrict const work,
+    int64_t const shot_offset,
+    int64_t const ny,
+    int64_t const nx) {
+  size_t const row_bytes = (size_t)nx * sizeof(TIDE_DTYPE);
+
+  for (int64_t y = 0; y < FD_PAD; ++y) {
+    memset(work + shot_offset + y * nx, 0, row_bytes);
+  }
+  for (int64_t y = ny - FD_PAD + 1; y < ny; ++y) {
+    memset(work + shot_offset + y * nx, 0, row_bytes);
+  }
+
+  for (int64_t y = FD_PAD; y <= ny - FD_PAD; ++y) {
+    TIDE_DTYPE *row_ptr = work + shot_offset + y * nx;
+TIDE_OMP_SIMD
+    for (int64_t x = 0; x < FD_PAD; ++x) {
+      row_ptr[x] = (TIDE_DTYPE)0;
+    }
+TIDE_OMP_SIMD
+    for (int64_t x = nx - FD_PAD + 1; x < nx; ++x) {
+      row_ptr[x] = (TIDE_DTYPE)0;
+    }
+  }
 }
 
 
@@ -597,43 +628,90 @@ static void forward_kernel_h(
   int64_t const pml_bounds_yh[] = {FD_PAD, pml_y0h, pml_y1h, ny - FD_PAD + 1};
   int64_t const pml_bounds_xh[] = {FD_PAD, pml_x0h, pml_x1h, nx - FD_PAD + 1};
 
+  /* PML regions only (exclude center). */
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+  TIDE_OMP_INDEX pml_y;
+  TIDE_OMP_INDEX pml_x;
+TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    int64_t const shot_offset = shot_idx * shot_numel;
-    TIDE_DTYPE const *__restrict const cq_ptr =
-        cq_batched ? (cq + shot_offset) : cq;
-    for (int pml_y = 0; pml_y < 3; ++pml_y) {
-      for (int pml_x = 0; pml_x < 3; ++pml_x) {
+    for (pml_y = 0; pml_y < 3; ++pml_y) {
+      for (pml_x = 0; pml_x < 3; ++pml_x) {
+        if (pml_y == 1 && pml_x == 1) {
+          continue;
+        }
+        bool const apply_pml_y = (pml_y != 1);
+        bool const apply_pml_x = (pml_x != 1);
+        int64_t const shot_offset = shot_idx * shot_numel;
+        TIDE_DTYPE const *__restrict const cq_ptr =
+            cq_batched ? (cq + shot_offset) : cq;
 TIDE_OMP_SIMD_COLLAPSE2
-        for (int64_t y = pml_bounds_yh[pml_y]; y < pml_bounds_yh[pml_y + 1]; ++y) {
-          for (int64_t x = pml_bounds_xh[pml_x]; x < pml_bounds_xh[pml_x + 1]; ++x) {
+        for (int64_t y = pml_bounds_yh[pml_y]; y < pml_bounds_yh[pml_y + 1];
+             ++y) {
+          for (int64_t x = pml_bounds_xh[pml_x]; x < pml_bounds_xh[pml_x + 1];
+               ++x) {
             int64_t const idx = IDX(y, x);
             TIDE_DTYPE const cq_val = cq_ptr[idx];
 
             if (y < ny - FD_PAD) {
               TIDE_DTYPE dey_dz = DIFFYH1(EY);
-
-              if (pml_y != 1) {
+              if (apply_pml_y) {
                 M_EY_Z(0, 0) = byh[y] * M_EY_Z(0, 0) + ayh[y] * dey_dz;
                 dey_dz = dey_dz / kyh[y] + M_EY_Z(0, 0);
               }
-
               HX(0, 0) -= cq_val * dey_dz;
             }
 
             if (x < nx - FD_PAD) {
               TIDE_DTYPE dey_dx = DIFFXH1(EY);
-
-              if (pml_x != 1) {
+              if (apply_pml_x) {
                 M_EY_X(0, 0) = bxh[x] * M_EY_X(0, 0) + axh[x] * dey_dx;
                 dey_dx = dey_dx / kxh[x] + M_EY_X(0, 0);
               }
-
               HZ(0, 0) += cq_val * dey_dx;
             }
           }
         }
+      }
+    }
+  }
+
+  /* Center region: no PML memory update. */
+  int64_t const center_y0 = pml_bounds_yh[1];
+  int64_t const center_y1 = pml_bounds_yh[2];
+  int64_t const center_x0 = pml_bounds_xh[1];
+  int64_t const center_x1 = pml_bounds_xh[2];
+  int64_t const y_main_end = MIN(center_y1, ny - FD_PAD);
+  int64_t const x_main_end = MIN(center_x1, nx - FD_PAD);
+
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
+  for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    int64_t const shot_offset = shot_idx * shot_numel;
+    TIDE_DTYPE const *__restrict const cq_ptr =
+        cq_batched ? (cq + shot_offset) : cq;
+
+    for (int64_t y = center_y0; y < y_main_end; ++y) {
+TIDE_OMP_SIMD
+      for (int64_t x = center_x0; x < x_main_end; ++x) {
+        int64_t const idx = IDX(y, x);
+        TIDE_DTYPE const cq_val = cq_ptr[idx];
+        HX(0, 0) -= cq_val * DIFFYH1(EY);
+        HZ(0, 0) += cq_val * DIFFXH1(EY);
+      }
+      if (x_main_end < center_x1) {
+        int64_t const x = x_main_end;
+        int64_t const idx = IDX(y, x);
+        TIDE_DTYPE const cq_val = cq_ptr[idx];
+        HX(0, 0) -= cq_val * DIFFYH1(EY);
+      }
+    }
+
+    if (y_main_end < center_y1) {
+      int64_t const y = y_main_end;
+TIDE_OMP_SIMD
+      for (int64_t x = center_x0; x < x_main_end; ++x) {
+        int64_t const idx = IDX(y, x);
+        TIDE_DTYPE const cq_val = cq_ptr[idx];
+        HZ(0, 0) += cq_val * DIFFXH1(EY);
       }
     }
   }
@@ -687,19 +765,29 @@ static void forward_kernel_e_with_storage(
   int64_t const pml_bounds_y[] = {FD_PAD, pml_y0, pml_y1, ny - FD_PAD + 1};
   int64_t const pml_bounds_x[] = {FD_PAD, pml_x0, pml_x1, nx - FD_PAD + 1};
 
+  /* PML regions only (exclude center). */
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+  TIDE_OMP_INDEX pml_y;
+  TIDE_OMP_INDEX pml_x;
+TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    int64_t const shot_offset = shot_idx * shot_numel;
-    TIDE_DTYPE const *__restrict const ca_ptr =
-        ca_batched ? (ca + shot_offset) : ca;
-    TIDE_DTYPE const *__restrict const cb_ptr =
-        cb_batched ? (cb + shot_offset) : cb;
-    for (int pml_y = 0; pml_y < 3; ++pml_y) {
-      for (int pml_x = 0; pml_x < 3; ++pml_x) {
+    for (pml_y = 0; pml_y < 3; ++pml_y) {
+      for (pml_x = 0; pml_x < 3; ++pml_x) {
+        if (pml_y == 1 && pml_x == 1) {
+          continue;
+        }
+        bool const apply_pml_y = (pml_y != 1);
+        bool const apply_pml_x = (pml_x != 1);
+        int64_t const shot_offset = shot_idx * shot_numel;
+        TIDE_DTYPE const *__restrict const ca_ptr =
+            ca_batched ? (ca + shot_offset) : ca;
+        TIDE_DTYPE const *__restrict const cb_ptr =
+            cb_batched ? (cb + shot_offset) : cb;
 TIDE_OMP_SIMD_COLLAPSE2
-        for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
-          for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
+        for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1];
+             ++y) {
+          for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1];
+               ++x) {
             int64_t const idx = IDX(y, x);
             int64_t const store_idx = shot_offset + idx;
             TIDE_DTYPE const ca_val = ca_ptr[idx];
@@ -708,12 +796,12 @@ TIDE_OMP_SIMD_COLLAPSE2
             TIDE_DTYPE dhz_dx = DIFFX1(HZ);
             TIDE_DTYPE dhx_dz = DIFFY1(HX);
 
-            if (pml_x != 1) {
+            if (apply_pml_x) {
               M_HZ_X(0, 0) = bx[x] * M_HZ_X(0, 0) + ax[x] * dhz_dx;
               dhz_dx = dhz_dx / kx[x] + M_HZ_X(0, 0);
             }
 
-            if (pml_y != 1) {
+            if (apply_pml_y) {
               M_HX_Z(0, 0) = by[y] * M_HX_Z(0, 0) + ay[y] * dhx_dz;
               dhx_dz = dhx_dz / ky[y] + M_HX_Z(0, 0);
             }
@@ -730,6 +818,38 @@ TIDE_OMP_SIMD_COLLAPSE2
             EY(0, 0) = ca_val * EY(0, 0) + cb_val * curl_h;
           }
         }
+      }
+    }
+  }
+
+  /* Center region: no PML memory update. */
+  TIDE_OMP_INDEX y;
+TIDE_OMP_PARALLEL_FOR_COLLAPSE2_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
+  for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    for (y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+      int64_t const shot_offset = shot_idx * shot_numel;
+      TIDE_DTYPE const *__restrict const ca_ptr =
+          ca_batched ? (ca + shot_offset) : ca;
+      TIDE_DTYPE const *__restrict const cb_ptr =
+          cb_batched ? (cb + shot_offset) : cb;
+TIDE_OMP_SIMD
+      for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+        int64_t const idx = IDX(y, x);
+        int64_t const store_idx = shot_offset + idx;
+        TIDE_DTYPE const ca_val = ca_ptr[idx];
+        TIDE_DTYPE const cb_val = cb_ptr[idx];
+        TIDE_DTYPE const dhz_dx = DIFFX1(HZ);
+        TIDE_DTYPE const dhx_dz = DIFFY1(HX);
+        TIDE_DTYPE const curl_h = dhz_dx - dhx_dz;
+
+        if (ca_requires_grad && ey_store != NULL) {
+          ey_store[store_idx] = EY(0, 0);
+        }
+        if (cb_requires_grad && curl_h_store != NULL) {
+          curl_h_store[store_idx] = curl_h;
+        }
+
+        EY(0, 0) = ca_val * EY(0, 0) + cb_val * curl_h;
       }
     }
   }
@@ -774,49 +894,100 @@ static void forward_kernel_e_with_storage_bf16(
 
   int64_t const pml_bounds_y[] = {FD_PAD, pml_y0, pml_y1, ny - FD_PAD + 1};
   int64_t const pml_bounds_x[] = {FD_PAD, pml_x0, pml_x1, nx - FD_PAD + 1};
+  bool const store_ey = ca_requires_grad && (ey_store != NULL);
+  bool const store_curl = cb_requires_grad && (curl_h_store != NULL);
 
+  /* PML regions only (exclude center). */
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+  TIDE_OMP_INDEX pml_y;
+  TIDE_OMP_INDEX pml_x;
+TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    int64_t const shot_offset = shot_idx * shot_numel;
-    TIDE_DTYPE const *__restrict const ca_ptr =
-        ca_batched ? (ca + shot_offset) : ca;
-    TIDE_DTYPE const *__restrict const cb_ptr =
-        cb_batched ? (cb + shot_offset) : cb;
-    for (int pml_y = 0; pml_y < 3; ++pml_y) {
-      for (int pml_x = 0; pml_x < 3; ++pml_x) {
-TIDE_OMP_SIMD_COLLAPSE2
-        for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
-          for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
-            int64_t const idx = IDX(y, x);
-            int64_t const store_idx = shot_offset + idx;
+    for (pml_y = 0; pml_y < 3; ++pml_y) {
+      for (pml_x = 0; pml_x < 3; ++pml_x) {
+        if (pml_y == 1 && pml_x == 1) {
+          continue;
+        }
+        bool const apply_pml_y = (pml_y != 1);
+        bool const apply_pml_x = (pml_x != 1);
+        int64_t const shot_offset = shot_idx * shot_numel;
+        TIDE_DTYPE const *__restrict const ca_ptr =
+            ca_batched ? (ca + shot_offset) : ca;
+        TIDE_DTYPE const *__restrict const cb_ptr =
+            cb_batched ? (cb + shot_offset) : cb;
+        for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1];
+             ++y) {
+          int64_t const row_offset = shot_offset + y * nx;
+          tide_bfloat16 *__restrict const ey_row =
+              store_ey ? (ey_store + row_offset) : NULL;
+          tide_bfloat16 *__restrict const curl_row =
+              store_curl ? (curl_h_store + row_offset) : NULL;
+TIDE_OMP_SIMD
+          for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1];
+               ++x) {
+            int64_t const idx = row_offset + x;
             TIDE_DTYPE const ca_val = ca_ptr[idx];
             TIDE_DTYPE const cb_val = cb_ptr[idx];
 
             TIDE_DTYPE dhz_dx = DIFFX1(HZ);
             TIDE_DTYPE dhx_dz = DIFFY1(HX);
 
-            if (pml_x != 1) {
+            if (apply_pml_x) {
               M_HZ_X(0, 0) = bx[x] * M_HZ_X(0, 0) + ax[x] * dhz_dx;
               dhz_dx = dhz_dx / kx[x] + M_HZ_X(0, 0);
             }
 
-            if (pml_y != 1) {
+            if (apply_pml_y) {
               M_HX_Z(0, 0) = by[y] * M_HX_Z(0, 0) + ay[y] * dhx_dz;
               dhx_dz = dhx_dz / ky[y] + M_HX_Z(0, 0);
             }
 
             TIDE_DTYPE curl_h = dhz_dx - dhx_dz;
-            if (ca_requires_grad && ey_store != NULL) {
-              ey_store[store_idx] = tide_float_to_bf16((float)EY(0, 0));
+            if (store_ey) {
+              ey_row[x] = tide_float_to_bf16((float)EY(0, 0));
             }
-            if (cb_requires_grad && curl_h_store != NULL) {
-              curl_h_store[store_idx] = tide_float_to_bf16((float)curl_h);
+            if (store_curl) {
+              curl_row[x] = tide_float_to_bf16((float)curl_h);
             }
 
             EY(0, 0) = ca_val * EY(0, 0) + cb_val * curl_h;
           }
         }
+      }
+    }
+  }
+
+  /* Center region: no PML memory update. */
+  TIDE_OMP_INDEX y;
+TIDE_OMP_PARALLEL_FOR_COLLAPSE2_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
+  for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    for (y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+      int64_t const shot_offset = shot_idx * shot_numel;
+      TIDE_DTYPE const *__restrict const ca_ptr =
+          ca_batched ? (ca + shot_offset) : ca;
+      TIDE_DTYPE const *__restrict const cb_ptr =
+          cb_batched ? (cb + shot_offset) : cb;
+      int64_t const row_offset = shot_offset + y * nx;
+      tide_bfloat16 *__restrict const ey_row =
+          store_ey ? (ey_store + row_offset) : NULL;
+      tide_bfloat16 *__restrict const curl_row =
+          store_curl ? (curl_h_store + row_offset) : NULL;
+TIDE_OMP_SIMD
+      for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+        int64_t const idx = row_offset + x;
+        TIDE_DTYPE const ca_val = ca_ptr[idx];
+        TIDE_DTYPE const cb_val = cb_ptr[idx];
+        TIDE_DTYPE const dhz_dx = DIFFX1(HZ);
+        TIDE_DTYPE const dhx_dz = DIFFY1(HX);
+        TIDE_DTYPE const curl_h = dhz_dx - dhx_dz;
+        if (store_ey) {
+          ey_row[x] = tide_float_to_bf16((float)EY(0, 0));
+        }
+        if (store_curl) {
+          curl_row[x] = tide_float_to_bf16((float)curl_h);
+        }
+
+        EY(0, 0) = ca_val * EY(0, 0) + cb_val * curl_h;
       }
     }
   }
@@ -862,19 +1033,29 @@ static void forward_kernel_e_with_storage_fp8(
   int64_t const pml_bounds_y[] = {FD_PAD, pml_y0, pml_y1, ny - FD_PAD + 1};
   int64_t const pml_bounds_x[] = {FD_PAD, pml_x0, pml_x1, nx - FD_PAD + 1};
 
+  /* PML regions only (exclude center). */
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+  TIDE_OMP_INDEX pml_y;
+  TIDE_OMP_INDEX pml_x;
+TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    int64_t const shot_offset = shot_idx * shot_numel;
-    TIDE_DTYPE const *__restrict const ca_ptr =
-        ca_batched ? (ca + shot_offset) : ca;
-    TIDE_DTYPE const *__restrict const cb_ptr =
-        cb_batched ? (cb + shot_offset) : cb;
-    for (int pml_y = 0; pml_y < 3; ++pml_y) {
-      for (int pml_x = 0; pml_x < 3; ++pml_x) {
+    for (pml_y = 0; pml_y < 3; ++pml_y) {
+      for (pml_x = 0; pml_x < 3; ++pml_x) {
+        if (pml_y == 1 && pml_x == 1) {
+          continue;
+        }
+        bool const apply_pml_y = (pml_y != 1);
+        bool const apply_pml_x = (pml_x != 1);
+        int64_t const shot_offset = shot_idx * shot_numel;
+        TIDE_DTYPE const *__restrict const ca_ptr =
+            ca_batched ? (ca + shot_offset) : ca;
+        TIDE_DTYPE const *__restrict const cb_ptr =
+            cb_batched ? (cb + shot_offset) : cb;
 TIDE_OMP_SIMD_COLLAPSE2
-        for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
-          for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
+        for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1];
+             ++y) {
+          for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1];
+               ++x) {
             int64_t const idx = IDX(y, x);
             int64_t const store_idx = shot_offset + idx;
             TIDE_DTYPE const ca_val = ca_ptr[idx];
@@ -883,12 +1064,12 @@ TIDE_OMP_SIMD_COLLAPSE2
             TIDE_DTYPE dhz_dx = DIFFX1(HZ);
             TIDE_DTYPE dhx_dz = DIFFY1(HX);
 
-            if (pml_x != 1) {
+            if (apply_pml_x) {
               M_HZ_X(0, 0) = bx[x] * M_HZ_X(0, 0) + ax[x] * dhz_dx;
               dhz_dx = dhz_dx / kx[x] + M_HZ_X(0, 0);
             }
 
-            if (pml_y != 1) {
+            if (apply_pml_y) {
               M_HX_Z(0, 0) = by[y] * M_HX_Z(0, 0) + ay[y] * dhx_dz;
               dhx_dz = dhx_dz / ky[y] + M_HX_Z(0, 0);
             }
@@ -904,6 +1085,37 @@ TIDE_OMP_SIMD_COLLAPSE2
             EY(0, 0) = ca_val * EY(0, 0) + cb_val * curl_h;
           }
         }
+      }
+    }
+  }
+
+  /* Center region: no PML memory update. */
+  TIDE_OMP_INDEX y;
+TIDE_OMP_PARALLEL_FOR_COLLAPSE2_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
+  for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    for (y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+      int64_t const shot_offset = shot_idx * shot_numel;
+      TIDE_DTYPE const *__restrict const ca_ptr =
+          ca_batched ? (ca + shot_offset) : ca;
+      TIDE_DTYPE const *__restrict const cb_ptr =
+          cb_batched ? (cb + shot_offset) : cb;
+TIDE_OMP_SIMD
+      for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+        int64_t const idx = IDX(y, x);
+        int64_t const store_idx = shot_offset + idx;
+        TIDE_DTYPE const ca_val = ca_ptr[idx];
+        TIDE_DTYPE const cb_val = cb_ptr[idx];
+        TIDE_DTYPE const dhz_dx = DIFFX1(HZ);
+        TIDE_DTYPE const dhx_dz = DIFFY1(HX);
+        TIDE_DTYPE const curl_h = dhz_dx - dhx_dz;
+        if (ca_requires_grad && ey_store != NULL) {
+          ey_store[store_idx] = tide_float_to_fp8_e4m3((float)EY(0, 0));
+        }
+        if (cb_requires_grad && curl_h_store != NULL) {
+          curl_h_store[store_idx] = tide_float_to_fp8_e4m3((float)curl_h);
+        }
+
+        EY(0, 0) = ca_val * EY(0, 0) + cb_val * curl_h;
       }
     }
   }
@@ -1307,7 +1519,21 @@ static void backward_kernel_lambda_h(
     int64_t const pml_y1,
     int64_t const pml_x0,
     int64_t const pml_x1,
-    bool const cb_batched) {
+    bool const cb_batched,
+    TIDE_DTYPE *__restrict const work_x,
+    TIDE_DTYPE *__restrict const work_z) {
+#define ONE(dy, dx) ((TIDE_DTYPE)1)
+#define WORK_X(dy, dx) work_x[shot_offset + IDX(y + (dy), x + (dx))]
+#define WORK_Z(dy, dx) work_z[shot_offset + IDX(y + (dy), x + (dx))]
+
+  (void)ayh;
+  (void)axh;
+  (void)byh;
+  (void)bxh;
+  (void)kyh;
+  (void)kxh;
+  (void)rdy;
+  (void)rdx;
 
   int64_t const pml_y0h = pml_y0;
   int64_t const pml_y1h = MAX(pml_y0, pml_y1 - 1);
@@ -1317,45 +1543,75 @@ static void backward_kernel_lambda_h(
   int64_t const pml_bounds_xh[] = {FD_PAD, pml_x0h, pml_x1h, nx - FD_PAD + 1};
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
     int64_t const shot_offset = shot_idx * shot_numel;
     TIDE_DTYPE const *__restrict const cb_ptr =
         cb_batched ? (cb + shot_offset) : cb;
+
+    clear_work_halo(work_x, shot_offset, ny, nx);
+    clear_work_halo(work_z, shot_offset, ny, nx);
+
+    /* PML regions only (exclude center). */
     for (int pml_y = 0; pml_y < 3; ++pml_y) {
       for (int pml_x = 0; pml_x < 3; ++pml_x) {
-TIDE_OMP_SIMD_COLLAPSE2
+        if (pml_y == 1 && pml_x == 1) {
+          continue;
+        }
+        bool const in_pml_y = (pml_y != 1);
+        bool const in_pml_x = (pml_x != 1);
         for (int64_t y = pml_bounds_yh[pml_y]; y < pml_bounds_yh[pml_y + 1]; ++y) {
           for (int64_t x = pml_bounds_xh[pml_x]; x < pml_bounds_xh[pml_x + 1]; ++x) {
             int64_t const idx = IDX(y, x);
-            TIDE_DTYPE const cb_val = cb_ptr[idx];
+            TIDE_DTYPE const g = cb_ptr[idx] * LAMBDA_EY(0, 0);
 
-            if (y < ny - FD_PAD) {
-              TIDE_DTYPE d_lambda_ey_dz = DIFFYH1(LAMBDA_EY);
-
-              if (pml_y != 1) {
-                M_LAMBDA_EY_Z(0, 0) = byh[y] * M_LAMBDA_EY_Z(0, 0) + ayh[y] * d_lambda_ey_dz;
-                d_lambda_ey_dz = d_lambda_ey_dz / kyh[y] + M_LAMBDA_EY_Z(0, 0);
-              }
-
-              LAMBDA_HX(0, 0) -= cb_val * d_lambda_ey_dz;
+            if (in_pml_x) {
+              TIDE_DTYPE const tmp_x = M_LAMBDA_EY_X(0, 0) + g;
+              WORK_X(0, 0) = g / kx[x] + ax[x] * tmp_x;
+              M_LAMBDA_EY_X(0, 0) = bx[x] * tmp_x;
+            } else {
+              WORK_X(0, 0) = g;
             }
 
-            if (x < nx - FD_PAD) {
-              TIDE_DTYPE d_lambda_ey_dx = DIFFXH1(LAMBDA_EY);
-
-              if (pml_x != 1) {
-                M_LAMBDA_EY_X(0, 0) = bxh[x] * M_LAMBDA_EY_X(0, 0) + axh[x] * d_lambda_ey_dx;
-                d_lambda_ey_dx = d_lambda_ey_dx / kxh[x] + M_LAMBDA_EY_X(0, 0);
-              }
-
-              LAMBDA_HZ(0, 0) += cb_val * d_lambda_ey_dx;
+            if (in_pml_y) {
+              TIDE_DTYPE const tmp_z = M_LAMBDA_EY_Z(0, 0) + g;
+              WORK_Z(0, 0) = g / ky[y] + ay[y] * tmp_z;
+              M_LAMBDA_EY_Z(0, 0) = by[y] * tmp_z;
+            } else {
+              WORK_Z(0, 0) = g;
             }
           }
         }
       }
     }
+
+    /* Center region: no CPML memory update. */
+    for (int64_t y = pml_bounds_yh[1]; y < pml_bounds_yh[2]; ++y) {
+      for (int64_t x = pml_bounds_xh[1]; x < pml_bounds_xh[2]; ++x) {
+        int64_t const idx = IDX(y, x);
+        TIDE_DTYPE const g = cb_ptr[idx] * LAMBDA_EY(0, 0);
+        WORK_X(0, 0) = g;
+        WORK_Z(0, 0) = g;
+      }
+    }
+
+    for (int64_t y = FD_PAD; y < ny - FD_PAD; ++y) {
+      for (int64_t x = FD_PAD; x < nx - FD_PAD; ++x) {
+        LAMBDA_HX(0, 0) -= DIFFY1_ADJ(ONE, WORK_Z);
+        LAMBDA_HZ(0, 0) += DIFFX1_ADJ(ONE, WORK_X);
+      }
+      int64_t const x = nx - FD_PAD;
+      LAMBDA_HX(0, 0) -= DIFFY1_ADJ(ONE, WORK_Z);
+    }
+
+    int64_t const y = ny - FD_PAD;
+    for (int64_t x = FD_PAD; x < nx - FD_PAD; ++x) {
+      LAMBDA_HZ(0, 0) += DIFFX1_ADJ(ONE, WORK_X);
+    }
   }
+#undef ONE
+#undef WORK_X
+#undef WORK_Z
 }
 
 
@@ -1412,94 +1668,215 @@ static void backward_kernel_lambda_e_with_grad(
     bool const cq_batched,
     bool const ca_requires_grad,
     bool const cb_requires_grad,
-    int64_t const step_ratio) {
+    int64_t const step_ratio,
+    TIDE_DTYPE *__restrict const work_x,
+    TIDE_DTYPE *__restrict const work_z) {
+#define ONE(dy, dx) ((TIDE_DTYPE)1)
+#define WORK_X(dy, dx) work_x[shot_offset + IDX(y + (dy), x + (dx))]
+#define WORK_Z(dy, dx) work_z[shot_offset + IDX(y + (dy), x + (dx))]
 
-  // PML region bounds arrays
-  // pml_bounds[0] = FD_PAD (start of computational domain)
-  // pml_bounds[1] = pml_y0 (start of interior region)
-  // pml_bounds[2] = pml_y1 (end of interior region)
-  // pml_bounds[3] = ny - FD_PAD + 1 (end of computational domain)
+  (void)ay;
+  (void)ax;
+  (void)by;
+  (void)bx;
+  (void)ky;
+  (void)kx;
+
   int64_t const pml_bounds_y[] = {FD_PAD, pml_y0, pml_y1, ny - FD_PAD + 1};
   int64_t const pml_bounds_x[] = {FD_PAD, pml_x0, pml_x1, nx - FD_PAD + 1};
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
     int64_t const shot_offset = shot_idx * shot_numel;
     TIDE_DTYPE const *__restrict const ca_ptr =
         ca_batched ? (ca + shot_offset) : ca;
     TIDE_DTYPE const *__restrict const cq_ptr =
         cq_batched ? (cq + shot_offset) : cq;
-    // Loop over 3x3 grid of regions
+
+    clear_work_halo(work_x, shot_offset, ny, nx);
+    clear_work_halo(work_z, shot_offset, ny, nx);
+
+    /* PML regions only (exclude center). */
     for (int pml_y = 0; pml_y < 3; ++pml_y) {
       for (int pml_x = 0; pml_x < 3; ++pml_x) {
-TIDE_OMP_SIMD_COLLAPSE2
+        if (pml_y == 1 && pml_x == 1) {
+          continue;
+        }
+        bool const apply_pml_y = (pml_y != 1);
+        bool const apply_pml_x = (pml_x != 1);
         for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
           for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
             int64_t const idx = IDX(y, x);
-            int64_t const store_idx = shot_offset + idx;
-            TIDE_DTYPE const ca_val = ca_ptr[idx];
-            TIDE_DTYPE const cq_val = cq_ptr[idx];
+            TIDE_DTYPE const g_x = cq_ptr[idx] * LAMBDA_HZ(0, 0);
+            TIDE_DTYPE const g_z = -cq_ptr[idx] * LAMBDA_HX(0, 0);
 
-            // Compute d(λ_Hz)/dx at integer grid points
-            TIDE_DTYPE d_lambda_hz_dx = DIFFX1(LAMBDA_HZ);
-            // Compute d(λ_Hx)/dz at integer grid points
-            TIDE_DTYPE d_lambda_hx_dz = DIFFY1(LAMBDA_HX);
-
-            // Apply adjoint CPML for d(λ_Hz)/dx (only in PML regions)
-            if (pml_x != 1) {
-              M_LAMBDA_HZ_X(0, 0) = bx[x] * M_LAMBDA_HZ_X(0, 0) + ax[x] * d_lambda_hz_dx;
-              d_lambda_hz_dx = d_lambda_hz_dx / kx[x] + M_LAMBDA_HZ_X(0, 0);
+            if (apply_pml_x) {
+              TIDE_DTYPE const tmp_x = M_LAMBDA_HZ_X(0, 0) + g_x;
+              WORK_X(0, 0) = g_x / kxh[x] + axh[x] * tmp_x;
+              M_LAMBDA_HZ_X(0, 0) = bxh[x] * tmp_x;
+            } else {
+              WORK_X(0, 0) = g_x;
             }
 
-            // Apply adjoint CPML for d(λ_Hx)/dz (only in PML regions)
-            if (pml_y != 1) {
-              M_LAMBDA_HX_Z(0, 0) = by[y] * M_LAMBDA_HX_Z(0, 0) + ay[y] * d_lambda_hx_dz;
-              d_lambda_hx_dz = d_lambda_hx_dz / ky[y] + M_LAMBDA_HX_Z(0, 0);
-            }
-
-            // curl_λH = d(λ_Hz)/dx - d(λ_Hx)/dz
-            TIDE_DTYPE curl_lambda_h = d_lambda_hz_dx - d_lambda_hx_dz;
-
-            // Store current λ_Ey before update (this is λ_Ey^{n+1})
-            TIDE_DTYPE lambda_ey_curr = LAMBDA_EY(0, 0);
-
-            // Update λ_Ey: λ_Ey^n = C_a * λ_Ey^{n+1} + C_q * curl_λH
-            LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + cq_val * curl_lambda_h;
-
-            // Accumulate gradients only in interior region (pml_y == 1 && pml_x == 1)
-            if (pml_y == 1 && pml_x == 1) {
-              // grad_ca += λ_Ey^{n+1} * E_y^n
-              if (ca_requires_grad && ey_store != NULL) {
-                TIDE_DTYPE ey_n = ey_store[store_idx];
-                if (ca_batched) {
-                  grad_ca[store_idx] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
-                } else {
-#ifdef _OPENMP
-#pragma omp atomic
-#endif
-                  grad_ca[idx] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
-                }
-              }
-
-              // grad_cb += λ_Ey^{n+1} * curl_H^n
-              if (cb_requires_grad && curl_h_store != NULL) {
-                TIDE_DTYPE curl_h_n = curl_h_store[store_idx];
-                if (ca_batched) {
-                  grad_cb[store_idx] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
-                } else {
-#ifdef _OPENMP
-#pragma omp atomic
-#endif
-                  grad_cb[idx] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
-                }
-              }
+            if (apply_pml_y) {
+              TIDE_DTYPE const tmp_z = M_LAMBDA_HX_Z(0, 0) + g_z;
+              WORK_Z(0, 0) = g_z / kyh[y] + ayh[y] * tmp_z;
+              M_LAMBDA_HX_Z(0, 0) = byh[y] * tmp_z;
+            } else {
+              WORK_Z(0, 0) = g_z;
             }
           }
         }
       }
     }
+
+    /* Center region: no CPML memory update. */
+    for (int64_t y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+      for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+        int64_t const idx = IDX(y, x);
+        WORK_X(0, 0) = cq_ptr[idx] * LAMBDA_HZ(0, 0);
+        WORK_Z(0, 0) = -cq_ptr[idx] * LAMBDA_HX(0, 0);
+      }
+    }
+
+    bool const do_ca_grad = (ca_requires_grad && ey_store != NULL);
+    bool const do_cb_grad = (cb_requires_grad && curl_h_store != NULL);
+
+    /* PML update: no model gradient accumulation. */
+    for (int pml_y = 0; pml_y < 3; ++pml_y) {
+      for (int pml_x = 0; pml_x < 3; ++pml_x) {
+        if (pml_y == 1 && pml_x == 1) {
+          continue;
+        }
+        for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
+          for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
+            int64_t const idx = IDX(y, x);
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const curl_lambda_h =
+                DIFFXH1_ADJ(ONE, WORK_X) + DIFFYH1_ADJ(ONE, WORK_Z);
+            TIDE_DTYPE const lambda_ey_curr = LAMBDA_EY(0, 0);
+            LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + curl_lambda_h;
+          }
+        }
+      }
+    }
+
+    /* Interior update: specialized by gradient/packing mode to avoid hot-branching. */
+    if (do_ca_grad && do_cb_grad) {
+      if (ca_batched) {
+        for (int64_t y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+          for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+            int64_t const idx = IDX(y, x);
+            int64_t const store_idx = shot_offset + idx;
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const curl_lambda_h =
+                DIFFXH1_ADJ(ONE, WORK_X) + DIFFYH1_ADJ(ONE, WORK_Z);
+            TIDE_DTYPE const lambda_ey_curr = LAMBDA_EY(0, 0);
+            LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + curl_lambda_h;
+            grad_ca[store_idx] += lambda_ey_curr * ey_store[store_idx] * (TIDE_DTYPE)step_ratio;
+            grad_cb[store_idx] += lambda_ey_curr * curl_h_store[store_idx] * (TIDE_DTYPE)step_ratio;
+          }
+        }
+      } else {
+        for (int64_t y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+          for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+            int64_t const idx = IDX(y, x);
+            int64_t const store_idx = shot_offset + idx;
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const curl_lambda_h =
+                DIFFXH1_ADJ(ONE, WORK_X) + DIFFYH1_ADJ(ONE, WORK_Z);
+            TIDE_DTYPE const lambda_ey_curr = LAMBDA_EY(0, 0);
+            LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + curl_lambda_h;
+#ifdef _OPENMP
+#pragma omp atomic
+#endif
+            grad_ca[idx] += lambda_ey_curr * ey_store[store_idx] * (TIDE_DTYPE)step_ratio;
+#ifdef _OPENMP
+#pragma omp atomic
+#endif
+            grad_cb[idx] += lambda_ey_curr * curl_h_store[store_idx] * (TIDE_DTYPE)step_ratio;
+          }
+        }
+      }
+    } else if (do_ca_grad) {
+      if (ca_batched) {
+        for (int64_t y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+          for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+            int64_t const idx = IDX(y, x);
+            int64_t const store_idx = shot_offset + idx;
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const curl_lambda_h =
+                DIFFXH1_ADJ(ONE, WORK_X) + DIFFYH1_ADJ(ONE, WORK_Z);
+            TIDE_DTYPE const lambda_ey_curr = LAMBDA_EY(0, 0);
+            LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + curl_lambda_h;
+            grad_ca[store_idx] += lambda_ey_curr * ey_store[store_idx] * (TIDE_DTYPE)step_ratio;
+          }
+        }
+      } else {
+        for (int64_t y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+          for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+            int64_t const idx = IDX(y, x);
+            int64_t const store_idx = shot_offset + idx;
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const curl_lambda_h =
+                DIFFXH1_ADJ(ONE, WORK_X) + DIFFYH1_ADJ(ONE, WORK_Z);
+            TIDE_DTYPE const lambda_ey_curr = LAMBDA_EY(0, 0);
+            LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + curl_lambda_h;
+#ifdef _OPENMP
+#pragma omp atomic
+#endif
+            grad_ca[idx] += lambda_ey_curr * ey_store[store_idx] * (TIDE_DTYPE)step_ratio;
+          }
+        }
+      }
+    } else if (do_cb_grad) {
+      if (ca_batched) {
+        for (int64_t y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+          for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+            int64_t const idx = IDX(y, x);
+            int64_t const store_idx = shot_offset + idx;
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const curl_lambda_h =
+                DIFFXH1_ADJ(ONE, WORK_X) + DIFFYH1_ADJ(ONE, WORK_Z);
+            TIDE_DTYPE const lambda_ey_curr = LAMBDA_EY(0, 0);
+            LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + curl_lambda_h;
+            grad_cb[store_idx] += lambda_ey_curr * curl_h_store[store_idx] * (TIDE_DTYPE)step_ratio;
+          }
+        }
+      } else {
+        for (int64_t y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+          for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+            int64_t const idx = IDX(y, x);
+            int64_t const store_idx = shot_offset + idx;
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const curl_lambda_h =
+                DIFFXH1_ADJ(ONE, WORK_X) + DIFFYH1_ADJ(ONE, WORK_Z);
+            TIDE_DTYPE const lambda_ey_curr = LAMBDA_EY(0, 0);
+            LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + curl_lambda_h;
+#ifdef _OPENMP
+#pragma omp atomic
+#endif
+            grad_cb[idx] += lambda_ey_curr * curl_h_store[store_idx] * (TIDE_DTYPE)step_ratio;
+          }
+        }
+      }
+    } else {
+      for (int64_t y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+        for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+          int64_t const idx = IDX(y, x);
+          TIDE_DTYPE const ca_val = ca_ptr[idx];
+          TIDE_DTYPE const curl_lambda_h =
+              DIFFXH1_ADJ(ONE, WORK_X) + DIFFYH1_ADJ(ONE, WORK_Z);
+          TIDE_DTYPE const lambda_ey_curr = LAMBDA_EY(0, 0);
+          LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + curl_lambda_h;
+        }
+      }
+    }
   }
+#undef ONE
+#undef WORK_X
+#undef WORK_Z
 }
 
 static void backward_kernel_lambda_e_with_grad_bf16(
@@ -1540,77 +1917,136 @@ static void backward_kernel_lambda_e_with_grad_bf16(
     bool const cq_batched,
     bool const ca_requires_grad,
     bool const cb_requires_grad,
-    int64_t const step_ratio) {
+    int64_t const step_ratio,
+    TIDE_DTYPE *__restrict const work_x,
+    TIDE_DTYPE *__restrict const work_z) {
+#define ONE(dy, dx) ((TIDE_DTYPE)1)
+#define WORK_X(dy, dx) work_x[shot_offset + IDX(y + (dy), x + (dx))]
+#define WORK_Z(dy, dx) work_z[shot_offset + IDX(y + (dy), x + (dx))]
+
+  (void)ay;
+  (void)ax;
+  (void)by;
+  (void)bx;
+  (void)ky;
+  (void)kx;
 
   int64_t const pml_bounds_y[] = {FD_PAD, pml_y0, pml_y1, ny - FD_PAD + 1};
   int64_t const pml_bounds_x[] = {FD_PAD, pml_x0, pml_x1, nx - FD_PAD + 1};
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
     int64_t const shot_offset = shot_idx * shot_numel;
     TIDE_DTYPE const *__restrict const ca_ptr =
         ca_batched ? (ca + shot_offset) : ca;
     TIDE_DTYPE const *__restrict const cq_ptr =
         cq_batched ? (cq + shot_offset) : cq;
+
+    clear_work_halo(work_x, shot_offset, ny, nx);
+    clear_work_halo(work_z, shot_offset, ny, nx);
+
     for (int pml_y = 0; pml_y < 3; ++pml_y) {
       for (int pml_x = 0; pml_x < 3; ++pml_x) {
-TIDE_OMP_SIMD_COLLAPSE2
+        if (pml_y == 1 && pml_x == 1) {
+          continue;
+        }
+        bool const apply_pml_y = (pml_y != 1);
+        bool const apply_pml_x = (pml_x != 1);
         for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
           for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
             int64_t const idx = IDX(y, x);
-            int64_t const store_idx = shot_offset + idx;
-            TIDE_DTYPE const ca_val = ca_ptr[idx];
-            TIDE_DTYPE const cq_val = cq_ptr[idx];
-
-            TIDE_DTYPE d_lambda_hz_dx = DIFFX1(LAMBDA_HZ);
-            TIDE_DTYPE d_lambda_hx_dz = DIFFY1(LAMBDA_HX);
-
-            if (pml_x != 1) {
-              M_LAMBDA_HZ_X(0, 0) = bx[x] * M_LAMBDA_HZ_X(0, 0) + ax[x] * d_lambda_hz_dx;
-              d_lambda_hz_dx = d_lambda_hz_dx / kx[x] + M_LAMBDA_HZ_X(0, 0);
+            TIDE_DTYPE const g_x = cq_ptr[idx] * LAMBDA_HZ(0, 0);
+            TIDE_DTYPE const g_z = -cq_ptr[idx] * LAMBDA_HX(0, 0);
+            if (apply_pml_x) {
+              TIDE_DTYPE const tmp_x = M_LAMBDA_HZ_X(0, 0) + g_x;
+              WORK_X(0, 0) = g_x / kxh[x] + axh[x] * tmp_x;
+              M_LAMBDA_HZ_X(0, 0) = bxh[x] * tmp_x;
+            } else {
+              WORK_X(0, 0) = g_x;
             }
-            if (pml_y != 1) {
-              M_LAMBDA_HX_Z(0, 0) = by[y] * M_LAMBDA_HX_Z(0, 0) + ay[y] * d_lambda_hx_dz;
-              d_lambda_hx_dz = d_lambda_hx_dz / ky[y] + M_LAMBDA_HX_Z(0, 0);
-            }
-
-            TIDE_DTYPE curl_lambda_h = d_lambda_hz_dx - d_lambda_hx_dz;
-            TIDE_DTYPE lambda_ey_curr = LAMBDA_EY(0, 0);
-            LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + cq_val * curl_lambda_h;
-
-            if (pml_y == 1 && pml_x == 1) {
-              if (ca_requires_grad && ey_store != NULL) {
-                TIDE_DTYPE ey_n =
-                    (TIDE_DTYPE)tide_bf16_to_float(ey_store[store_idx]);
-                if (ca_batched) {
-                  grad_ca[store_idx] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
-                } else {
-#ifdef _OPENMP
-#pragma omp atomic
-#endif
-                  grad_ca[idx] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
-                }
-              }
-
-              if (cb_requires_grad && curl_h_store != NULL) {
-                TIDE_DTYPE curl_h_n =
-                    (TIDE_DTYPE)tide_bf16_to_float(curl_h_store[store_idx]);
-                if (ca_batched) {
-                  grad_cb[store_idx] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
-                } else {
-#ifdef _OPENMP
-#pragma omp atomic
-#endif
-                  grad_cb[idx] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
-                }
-              }
+            if (apply_pml_y) {
+              TIDE_DTYPE const tmp_z = M_LAMBDA_HX_Z(0, 0) + g_z;
+              WORK_Z(0, 0) = g_z / kyh[y] + ayh[y] * tmp_z;
+              M_LAMBDA_HX_Z(0, 0) = byh[y] * tmp_z;
+            } else {
+              WORK_Z(0, 0) = g_z;
             }
           }
         }
       }
     }
+
+    for (int64_t y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+      for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+        int64_t const idx = IDX(y, x);
+        WORK_X(0, 0) = cq_ptr[idx] * LAMBDA_HZ(0, 0);
+        WORK_Z(0, 0) = -cq_ptr[idx] * LAMBDA_HX(0, 0);
+      }
+    }
+
+    bool const do_ca_grad = (ca_requires_grad && ey_store != NULL);
+    bool const do_cb_grad = (cb_requires_grad && curl_h_store != NULL);
+
+    for (int pml_y = 0; pml_y < 3; ++pml_y) {
+      for (int pml_x = 0; pml_x < 3; ++pml_x) {
+        if (pml_y == 1 && pml_x == 1) {
+          continue;
+        }
+        for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
+          for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
+            int64_t const idx = IDX(y, x);
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const curl_lambda_h =
+                DIFFXH1_ADJ(ONE, WORK_X) + DIFFYH1_ADJ(ONE, WORK_Z);
+            TIDE_DTYPE const lambda_ey_curr = LAMBDA_EY(0, 0);
+            LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + curl_lambda_h;
+          }
+        }
+      }
+    }
+
+    for (int64_t y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+      for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+        int64_t const idx = IDX(y, x);
+        int64_t const store_idx = shot_offset + idx;
+        TIDE_DTYPE const ca_val = ca_ptr[idx];
+        TIDE_DTYPE const curl_lambda_h =
+            DIFFXH1_ADJ(ONE, WORK_X) + DIFFYH1_ADJ(ONE, WORK_Z);
+        TIDE_DTYPE const lambda_ey_curr = LAMBDA_EY(0, 0);
+        LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + curl_lambda_h;
+
+        if (do_ca_grad) {
+          TIDE_DTYPE const ey_n =
+              (TIDE_DTYPE)tide_bf16_to_float(ey_store[store_idx]);
+          if (ca_batched) {
+            grad_ca[store_idx] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
+          } else {
+#ifdef _OPENMP
+#pragma omp atomic
+#endif
+            grad_ca[idx] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
+          }
+        }
+
+        if (do_cb_grad) {
+          TIDE_DTYPE const curl_h_n =
+              (TIDE_DTYPE)tide_bf16_to_float(curl_h_store[store_idx]);
+          if (ca_batched) {
+            grad_cb[store_idx] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
+          } else {
+#ifdef _OPENMP
+#pragma omp atomic
+#endif
+            grad_cb[idx] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
+          }
+        }
+      }
+    }
   }
+#undef ONE
+#undef WORK_X
+#undef WORK_Z
 }
 
 static void backward_kernel_lambda_e_with_grad_fp8(
@@ -1651,77 +2087,136 @@ static void backward_kernel_lambda_e_with_grad_fp8(
     bool const cq_batched,
     bool const ca_requires_grad,
     bool const cb_requires_grad,
-    int64_t const step_ratio) {
+    int64_t const step_ratio,
+    TIDE_DTYPE *__restrict const work_x,
+    TIDE_DTYPE *__restrict const work_z) {
+#define ONE(dy, dx) ((TIDE_DTYPE)1)
+#define WORK_X(dy, dx) work_x[shot_offset + IDX(y + (dy), x + (dx))]
+#define WORK_Z(dy, dx) work_z[shot_offset + IDX(y + (dy), x + (dx))]
+
+  (void)ay;
+  (void)ax;
+  (void)by;
+  (void)bx;
+  (void)ky;
+  (void)kx;
 
   int64_t const pml_bounds_y[] = {FD_PAD, pml_y0, pml_y1, ny - FD_PAD + 1};
   int64_t const pml_bounds_x[] = {FD_PAD, pml_x0, pml_x1, nx - FD_PAD + 1};
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
     int64_t const shot_offset = shot_idx * shot_numel;
     TIDE_DTYPE const *__restrict const ca_ptr =
         ca_batched ? (ca + shot_offset) : ca;
     TIDE_DTYPE const *__restrict const cq_ptr =
         cq_batched ? (cq + shot_offset) : cq;
+
+    clear_work_halo(work_x, shot_offset, ny, nx);
+    clear_work_halo(work_z, shot_offset, ny, nx);
+
     for (int pml_y = 0; pml_y < 3; ++pml_y) {
       for (int pml_x = 0; pml_x < 3; ++pml_x) {
-TIDE_OMP_SIMD_COLLAPSE2
+        if (pml_y == 1 && pml_x == 1) {
+          continue;
+        }
+        bool const apply_pml_y = (pml_y != 1);
+        bool const apply_pml_x = (pml_x != 1);
         for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
           for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
             int64_t const idx = IDX(y, x);
-            int64_t const store_idx = shot_offset + idx;
-            TIDE_DTYPE const ca_val = ca_ptr[idx];
-            TIDE_DTYPE const cq_val = cq_ptr[idx];
-
-            TIDE_DTYPE d_lambda_hz_dx = DIFFX1(LAMBDA_HZ);
-            TIDE_DTYPE d_lambda_hx_dz = DIFFY1(LAMBDA_HX);
-
-            if (pml_x != 1) {
-              M_LAMBDA_HZ_X(0, 0) = bx[x] * M_LAMBDA_HZ_X(0, 0) + ax[x] * d_lambda_hz_dx;
-              d_lambda_hz_dx = d_lambda_hz_dx / kx[x] + M_LAMBDA_HZ_X(0, 0);
+            TIDE_DTYPE const g_x = cq_ptr[idx] * LAMBDA_HZ(0, 0);
+            TIDE_DTYPE const g_z = -cq_ptr[idx] * LAMBDA_HX(0, 0);
+            if (apply_pml_x) {
+              TIDE_DTYPE const tmp_x = M_LAMBDA_HZ_X(0, 0) + g_x;
+              WORK_X(0, 0) = g_x / kxh[x] + axh[x] * tmp_x;
+              M_LAMBDA_HZ_X(0, 0) = bxh[x] * tmp_x;
+            } else {
+              WORK_X(0, 0) = g_x;
             }
-            if (pml_y != 1) {
-              M_LAMBDA_HX_Z(0, 0) = by[y] * M_LAMBDA_HX_Z(0, 0) + ay[y] * d_lambda_hx_dz;
-              d_lambda_hx_dz = d_lambda_hx_dz / ky[y] + M_LAMBDA_HX_Z(0, 0);
-            }
-
-            TIDE_DTYPE curl_lambda_h = d_lambda_hz_dx - d_lambda_hx_dz;
-            TIDE_DTYPE lambda_ey_curr = LAMBDA_EY(0, 0);
-            LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + cq_val * curl_lambda_h;
-
-            if (pml_y == 1 && pml_x == 1) {
-              if (ca_requires_grad && ey_store != NULL) {
-                TIDE_DTYPE ey_n =
-                    (TIDE_DTYPE)tide_fp8_e4m3_to_float(ey_store[store_idx]);
-                if (ca_batched) {
-                  grad_ca[store_idx] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
-                } else {
-#ifdef _OPENMP
-#pragma omp atomic
-#endif
-                  grad_ca[idx] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
-                }
-              }
-
-              if (cb_requires_grad && curl_h_store != NULL) {
-                TIDE_DTYPE curl_h_n =
-                    (TIDE_DTYPE)tide_fp8_e4m3_to_float(curl_h_store[store_idx]);
-                if (ca_batched) {
-                  grad_cb[store_idx] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
-                } else {
-#ifdef _OPENMP
-#pragma omp atomic
-#endif
-                  grad_cb[idx] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
-                }
-              }
+            if (apply_pml_y) {
+              TIDE_DTYPE const tmp_z = M_LAMBDA_HX_Z(0, 0) + g_z;
+              WORK_Z(0, 0) = g_z / kyh[y] + ayh[y] * tmp_z;
+              M_LAMBDA_HX_Z(0, 0) = byh[y] * tmp_z;
+            } else {
+              WORK_Z(0, 0) = g_z;
             }
           }
         }
       }
     }
+
+    for (int64_t y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+      for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+        int64_t const idx = IDX(y, x);
+        WORK_X(0, 0) = cq_ptr[idx] * LAMBDA_HZ(0, 0);
+        WORK_Z(0, 0) = -cq_ptr[idx] * LAMBDA_HX(0, 0);
+      }
+    }
+
+    bool const do_ca_grad = (ca_requires_grad && ey_store != NULL);
+    bool const do_cb_grad = (cb_requires_grad && curl_h_store != NULL);
+
+    for (int pml_y = 0; pml_y < 3; ++pml_y) {
+      for (int pml_x = 0; pml_x < 3; ++pml_x) {
+        if (pml_y == 1 && pml_x == 1) {
+          continue;
+        }
+        for (int64_t y = pml_bounds_y[pml_y]; y < pml_bounds_y[pml_y + 1]; ++y) {
+          for (int64_t x = pml_bounds_x[pml_x]; x < pml_bounds_x[pml_x + 1]; ++x) {
+            int64_t const idx = IDX(y, x);
+            TIDE_DTYPE const ca_val = ca_ptr[idx];
+            TIDE_DTYPE const curl_lambda_h =
+                DIFFXH1_ADJ(ONE, WORK_X) + DIFFYH1_ADJ(ONE, WORK_Z);
+            TIDE_DTYPE const lambda_ey_curr = LAMBDA_EY(0, 0);
+            LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + curl_lambda_h;
+          }
+        }
+      }
+    }
+
+    for (int64_t y = pml_bounds_y[1]; y < pml_bounds_y[2]; ++y) {
+      for (int64_t x = pml_bounds_x[1]; x < pml_bounds_x[2]; ++x) {
+        int64_t const idx = IDX(y, x);
+        int64_t const store_idx = shot_offset + idx;
+        TIDE_DTYPE const ca_val = ca_ptr[idx];
+        TIDE_DTYPE const curl_lambda_h =
+            DIFFXH1_ADJ(ONE, WORK_X) + DIFFYH1_ADJ(ONE, WORK_Z);
+        TIDE_DTYPE const lambda_ey_curr = LAMBDA_EY(0, 0);
+        LAMBDA_EY(0, 0) = ca_val * lambda_ey_curr + curl_lambda_h;
+
+        if (do_ca_grad) {
+          TIDE_DTYPE const ey_n =
+              (TIDE_DTYPE)tide_fp8_e4m3_to_float(ey_store[store_idx]);
+          if (ca_batched) {
+            grad_ca[store_idx] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
+          } else {
+#ifdef _OPENMP
+#pragma omp atomic
+#endif
+            grad_ca[idx] += lambda_ey_curr * ey_n * (TIDE_DTYPE)step_ratio;
+          }
+        }
+
+        if (do_cb_grad) {
+          TIDE_DTYPE const curl_h_n =
+              (TIDE_DTYPE)tide_fp8_e4m3_to_float(curl_h_store[store_idx]);
+          if (ca_batched) {
+            grad_cb[store_idx] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
+          } else {
+#ifdef _OPENMP
+#pragma omp atomic
+#endif
+            grad_cb[idx] += lambda_ey_curr * curl_h_n * (TIDE_DTYPE)step_ratio;
+          }
+        }
+      }
+    }
   }
+#undef ONE
+#undef WORK_X
+#undef WORK_Z
 }
 
 static void inverse_kernel_e_and_curl(
@@ -1750,7 +2245,7 @@ static void inverse_kernel_e_and_curl(
   int64_t const x1 = MIN(nx - FD_PAD + 1, pml_x1);
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
     int64_t const shot_offset = shot_idx * shot_numel;
     TIDE_DTYPE const *__restrict const ca_ptr =
@@ -1799,7 +2294,7 @@ static void inverse_kernel_h(
   int64_t const x1 = MIN(nx - FD_PAD + 1, pml_x1);
 
   TIDE_OMP_INDEX shot_idx;
-TIDE_OMP_PARALLEL_FOR
+TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
     int64_t const shot_offset = shot_idx * shot_numel;
     TIDE_DTYPE const *__restrict const cq_ptr =
@@ -1921,6 +2416,15 @@ void FUNC(backward)(
   int64_t const store_size = n_shots * shot_numel;
   bool const storage_fp8 = (shot_bytes_uncomp == shot_numel * 1);
   bool const storage_bf16 = (shot_bytes_uncomp == shot_numel * 2);
+  size_t const work_bytes =
+      (size_t)n_shots * (size_t)shot_numel * sizeof(TIDE_DTYPE);
+  TIDE_DTYPE *work_x = (TIDE_DTYPE *)malloc(work_bytes);
+  TIDE_DTYPE *work_z = (TIDE_DTYPE *)malloc(work_bytes);
+  if (work_x == NULL || work_z == NULL) {
+    if (work_x != NULL) free(work_x);
+    if (work_z != NULL) free(work_z);
+    return;
+  }
 
   FILE **fp_ey = NULL;
   FILE **fp_curl = NULL;
@@ -2038,6 +2542,18 @@ void FUNC(backward)(
           n_shots, shot_numel, n_sources_per_shot);
     }
 
+    // Backward λ_H fields update
+    backward_kernel_lambda_h(
+        cb, lambda_ey, lambda_hx, lambda_hz,
+        m_lambda_ey_x, m_lambda_ey_z,
+        ay, ayh, ax, axh, by, byh, bx, bxh,
+        ky, kyh, kx, kxh,
+        rdy, rdx,
+        n_shots, ny, nx, shot_numel,
+        pml_y0, pml_y1, pml_x0, pml_x1,
+        cb_batched,
+        work_x, work_z);
+
     // Backward λ_Ey update with gradient accumulation
     // This computes: λ_Ey^n = C_a * λ_Ey^{n+1} + C_q * curl_λH
     // And accumulates: grad_ca += λ_Ey^{n+1} * E_y^n, grad_cb += λ_Ey^{n+1} * curl_H^n
@@ -2059,7 +2575,8 @@ void FUNC(backward)(
           pml_y0, pml_y1, pml_x0, pml_x1,
           ca_batched, cq_batched,
           grad_ey, grad_curl,
-          step_ratio);
+          step_ratio,
+          work_x, work_z);
     } else if (storage_bf16 && (grad_ey || grad_curl)) {
       tide_bfloat16 *const ey_store_1_t =
           (tide_bfloat16 *)ey_store_1 + store_offset;
@@ -2078,7 +2595,8 @@ void FUNC(backward)(
           pml_y0, pml_y1, pml_x0, pml_x1,
           ca_batched, cq_batched,
           grad_ey, grad_curl,
-          step_ratio);
+          step_ratio,
+          work_x, work_z);
     } else {
       TIDE_DTYPE *const ey_store_1_t =
           (storage_fp8 || storage_bf16) ? NULL : (ey_store_1 + store_offset);
@@ -2097,19 +2615,9 @@ void FUNC(backward)(
           pml_y0, pml_y1, pml_x0, pml_x1,
           ca_batched, cq_batched,
           grad_ey, grad_curl,
-          step_ratio);
+          step_ratio,
+          work_x, work_z);
     }
-
-    // Backward λ_H fields update
-    backward_kernel_lambda_h(
-        cb, lambda_ey, lambda_hx, lambda_hz,
-        m_lambda_ey_x, m_lambda_ey_z,
-        ay, ayh, ax, axh, by, byh, bx, bxh,
-        ky, kyh, kx, kxh,
-        rdy, rdx,
-        n_shots, ny, nx, shot_numel,
-        pml_y0, pml_y1, pml_x0, pml_x1,
-        cb_batched);
   }
 
   if (fp_ey != NULL) {
@@ -2120,6 +2628,8 @@ void FUNC(backward)(
     for (int64_t shot = 0; shot < n_shots; ++shot) fclose(fp_curl[shot]);
     free(fp_curl);
   }
+  free(work_x);
+  free(work_z);
 
   convert_grad_ca_cb_to_eps_sigma(
       ca, cb, grad_ca, grad_cb, grad_eps, grad_sigma,
