@@ -3,17 +3,8 @@
 
 #include <cuda_runtime.h>
 
-// Define TIDE_DTYPE_FLOAT based on TIDE_DTYPE (for vectorized load optimization)
-// Note: TIDE_DTYPE_FLOAT is now defined in CMakelists.txt for better compatibility
-#ifndef TIDE_DTYPE_FLOAT
-#ifdef TIDE_DTYPE
-#if TIDE_DTYPE == float
-#define TIDE_DTYPE_FLOAT 1
-#elif TIDE_DTYPE == double
-#define TIDE_DTYPE_FLOAT 0
-#endif
-#endif
-#endif
+// TIDE_DTYPE_FLOAT, when needed, must be provided by the build system.
+// Avoid trying to infer it from TIDE_DTYPE in preprocessor conditionals.
 
 // Macro to check for CUDA kernel errors
 #define CHECK_KERNEL_ERROR                                              \

@@ -1,20 +1,17 @@
+import itertools
 import warnings
 from typing import Any, Callable, Literal, Optional, Sequence, Union
 
 import torch
 
 from . import staggered
-from .autograd_utils import (
-    _get_ctx_handle,
-    _register_ctx_handle,
-    _release_ctx_handle,
-)
 from .callbacks import Callback, CallbackState
 from .cfl import cfl_condition
 from .grid_utils import (
     _normalize_grid_spacing_2d,
     _normalize_pml_width_2d,
 )
+from .padding import create_or_pad, zero_interior
 from .resampling import downsample_and_movedim, upsample
 from .storage import (
     _CPU_STORAGE_BUFFERS,
@@ -40,6 +37,55 @@ from .validation import (
     validate_model_gradient_sampling_interval,
     validate_time_pad_frac,
 )
+
+_CTX_HANDLE_COUNTER = itertools.count()
+_CTX_HANDLE_REGISTRY: dict[int, dict[str, Any]] = {}
+
+
+def _register_ctx_handle(ctx_data: dict[str, Any]) -> torch.Tensor:
+    handle = next(_CTX_HANDLE_COUNTER)
+    _CTX_HANDLE_REGISTRY[handle] = ctx_data
+    return torch.tensor(handle, dtype=torch.int64)
+
+
+def _get_ctx_handle(handle: int) -> dict[str, Any]:
+    try:
+        return _CTX_HANDLE_REGISTRY[handle]
+    except KeyError as exc:
+        raise RuntimeError(f"Unknown context handle: {handle}") from exc
+
+
+def _release_ctx_handle(handle: Optional[int]) -> None:
+    if handle is None:
+        return
+    _CTX_HANDLE_REGISTRY.pop(handle, None)
+
+
+def _init_tm_wavefield(
+    field_0: Optional[torch.Tensor],
+    *,
+    n_shots: int,
+    size_with_batch: tuple[int, int, int],
+    fd_pad_list: list[int],
+    device: torch.device,
+    dtype: torch.dtype,
+    contiguous: bool = False,
+) -> torch.Tensor:
+    """Initialize TM wavefield tensors with asymmetric FD padding."""
+    if field_0 is not None:
+        if field_0.ndim == 2:
+            field_0 = field_0[None, :, :].expand(n_shots, -1, -1)
+        wavefield = create_or_pad(
+            field_0,
+            fd_pad_list,
+            device,
+            dtype,
+            size_with_batch,
+            mode="constant",
+        )
+    else:
+        wavefield = torch.zeros(size_with_batch, device=device, dtype=dtype)
+    return wavefield.contiguous() if contiguous else wavefield
 
 
 class MaxwellTM(torch.nn.Module):
@@ -404,7 +450,7 @@ def maxwelltm(
             backward pass. One of "device", "cpu", "disk", "none", or "auto".
         storage_path: Base path for disk storage when storage_mode="disk".
         storage_compression: Compression for stored snapshots. Use False/True
-            (True == BF16), or one of "bf16" / "fp8".
+            (True == BF16), or one of "none" / "bf16".
         storage_bytes_limit_device: Soft limit in bytes for device snapshot
             storage when storage_mode="auto".
         storage_bytes_limit_host: Soft limit in bytes for host snapshot
@@ -883,8 +929,6 @@ def maxwell_python(
             - receiver_amplitudes: Recorded data at receivers [nt, n_shots, n_receivers]
     """
 
-    from .padding import create_or_pad, zero_interior
-
     # These should be set by maxwell_func before calling this function
     assert _update_E_opt is not None, "_update_E_opt must be set by maxwell_func"
     assert _update_H_opt is not None, "_update_H_opt must be set by maxwell_func"
@@ -1001,32 +1045,62 @@ def maxwell_python(
     # =========================================================================
     size_with_batch = (n_shots, padded_ny, padded_nx)
 
-    # Helper function to initialize wavefields with fd_pad padding
-    def init_wavefield(field_0: Optional[torch.Tensor]) -> torch.Tensor:
-        """Initialize wavefield with fd_pad zero padding.
-
-        Zero padding is used for wavefields because the fd_pad region should
-        always be zero after output cropping and re-padding. The staggered grid
-        operators only read from this region but don't need non-zero values there
-        for correct propagation.
-        """
-        if field_0 is not None:
-            # User provides [n_shots, ny, nx] or [ny, nx]
-            if field_0.ndim == 2:
-                field_0 = field_0[None, :, :].expand(n_shots, -1, -1)
-            # Pad with asymmetric fd_pad_list for staggered grid (zero padding)
-            return create_or_pad(
-                field_0, fd_pad_list, device, dtype, size_with_batch, mode="constant"
-            )
-        return torch.zeros(size_with_batch, device=device, dtype=dtype)
-
-    Ey = init_wavefield(Ey_0)
-    Hx = init_wavefield(Hx_0)
-    Hz = init_wavefield(Hz_0)
-    m_Ey_x = init_wavefield(m_Ey_x_0)
-    m_Ey_z = init_wavefield(m_Ey_z_0)
-    m_Hx_z = init_wavefield(m_Hx_z_0)
-    m_Hz_x = init_wavefield(m_Hz_x_0)
+    Ey = _init_tm_wavefield(
+        Ey_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+    )
+    Hx = _init_tm_wavefield(
+        Hx_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+    )
+    Hz = _init_tm_wavefield(
+        Hz_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+    )
+    m_Ey_x = _init_tm_wavefield(
+        m_Ey_x_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+    )
+    m_Ey_z = _init_tm_wavefield(
+        m_Ey_z_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+    )
+    m_Hx_z = _init_tm_wavefield(
+        m_Hx_z_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+    )
+    m_Hz_x = _init_tm_wavefield(
+        m_Hz_x_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+    )
 
     # Zero out interior of PML auxiliary variables (optimization)
     # PML memory variables should only be non-zero in PML regions.
@@ -1509,8 +1583,7 @@ def maxwell_c_cuda(
     Returns:
         Same as maxwell_python.
     """
-    from . import backend_utils, staggered
-    from .padding import create_or_pad, zero_interior
+    from . import backend_utils
 
     # Validate inputs
     if epsilon.ndim != 2:
@@ -1649,25 +1722,69 @@ def maxwell_c_cuda(
 
     # Initialize fields with padded dimensions
     size_with_batch = (n_shots, padded_ny, padded_nx)
-
-    def init_wavefield(field_0: Optional[torch.Tensor]) -> torch.Tensor:
-        """Initialize wavefield with fd_pad zero padding."""
-        if field_0 is not None:
-            if field_0.ndim == 2:
-                field_0 = field_0[None, :, :].expand(n_shots, -1, -1)
-            # Pad with asymmetric fd_pad_list for staggered grid
-            return create_or_pad(
-                field_0, fd_pad_list, device, dtype, size_with_batch
-            ).contiguous()
-        return torch.zeros(size_with_batch, device=device, dtype=dtype)
-
-    Ey = init_wavefield(Ey_0)
-    Hx = init_wavefield(Hx_0)
-    Hz = init_wavefield(Hz_0)
-    m_Ey_x = init_wavefield(m_Ey_x_0)
-    m_Ey_z = init_wavefield(m_Ey_z_0)
-    m_Hx_z = init_wavefield(m_Hx_z_0)
-    m_Hz_x = init_wavefield(m_Hz_x_0)
+    Ey = _init_tm_wavefield(
+        Ey_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+    )
+    Hx = _init_tm_wavefield(
+        Hx_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+    )
+    Hz = _init_tm_wavefield(
+        Hz_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+    )
+    m_Ey_x = _init_tm_wavefield(
+        m_Ey_x_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+    )
+    m_Ey_z = _init_tm_wavefield(
+        m_Ey_z_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+    )
+    m_Hx_z = _init_tm_wavefield(
+        m_Hx_z_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+    )
+    m_Hz_x = _init_tm_wavefield(
+        m_Hz_x_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+    )
 
     # Zero out interior of PML auxiliary variables (optimization)
     # This works correctly with user-provided states (see forward pass comments)
@@ -1899,6 +2016,7 @@ def maxwell_c_cuda(
         "ca": ca,
         "cb": cb,
         "cq": cq,
+        "compute_dtype": compute_dtype,
     }
 
     use_autograd_fn = (
@@ -2822,17 +2940,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             grad_cb = torch.empty(0, device=device, dtype=dtype)
             grad_cb_shot = torch.empty(0, device=device, dtype=dtype)
 
-        if ca_requires_grad or cb_requires_grad:
-            if ca_batched:
-                grad_eps = torch.zeros(n_shots, ny, nx, device=device, dtype=dtype)
-                grad_sigma = torch.zeros(n_shots, ny, nx, device=device, dtype=dtype)
-            else:
-                grad_eps = torch.zeros(ny, nx, device=device, dtype=dtype)
-                grad_sigma = torch.zeros(ny, nx, device=device, dtype=dtype)
-        else:
-            grad_eps = torch.empty(0, device=device, dtype=dtype)
-            grad_sigma = torch.empty(0, device=device, dtype=dtype)
-
         # Get device index for CUDA
         device_idx = (
             device.index if device.type == "cuda" and device.index is not None else 0
@@ -2887,8 +2994,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(grad_f),
                 backend_utils.tensor_to_ptr(grad_ca),
                 backend_utils.tensor_to_ptr(grad_cb),
-                backend_utils.tensor_to_ptr(grad_eps),
-                backend_utils.tensor_to_ptr(grad_sigma),
                 backend_utils.tensor_to_ptr(grad_ca_shot),
                 backend_utils.tensor_to_ptr(grad_cb_shot),
                 backend_utils.tensor_to_ptr(ay),
@@ -2951,8 +3056,30 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 if cb_requires_grad:
                     callback_gradients["cb"] = grad_cb
                 if ca_requires_grad or cb_requires_grad:
-                    callback_gradients["epsilon"] = grad_eps
-                    callback_gradients["sigma"] = grad_sigma
+                    # Calculate physical gradients (epsilon and sigma) using VJP
+                    with torch.enable_grad():
+                        eps_req = models["epsilon"].detach().requires_grad_(True)
+                        sig_req = models["sigma"].detach().requires_grad_(True)
+                        mu_req = models["mu"]
+
+                        if models.get("compute_dtype", "fp32") == "fp16":
+                            ca_v, cb_v, _ = prepare_parameters_nondim(eps_req, sig_req, mu_req, dt)
+                        else:
+                            ca_v, cb_v, _ = prepare_parameters(eps_req, sig_req, mu_req, dt)
+
+                        vjp_tensors = []
+                        vjp_grads = []
+                        if ca_requires_grad:
+                            vjp_tensors.append(ca_v)
+                            vjp_grads.append(grad_ca)
+                        if cb_requires_grad:
+                            vjp_tensors.append(cb_v)
+                            vjp_grads.append(grad_cb)
+
+                        torch.autograd.backward(vjp_tensors, vjp_grads)
+
+                        callback_gradients["epsilon"] = eps_req.grad
+                        callback_gradients["sigma"] = sig_req.grad
 
                 backward_callback(
                     CallbackState(

@@ -9,8 +9,7 @@ option(TIDE_ENABLE_NATIVE_ARCH "Enable native CPU tuning flags (-march=native)" 
 
 # Detect and enable CUDA if present and enabled
 if(TIDE_ENABLE_CUDA)
-    # Prefer a modern CUDA toolkit if present. This matters for newer ISA
-    # features (e.g. FP8 convert instructions on SM89+).
+    # Prefer a modern CUDA toolkit if present.
     if(NOT DEFINED CUDAToolkit_ROOT AND EXISTS "/usr/local/cuda")
         set(CUDAToolkit_ROOT "/usr/local/cuda" CACHE PATH "CUDA toolkit root" FORCE)
     endif()
@@ -171,12 +170,10 @@ if(CMAKE_BUILD_TYPE MATCHES Release)
 endif()
 
 # --- Helper Macros for Object Libraries ---
-macro(add_tide_cpu_object_library BASENAME ACCURACY DTYPE)
-    set(TARGET_NAME "${BASENAME}_${ACCURACY}_${DTYPE}_cpu_obj")
-    add_library(${TARGET_NAME} OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/${BASENAME}.c)
+macro(add_tide_cpu_object_library BASENAME)
+    set(TARGET_NAME "${BASENAME}_cpu_obj")
+    add_library(${TARGET_NAME} OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/${BASENAME}.cpp)
     target_compile_definitions(${TARGET_NAME} PRIVATE 
-        TIDE_STENCIL=${ACCURACY} 
-        TIDE_DTYPE=${DTYPE}
         TIDE_DEVICE=cpu
     )
     target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -234,34 +231,11 @@ if(CUDAToolkit_FOUND)
     set(TIDE_CUDA_ARCHES "${CMAKE_CUDA_ARCHITECTURES}")
     string(REPLACE ";" "," TIDE_CUDA_ARCHES_STR "${TIDE_CUDA_ARCHES}")
 
-    # Detect whether FP8 instructions are available for the compiled arch set.
-    set(TIDE_CUDA_FP8_ENABLED 0)
-    if(TIDE_CUDA_ARCHES STREQUAL "native" OR TIDE_CUDA_ARCHES STREQUAL "all")
-        set(TIDE_CUDA_FP8_ENABLED 1)
-    else()
-        foreach(_arch IN LISTS TIDE_CUDA_ARCHES)
-            string(REGEX MATCH "^[0-9]+" _arch_num "${_arch}")
-            if(_arch_num AND _arch_num GREATER_EQUAL 89)
-                set(TIDE_CUDA_FP8_ENABLED 1)
-            endif()
-        endforeach()
-    endif()
-
-    macro(add_tide_cuda_object_library BASENAME ACCURACY DTYPE)
-        set(TARGET_NAME "${BASENAME}_${ACCURACY}_${DTYPE}_cuda_obj")
+    macro(add_tide_cuda_object_library BASENAME)
+        set(TARGET_NAME "${BASENAME}_cuda_obj")
         add_library(${TARGET_NAME} OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/${BASENAME}.cu)
-        # Set TIDE_DTYPE_FLOAT based on DTYPE (optimization 2.1)
-        if(${DTYPE} STREQUAL "float")
-            set(IS_FLOAT 1)
-        else()
-            set(IS_FLOAT 0)
-        endif()
         target_compile_definitions(${TARGET_NAME} PRIVATE
-            TIDE_STENCIL=${ACCURACY}
-            TIDE_DTYPE=${DTYPE}
             TIDE_DEVICE=cuda
-            TIDE_DTYPE_FLOAT=${IS_FLOAT}
-            TIDE_CUDA_FP8_ENABLED=${TIDE_CUDA_FP8_ENABLED}
         )
         target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         list(APPEND TIDE_OBJECTS $<TARGET_OBJECTS:${TARGET_NAME}>)
@@ -284,23 +258,13 @@ endif()
 # Prepare lists that will collect the object files
 set(TIDE_OBJECTS)
 set(CPU_TARGETS)
-set(ACCURACIES 2 4 6 8)
-set(CPU_DTYPES float double)
-set(CUDA_DTYPES float double)
-if(CUDAToolkit_FOUND)
-    list(APPEND CUDA_DTYPES half)
-endif()
 
 # --- Storage utilities ---
 set(STORAGE_UTILS_CPU_SRC ${CMAKE_CURRENT_SOURCE_DIR}/storage_utils.c)
 set(STORAGE_UTILS_CUDA_SRC "")
 
 # --- CPU object libraries ---
-foreach(ACCURACY ${ACCURACIES})
-    foreach(DTYPE ${CPU_DTYPES})
-        add_tide_cpu_object_library(maxwell ${ACCURACY} ${DTYPE})
-    endforeach()
-endforeach()
+add_tide_cpu_object_library(maxwell)
 
 if(OPENMP_CONFIGURED)
     foreach(CPU_TARGET ${CPU_TARGETS})
@@ -317,11 +281,7 @@ if(CUDAToolkit_FOUND)
         list(APPEND CMAKE_CUDA_FLAGS -Xcompiler=-fPIC)
     endif()
 
-    foreach(ACCURACY ${ACCURACIES})
-        foreach(DTYPE ${CUDA_DTYPES})
-            add_tide_cuda_object_library(maxwell ${ACCURACY} ${DTYPE})
-        endforeach()
-    endforeach()
+    add_tide_cuda_object_library(maxwell)
 
     # --- Storage utilities ---
     set(STORAGE_UTILS_CUDA_SRC ${CMAKE_CURRENT_SOURCE_DIR}/storage_utils.cu)
@@ -392,7 +352,6 @@ endif()
 
 if(CUDAToolkit_FOUND)
     target_compile_definitions(tide_C PRIVATE
-        TIDE_CUDA_FP8_ENABLED=${TIDE_CUDA_FP8_ENABLED}
         TIDE_CUDA_ARCHES_STR="${TIDE_CUDA_ARCHES_STR}"
     )
 endif()

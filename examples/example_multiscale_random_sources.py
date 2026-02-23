@@ -32,7 +32,7 @@ random_source_batches = True
 random_seed = 7
 model_gradient_sampling_interval = 10
 storage_mode = "device"
-storage_compression = "fp8"
+storage_compression = "bf16"
 print(f"Using storage mode: {storage_mode} with compression: {storage_compression}")
 model_path = "examples/data/OverThrust.npy"
 epsilon_true_raw = np.load(model_path)
