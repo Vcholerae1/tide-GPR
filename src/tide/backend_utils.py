@@ -1,11 +1,9 @@
 import ctypes
+import itertools
 import pathlib
 import platform
-import site
-import sys
-from importlib import resources
 from ctypes import c_bool, c_double, c_float, c_int, c_int64, c_void_p
-from typing import Any, Callable, Optional, TypeAlias
+from typing import Any, Optional, TypeAlias
 
 import torch
 
@@ -16,60 +14,76 @@ SO_EXT = {"Linux": "so", "Darwin": "dylib", "Windows": "dll"}.get(platform.syste
 if SO_EXT is None:
     raise RuntimeError("Unsupported OS or platform type")
 
+# Supported configurations for backend function variants.
+_SUPPORTED_ACCURACIES = (2, 4, 6, 8)
+_SUPPORTED_DEVICES = ("cpu", "cuda", "mps")
+_SUPPORTED_BACKEND_DTYPES = ("half", "float", "double")
+
+# Mapping from torch dtypes to backend dtype strings and from backend dtype strings to C types.
+_TORCH_DTYPE_TO_BACKEND_DTYPE: dict[torch.dtype, str] = {
+    torch.float16: "half",
+    torch.float32: "float",
+    torch.float64: "double",
+}
+
+_BACKEND_DTYPE_TO_CTYPE: dict[str, type] = {
+    "half": c_float,
+    "float": c_float,
+    "double": c_double,
+}
+
+
 def _candidate_lib_paths() -> list[pathlib.Path]:
+    """Return likely shared-library locations for standard uv/pip installs."""
     lib_name = f"libtide_C.{SO_EXT}"
-    lib_dir = pathlib.Path(__file__).resolve().parent
-    candidates: list[pathlib.Path] = [
-        lib_dir / lib_name,
-        lib_dir / "tide" / lib_name,
-        lib_dir.parent / "tide.libs" / lib_name,
+    module_dir = pathlib.Path(__file__).resolve().parent
+    candidates = [
+        module_dir / lib_name,  # Most common: package directory
+        module_dir / "tide" / lib_name,  # Nested package layout
+        module_dir.parent / "tide.libs" / lib_name,  # Wheel external libs
     ]
 
-    try:
-        pkg_root = resources.files(__package__ or "tide")
-        candidates.append(pathlib.Path(pkg_root / lib_name))
-        candidates.append(pathlib.Path(pkg_root / "tide" / lib_name))
-        for path in pkg_root.rglob(lib_name):
-            candidates.append(pathlib.Path(path))
-    except Exception:
-        pass
-
-    try:
-        site_paths = list(site.getsitepackages())
-    except Exception:
-        site_paths = []
-    site_paths.append(site.getusersitepackages())
-    for base in site_paths:
-        if not base:
-            continue
-        base_path = pathlib.Path(base)
-        for path in base_path.glob(f"tide-*.data/**/{lib_name}"):
-            candidates.append(path)
-
-    return candidates
+    # Keep discovery order while removing duplicates.
+    return list(dict.fromkeys(candidates))
 
 
 _dll: Optional[ctypes.CDLL] = None
-_lib_path: pathlib.Path = pathlib.Path(__file__).resolve().parent / f"libtide_C.{SO_EXT}"
+_lib_path: pathlib.Path = (
+    pathlib.Path(__file__).resolve().parent / f"libtide_C.{SO_EXT}"
+)
+_backend_probed = False
 
-for candidate in _candidate_lib_paths():
-    if not candidate.exists():
-        continue
-    try:
-        _dll = ctypes.CDLL(str(candidate))
-        _lib_path = candidate
-        break
-    except OSError:
-        continue
+USE_OPENMP = False
+
+
+def _load_backend_once() -> None:
+    global _dll, _lib_path, _backend_probed, USE_OPENMP
+    if _backend_probed:
+        return
+    _backend_probed = True
+
+    for candidate in _candidate_lib_paths():
+        if not candidate.exists():
+            continue
+        try:
+            _dll = ctypes.CDLL(str(candidate))
+            _lib_path = candidate
+            break
+        except OSError:
+            continue
+
+    USE_OPENMP = _dll is not None and hasattr(_dll, "omp_get_num_threads")
 
 
 def is_backend_available() -> bool:
     """Check if the C/CUDA backend is available."""
+    _load_backend_once()
     return _dll is not None
 
 
 def get_dll() -> ctypes.CDLL:
     """Get the loaded DLL, raising an error if not available."""
+    _load_backend_once()
     if _dll is None:
         raise RuntimeError(
             f"C/CUDA backend not available. Please compile the library first. "
@@ -80,20 +94,13 @@ def get_dll() -> ctypes.CDLL:
 
 def get_library_path() -> pathlib.Path:
     """Return the resolved shared library path."""
+    _load_backend_once()
     return _lib_path
-
-
-def cuda_fp8_enabled() -> bool:
-    """Return True if the compiled CUDA backend includes FP8 support."""
-    if _dll is None or not hasattr(_dll, "tide_cuda_fp8_enabled"):
-        return False
-    func = _dll.tide_cuda_fp8_enabled
-    func.restype = c_int
-    return bool(func())
 
 
 def cuda_build_arches() -> Optional[str]:
     """Return the CUDA arch list the backend was compiled for, if available."""
+    _load_backend_once()
     if _dll is None or not hasattr(_dll, "tide_cuda_arches"):
         return None
     func = _dll.tide_cuda_arches
@@ -101,385 +108,297 @@ def cuda_build_arches() -> Optional[str]:
     value = func()
     if not value:
         return None
-    try:
-        return value.decode("utf-8")
-    except Exception:
-        return None
-
-
-# Check if was compiled with OpenMP support
-USE_OPENMP = _dll is not None and hasattr(_dll, "omp_get_num_threads")
+    return value.decode("utf-8", errors="replace")
 
 
 def metal_available() -> bool:
     """Return True if the compiled backend includes Metal (Apple GPU) support."""
+    _load_backend_once()
     if _dll is None or not hasattr(_dll, "tide_metal_available"):
         return False
     func = _dll.tide_metal_available
     func.restype = c_int
     return bool(func())
 
-# Define ctypes argument type templates to reduce repetition while preserving order.
-# A placeholder will be replaced by the appropriate float type (c_float or c_double).
+
+# Each argtype spec is a declarative list of (ctype, count, comment) triples.
+# FLOAT_TYPE is a placeholder that _get_argtypes() substitutes with the actual
+# float ctypes type (c_float or c_double) at resolution time.
 FLOAT_TYPE: type = c_float
 
+# Short aliases to keep specs readable.
+_P = c_void_p
+_F = FLOAT_TYPE  # float placeholder (substituted by _get_argtypes)
+_I = c_int64
+_B = c_bool
 
-def get_maxwell_tm_forward_template() -> list[Any]:
-    """Returns the argtype template for the Maxwell TM forward propagator."""
-    args: list[Any] = []
-    # Material parameters
-    args += [c_void_p] * 3  # ca, cb, cq
-    # Source
-    args += [c_void_p]  # f (source amplitudes)
-    # Fields
-    args += [c_void_p] * 3  # ey, hx, hz
-    # PML memory variables
-    args += [c_void_p] * 4  # m_ey_x, m_ey_z, m_hx_z, m_hz_x
-    # Recorded data
-    args += [c_void_p]  # r (receiver amplitudes)
-    # PML profiles
-    args += [c_void_p] * 8  # ay, by, ayh, byh, ax, bx, axh, bxh
-    # Kappa profiles
-    args += [c_void_p] * 4  # ky, kyh, kx, kxh
-    # Source and receiver indices
-    args += [c_void_p] * 2  # sources_i, receivers_i
-    # Grid spacing
-    args += [FLOAT_TYPE] * 2  # rdy, rdx
-    # Time step
-    args += [FLOAT_TYPE]  # dt
-    # Sizes
-    args += [c_int64]  # nt
-    args += [c_int64]  # n_shots
-    args += [c_int64] * 2  # ny, nx
-    args += [c_int64] * 2  # n_sources_per_shot, n_receivers_per_shot
-    args += [c_int64]  # step_ratio
-    # Batched flags
-    args += [c_bool] * 3  # ca_batched, cb_batched, cq_batched
-    # Start time
-    args += [c_int64]  # start_t
-    # PML boundaries
-    args += [c_int64] * 4  # pml_y0, pml_x0, pml_y1, pml_x1
-    # OpenMP threads (CPU only)
-    args += [c_int64]  # n_threads
-    # Device (for CUDA)
-    args += [c_int64]  # device
-    return args
+# (ctype, count, comment) — comment documents the argument names in order.
+_Spec = list[tuple[Any, int, str]]
 
 
-def get_maxwell_tm_backward_template() -> list[Any]:
-    """Returns the argtype template for the Maxwell TM backward propagator (v2 with ASM)."""
-    args: list[Any] = []
-    # Material parameters
-    args += [c_void_p] * 3  # ca, cb, cq
-    # Gradient of receiver data
-    args += [c_void_p]  # grad_r
-    # Adjoint fields (lambda)
-    args += [c_void_p] * 3  # lambda_ey, lambda_hx, lambda_hz
-    # Adjoint PML memory variables
-    args += [c_void_p] * 4  # m_lambda_ey_x, m_lambda_ey_z, m_lambda_hx_z, m_lambda_hz_x
-    # Stored forward values for gradient (Ey and curl_H)
-    # For each: store_1, store_3, filenames (char**)
-    args += [c_void_p] * 6
-    # Gradient outputs
-    args += [c_void_p]  # grad_f
-    args += [c_void_p] * 4  # grad_ca, grad_cb, grad_eps, grad_sigma
-    args += [c_void_p] * 2  # grad_ca_shot, grad_cb_shot (per-shot workspace)
-    # PML profiles
-    args += [c_void_p] * 8  # ay, by, ayh, byh, ax, bx, axh, bxh
-    # Kappa profiles
-    args += [c_void_p] * 4  # ky, kyh, kx, kxh
-    # Source and receiver indices
-    args += [c_void_p] * 2  # sources_i, receivers_i
-    # Grid spacing
-    args += [FLOAT_TYPE] * 2  # rdy, rdx
-    # Time step
-    args += [FLOAT_TYPE]  # dt
-    # Sizes
-    args += [c_int64]  # nt
-    args += [c_int64]  # n_shots
-    args += [c_int64] * 2  # ny, nx
-    args += [c_int64] * 2  # n_sources_per_shot, n_receivers_per_shot
-    args += [c_int64]  # step_ratio
-    # Storage mode
-    args += [c_int64] * 2  # storage_mode, shot_bytes_uncomp
-    # Requires grad flags
-    args += [c_bool] * 2  # ca_requires_grad, cb_requires_grad
-    # Batched flags
-    args += [c_bool] * 3  # ca_batched, cb_batched, cq_batched
-    # Start time
-    args += [c_int64]  # start_t
-    # PML boundaries for adjoint propagation
-    args += [c_int64] * 4  # pml_y0, pml_x0, pml_y1, pml_x1
-    # OpenMP threads (CPU only)
-    args += [c_int64]  # n_threads
-    # Device (for CUDA)
-    args += [c_int64]  # device
-    return args
+def _build(spec: _Spec) -> list[Any]:
+    """Flatten a declarative spec into a flat ctypes argtypes list."""
+    return [ctype for ctype, n, _ in spec for _ in range(n)]
 
 
-def get_maxwell_tm_forward_with_storage_template() -> list[Any]:
-    """Returns the argtype template for Maxwell TM forward with storage (for ASM backward)."""
-    args: list[Any] = []
-    # Material parameters
-    args += [c_void_p] * 3  # ca, cb, cq
-    # Source
-    args += [c_void_p]  # f (source amplitudes)
-    # Fields
-    args += [c_void_p] * 3  # ey, hx, hz
-    # PML memory variables
-    args += [c_void_p] * 4  # m_ey_x, m_ey_z, m_hx_z, m_hz_x
-    # Recorded data
-    args += [c_void_p]  # r (receiver amplitudes)
-    # Storage for backward (Ey and curl_H)
-    # For each: store_1, store_3, filenames (char**)
-    args += [c_void_p] * 6
-    # PML profiles
-    args += [c_void_p] * 8  # ay, by, ayh, byh, ax, bx, axh, bxh
-    # Kappa profiles
-    args += [c_void_p] * 4  # ky, kyh, kx, kxh
-    # Source and receiver indices
-    args += [c_void_p] * 2  # sources_i, receivers_i
-    # Grid spacing
-    args += [FLOAT_TYPE] * 2  # rdy, rdx
-    # Time step
-    args += [FLOAT_TYPE]  # dt
-    # Sizes
-    args += [c_int64]  # nt
-    args += [c_int64]  # n_shots
-    args += [c_int64] * 2  # ny, nx
-    args += [c_int64] * 2  # n_sources_per_shot, n_receivers_per_shot
-    args += [c_int64]  # step_ratio
-    # Storage mode
-    args += [c_int64] * 2  # storage_mode, shot_bytes_uncomp
-    # Requires grad flags
-    args += [c_bool] * 2  # ca_requires_grad, cb_requires_grad
-    # Batched flags
-    args += [c_bool] * 3  # ca_batched, cb_batched, cq_batched
-    # Start time
-    args += [c_int64]  # start_t
-    # PML boundaries
-    args += [c_int64] * 4  # pml_y0, pml_x0, pml_y1, pml_x1
-    # OpenMP threads (CPU only)
-    args += [c_int64]  # n_threads
-    # Device (for CUDA)
-    args += [c_int64]  # device
-    return args
+# ---------------------------------------------------------------------------
+# TM (2-D) propagators
+# ---------------------------------------------------------------------------
 
+_TM_COMMON_TAIL: _Spec = [
+    (_F, 2, "rdy, rdx"),
+    (_F, 1, "dt"),
+    (_I, 1, "nt"),
+    (_I, 1, "n_shots"),
+    (_I, 2, "ny, nx"),
+    (_I, 2, "n_sources_per_shot, n_receivers_per_shot"),
+    (_I, 1, "step_ratio"),
+]
 
-def get_maxwell_3d_forward_template() -> list[Any]:
-    """Returns the argtype template for the 3D Maxwell forward propagator."""
-    args: list[Any] = []
-    # Material parameters
-    args += [c_void_p] * 3  # ca, cb, cq
-    # Source
-    args += [c_void_p]  # f (source amplitudes)
-    # Fields
-    args += [c_void_p] * 6  # ex, ey, ez, hx, hy, hz
-    # PML memory variables
-    args += (
-        [c_void_p] * 12
-    )  # m_hz_y, m_hy_z, m_hx_z, m_hz_x, m_hy_x, m_hx_y, m_ey_z, m_ez_y, m_ez_x, m_ex_z, m_ex_y, m_ey_x
-    # Recorded data
-    args += [c_void_p]  # r
-    # PML profiles
-    args += [c_void_p] * 12  # az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh
-    # Kappa profiles
-    args += [c_void_p] * 6  # kz, kzh, ky, kyh, kx, kxh
-    # Source and receiver indices
-    args += [c_void_p] * 2  # sources_i, receivers_i
-    # Grid spacing
-    args += [FLOAT_TYPE] * 3  # rdz, rdy, rdx
-    # Time step
-    args += [FLOAT_TYPE]  # dt
-    # Sizes
-    args += [c_int64]  # nt
-    args += [c_int64]  # n_shots
-    args += [c_int64] * 3  # nz, ny, nx
-    args += [c_int64] * 2  # n_sources_per_shot, n_receivers_per_shot
-    args += [c_int64]  # step_ratio
-    # Batched flags
-    args += [c_bool] * 3  # ca_batched, cb_batched, cq_batched
-    # Start time
-    args += [c_int64]  # start_t
-    # PML boundaries
-    args += [c_int64] * 6  # pml_z0, pml_y0, pml_x0, pml_z1, pml_y1, pml_x1
-    # Source/receiver component
-    args += [c_int64] * 2  # source_component, receiver_component
-    # OpenMP threads (CPU only)
-    args += [c_int64]  # n_threads
-    # Device (for CUDA)
-    args += [c_int64]  # device
-    return args
+_TM_BATCHED_FLAGS: _Spec = [
+    (_B, 3, "ca_batched, cb_batched, cq_batched"),
+    (_I, 1, "start_t"),
+    (_I, 4, "pml_y0, pml_x0, pml_y1, pml_x1"),
+    (_I, 1, "n_threads"),
+    (_I, 1, "device"),
+]
 
+_TM_STORAGE_TAIL: _Spec = [
+    (_I, 2, "storage_mode, shot_bytes_uncomp"),
+    (_B, 2, "ca_requires_grad, cb_requires_grad"),
+]
 
-def get_maxwell_3d_forward_with_storage_template() -> list[Any]:
-    """Returns the argtype template for 3D Maxwell forward with storage (ASM)."""
-    args: list[Any] = []
-    # Material parameters
-    args += [c_void_p] * 3  # ca, cb, cq
-    # Source
-    args += [c_void_p]  # f (source amplitudes)
-    # Fields
-    args += [c_void_p] * 6  # ex, ey, ez, hx, hy, hz
-    # PML memory variables
-    args += (
-        [c_void_p] * 12
-    )  # m_hz_y, m_hy_z, m_hx_z, m_hz_x, m_hy_x, m_hx_y, m_ey_z, m_ez_y, m_ez_x, m_ex_z, m_ex_y, m_ey_x
-    # Recorded data
-    args += [c_void_p]  # r
-    # Storage for backward (Ex/Ey/Ez and curl(H) components)
-    # For each: store_1, store_3, filenames (char**)
-    args += [c_void_p] * 18
-    # PML profiles
-    args += [c_void_p] * 12  # az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh
-    # Kappa profiles
-    args += [c_void_p] * 6  # kz, kzh, ky, kyh, kx, kxh
-    # Source and receiver indices
-    args += [c_void_p] * 2  # sources_i, receivers_i
-    # Grid spacing
-    args += [FLOAT_TYPE] * 3  # rdz, rdy, rdx
-    # Time step
-    args += [FLOAT_TYPE]  # dt
-    # Sizes
-    args += [c_int64]  # nt
-    args += [c_int64]  # n_shots
-    args += [c_int64] * 3  # nz, ny, nx
-    args += [c_int64] * 2  # n_sources_per_shot, n_receivers_per_shot
-    args += [c_int64]  # step_ratio
-    # Storage mode
-    args += [c_int64] * 2  # storage_mode, shot_bytes_uncomp
-    # Requires grad flags
-    args += [c_bool] * 2  # ca_requires_grad, cb_requires_grad
-    # Batched flags
-    args += [c_bool] * 3  # ca_batched, cb_batched, cq_batched
-    # Start time
-    args += [c_int64]  # start_t
-    # PML boundaries
-    args += [c_int64] * 6  # pml_z0, pml_y0, pml_x0, pml_z1, pml_y1, pml_x1
-    # Source/receiver component
-    args += [c_int64] * 2  # source_component, receiver_component
-    # OpenMP threads (CPU only)
-    args += [c_int64]  # n_threads
-    # Device (for CUDA)
-    args += [c_int64]  # device
-    return args
+_TM_PML_PROFILES: _Spec = [
+    (_P, 8, "ay, by, ayh, byh, ax, bx, axh, bxh"),
+    (_P, 4, "ky, kyh, kx, kxh"),
+    (_P, 2, "sources_i, receivers_i"),
+]
 
+_TM_FORWARD_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 1, "f"),
+    (_P, 3, "ey, hx, hz"),
+    (_P, 4, "m_ey_x, m_ey_z, m_hx_z, m_hz_x"),
+    (_P, 1, "r"),
+    *_TM_PML_PROFILES,
+    *_TM_COMMON_TAIL,
+    *_TM_BATCHED_FLAGS,
+]
 
-def get_maxwell_3d_backward_template() -> list[Any]:
-    """Returns the argtype template for 3D Maxwell backward propagator (ASM)."""
-    args: list[Any] = []
-    # Material parameters
-    args += [c_void_p] * 3  # ca, cb, cq
-    # Gradient of receiver data
-    args += [c_void_p]  # grad_r
-    # Adjoint fields (lambda)
-    args += [
-        c_void_p
-    ] * 6  # lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz
-    # Adjoint PML memory variables
-    args += (
-        [c_void_p] * 12
-    )  # m_lambda_ey_z, m_lambda_ez_y, m_lambda_ez_x, m_lambda_ex_z, m_lambda_ex_y, m_lambda_ey_x, m_lambda_hz_y, m_lambda_hy_z, m_lambda_hx_z, m_lambda_hz_x, m_lambda_hy_x, m_lambda_hx_y
-    # Stored forward values (Ex/Ey/Ez and curl(H) components)
-    # For each: store_1, store_3, filenames (char**)
-    args += [c_void_p] * 18
-    # Gradient outputs
-    args += [c_void_p]  # grad_f
-    args += [c_void_p] * 4  # grad_ca, grad_cb, grad_eps, grad_sigma
-    args += [c_void_p] * 2  # grad_ca_shot, grad_cb_shot
-    # PML profiles
-    args += [c_void_p] * 12  # az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh
-    # Kappa profiles
-    args += [c_void_p] * 6  # kz, kzh, ky, kyh, kx, kxh
-    # Source and receiver indices
-    args += [c_void_p] * 2  # sources_i, receivers_i
-    # Grid spacing
-    args += [FLOAT_TYPE] * 3  # rdz, rdy, rdx
-    # Time step
-    args += [FLOAT_TYPE]  # dt
-    # Sizes
-    args += [c_int64]  # nt
-    args += [c_int64]  # n_shots
-    args += [c_int64] * 3  # nz, ny, nx
-    args += [c_int64] * 2  # n_sources_per_shot, n_receivers_per_shot
-    args += [c_int64]  # step_ratio
-    # Storage mode
-    args += [c_int64] * 2  # storage_mode, shot_bytes_uncomp
-    # Requires grad flags
-    args += [c_bool] * 2  # ca_requires_grad, cb_requires_grad
-    # Batched flags
-    args += [c_bool] * 3  # ca_batched, cb_batched, cq_batched
-    # Start time
-    args += [c_int64]  # start_t
-    # PML boundaries
-    args += [c_int64] * 6  # pml_z0, pml_y0, pml_x0, pml_z1, pml_y1, pml_x1
-    # Source/receiver component
-    args += [c_int64] * 2  # source_component, receiver_component
-    # OpenMP threads (CPU only)
-    args += [c_int64]  # n_threads
-    # Device (for CUDA)
-    args += [c_int64]  # device
-    return args
+_TM_FORWARD_WITH_STORAGE_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 1, "f"),
+    (_P, 3, "ey, hx, hz"),
+    (_P, 4, "m_ey_x, m_ey_z, m_hx_z, m_hz_x"),
+    (_P, 1, "r"),
+    (
+        _P,
+        6,
+        "ey_store_1, ey_store_3, ey_filenames, curl_store_1, curl_store_3, curl_filenames",
+    ),
+    *_TM_PML_PROFILES,
+    *_TM_COMMON_TAIL,
+    *_TM_STORAGE_TAIL,
+    *_TM_BATCHED_FLAGS,
+]
 
+_TM_BACKWARD_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 1, "grad_r"),
+    (_P, 3, "lambda_ey, lambda_hx, lambda_hz"),
+    (_P, 4, "m_lambda_ey_x, m_lambda_ey_z, m_lambda_hx_z, m_lambda_hz_x"),
+    (
+        _P,
+        6,
+        "ey_store_1, ey_store_3, ey_filenames, curl_store_1, curl_store_3, curl_filenames",
+    ),
+    (_P, 1, "grad_f"),
+    (_P, 2, "grad_ca, grad_cb"),
+    (_P, 2, "grad_ca_shot, grad_cb_shot"),
+    *_TM_PML_PROFILES,
+    *_TM_COMMON_TAIL,
+    *_TM_STORAGE_TAIL,
+    *_TM_BATCHED_FLAGS,
+]
 
-# Template registry
-templates: dict[str, Callable[[], list[Any]]] = {
-    "maxwell_tm_forward": get_maxwell_tm_forward_template,
-    "maxwell_tm_forward_with_storage": get_maxwell_tm_forward_with_storage_template,
-    "maxwell_tm_backward": get_maxwell_tm_backward_template,
-    "maxwell_3d_forward": get_maxwell_3d_forward_template,
-    "maxwell_3d_forward_with_storage": get_maxwell_3d_forward_with_storage_template,
-    "maxwell_3d_backward": get_maxwell_3d_backward_template,
+# ---------------------------------------------------------------------------
+# 3-D propagators
+# ---------------------------------------------------------------------------
+
+_3D_COMMON_TAIL: _Spec = [
+    (_F, 3, "rdz, rdy, rdx"),
+    (_F, 1, "dt"),
+    (_I, 1, "nt"),
+    (_I, 1, "n_shots"),
+    (_I, 3, "nz, ny, nx"),
+    (_I, 2, "n_sources_per_shot, n_receivers_per_shot"),
+    (_I, 1, "step_ratio"),
+]
+
+_3D_BATCHED_FLAGS: _Spec = [
+    (_B, 3, "ca_batched, cb_batched, cq_batched"),
+    (_I, 1, "start_t"),
+    (_I, 6, "pml_z0, pml_y0, pml_x0, pml_z1, pml_y1, pml_x1"),
+    (_I, 2, "source_component, receiver_component"),
+    (_I, 1, "n_threads"),
+    (_I, 1, "device"),
+]
+
+_3D_STORAGE_TAIL: _Spec = [
+    (_I, 2, "storage_mode, shot_bytes_uncomp"),
+    (_B, 2, "ca_requires_grad, cb_requires_grad"),
+]
+
+_3D_PML_PROFILES: _Spec = [
+    (_P, 12, "az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh"),
+    (_P, 6, "kz, kzh, ky, kyh, kx, kxh"),
+    (_P, 2, "sources_i, receivers_i"),
+]
+
+_3D_FIELDS: _Spec = [
+    (_P, 6, "ex, ey, ez, hx, hy, hz"),
+    (
+        _P,
+        12,
+        "m_hz_y, m_hy_z, m_hx_z, m_hz_x, m_hy_x, m_hx_y, "
+        "m_ey_z, m_ez_y, m_ez_x, m_ex_z, m_ex_y, m_ey_x",
+    ),
+]
+
+_3D_FORWARD_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 1, "f"),
+    *_3D_FIELDS,
+    (_P, 1, "r"),
+    *_3D_PML_PROFILES,
+    *_3D_COMMON_TAIL,
+    *_3D_BATCHED_FLAGS,
+]
+
+_3D_FORWARD_WITH_STORAGE_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 1, "f"),
+    *_3D_FIELDS,
+    (_P, 1, "r"),
+    (
+        _P,
+        18,
+        "ex_s1,ex_s3,ex_fn, ey_s1,ey_s3,ey_fn, ez_s1,ez_s3,ez_fn, "
+        "cx_s1,cx_s3,cx_fn, cy_s1,cy_s3,cy_fn, cz_s1,cz_s3,cz_fn",
+    ),
+    *_3D_PML_PROFILES,
+    *_3D_COMMON_TAIL,
+    *_3D_STORAGE_TAIL,
+    *_3D_BATCHED_FLAGS,
+]
+
+_3D_ADJ_FIELDS: _Spec = [
+    (_P, 6, "lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz"),
+    (
+        _P,
+        12,
+        "m_lambda_ey_z, m_lambda_ez_y, m_lambda_ez_x, m_lambda_ex_z, "
+        "m_lambda_ex_y, m_lambda_ey_x, m_lambda_hz_y, m_lambda_hy_z, "
+        "m_lambda_hx_z, m_lambda_hz_x, m_lambda_hy_x, m_lambda_hx_y",
+    ),
+]
+
+_3D_BACKWARD_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 1, "grad_r"),
+    *_3D_ADJ_FIELDS,
+    (
+        _P,
+        18,
+        "ex_s1,ex_s3,ex_fn, ey_s1,ey_s3,ey_fn, ez_s1,ez_s3,ez_fn, "
+        "cx_s1,cx_s3,cx_fn, cy_s1,cy_s3,cy_fn, cz_s1,cz_s3,cz_fn",
+    ),
+    (_P, 1, "grad_f"),
+    (_P, 4, "grad_ca, grad_cb, grad_eps, grad_sigma"),
+    (_P, 2, "grad_ca_shot, grad_cb_shot"),
+    *_3D_PML_PROFILES,
+    *_3D_COMMON_TAIL,
+    *_3D_STORAGE_TAIL,
+    *_3D_BATCHED_FLAGS,
+]
+
+# Flat template registry.
+_TEMPLATE_SPECS: dict[str, _Spec] = {
+    "maxwell_tm_forward": _TM_FORWARD_SPEC,
+    "maxwell_tm_forward_with_storage": _TM_FORWARD_WITH_STORAGE_SPEC,
+    "maxwell_tm_backward": _TM_BACKWARD_SPEC,
+    "maxwell_3d_forward": _3D_FORWARD_SPEC,
+    "maxwell_3d_forward_with_storage": _3D_FORWARD_WITH_STORAGE_SPEC,
+    "maxwell_3d_backward": _3D_BACKWARD_SPEC,
 }
 
-
-def _get_argtypes(template_name: str, float_type: type) -> list[Any]:
-    """Generates a concrete argtype list from a template and a float type.
-
-    Args:
-        template_name: The name of the argtype template to use.
-        float_type: The `ctypes` float type (`c_float` or `c_double`)
-            to substitute into the template.
-
-    Returns:
-        list[Any]: A list of `ctypes` types representing the argument
-            signature for a C function.
-
-    """
-    template = templates[template_name]()
-    return [float_type if t is FLOAT_TYPE else t for t in template]
+_ARGTYPES_CACHE: dict[tuple[str, str], list[Any]] = {}
+_ARGTYPES_INITIALIZED = False
 
 
-def _assign_argtypes(
+def _torch_dtype_to_backend_dtype(dtype: torch.dtype) -> str:
+    try:
+        return _TORCH_DTYPE_TO_BACKEND_DTYPE[dtype]
+    except KeyError as exc:
+        raise TypeError(f"Unsupported dtype {dtype}") from exc
+
+
+def _template_argtypes(template_name: str, backend_dtype: str) -> list[Any]:
+    cache_key = (template_name, backend_dtype)
+    cached = _ARGTYPES_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        spec = _TEMPLATE_SPECS[template_name]
+    except KeyError as exc:
+        raise KeyError(f"Unknown backend template {template_name!r}.") from exc
+
+    float_type = _BACKEND_DTYPE_TO_CTYPE[backend_dtype]
+    argtypes = [
+        float_type if ctype is FLOAT_TYPE else ctype for ctype in _build(spec)
+    ]
+    _ARGTYPES_CACHE[cache_key] = argtypes
+    return argtypes
+
+
+def _assign_argtypes_for_variant(
     propagator: str,
     accuracy: int,
-    dtype: str,
-    direction: str,
+    backend_dtype: str,
+    pass_name: str,
 ) -> None:
-    """Dynamically assigns ctypes argtypes to a given C function.
-
-    Args:
-        propagator: The name of the propagator (e.g., "maxwell_tm").
-        accuracy: The finite-difference accuracy order (e.g., 2, 4, 6, 8).
-        dtype: The data type as a string (e.g., "float", "double").
-        direction: The direction of propagation (e.g., "forward", "backward").
-
-    """
     if _dll is None:
         return
 
-    template_name = f"{propagator}_{direction}"
-    float_type = c_float if dtype in {"float", "half"} else c_double
-    argtypes = _get_argtypes(template_name, float_type)
+    template_name = f"{propagator}_{pass_name}"
+    argtypes = _template_argtypes(template_name, backend_dtype)
 
-    for device in ["cpu", "cuda", "mps"]:
-        func_name = f"{propagator}_{accuracy}_{dtype}_{direction}_{device}"
-        try:
-            func = getattr(_dll, func_name)
-            func.argtypes = argtypes
-            func.restype = None  # All C functions return void
-        except AttributeError:
+    for device_name in _SUPPORTED_DEVICES:
+        func_name = (
+            f"{propagator}_{accuracy}_{backend_dtype}_{pass_name}_{device_name}"
+        )
+        func = getattr(_dll, func_name, None)
+        if func is None:
             continue
+        func.argtypes = argtypes
+        func.restype = None
+
+
+def _initialize_argtypes() -> None:
+    global _ARGTYPES_INITIALIZED
+    if _ARGTYPES_INITIALIZED or _dll is None:
+        return
+
+    for propagator, pass_name, accuracy, backend_dtype in itertools.product(
+        ("maxwell_tm", "maxwell_3d"),
+        ("forward", "forward_with_storage", "backward"),
+        _SUPPORTED_ACCURACIES,
+        _SUPPORTED_BACKEND_DTYPES,
+    ):
+        _assign_argtypes_for_variant(propagator, accuracy, backend_dtype, pass_name)
+
+    _ARGTYPES_INITIALIZED = True
 
 
 def get_backend_function(
@@ -510,14 +429,9 @@ def get_backend_function(
     """
     dll = get_dll()
 
-    if dtype == torch.float32:
-        dtype_str = "float"
-    elif dtype == torch.float16:
-        dtype_str = "half"
-    elif dtype == torch.float64:
-        dtype_str = "double"
-    else:
-        raise TypeError(f"Unsupported dtype {dtype}")
+    _initialize_argtypes()
+
+    dtype_str = _torch_dtype_to_backend_dtype(dtype)
 
     device_str = device.type
 
@@ -561,17 +475,4 @@ def ensure_contiguous(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     return tensor.contiguous()
 
 
-# Initialize argtypes for all available functions when the module loads
-if _dll is not None:
-    for current_accuracy in [2, 4, 6, 8]:
-        for current_dtype in ["half", "float", "double"]:
-            _assign_argtypes("maxwell_tm", current_accuracy, current_dtype, "forward")
-            _assign_argtypes(
-                "maxwell_tm", current_accuracy, current_dtype, "forward_with_storage"
-            )
-            _assign_argtypes("maxwell_tm", current_accuracy, current_dtype, "backward")
-            _assign_argtypes("maxwell_3d", current_accuracy, current_dtype, "forward")
-            _assign_argtypes(
-                "maxwell_3d", current_accuracy, current_dtype, "forward_with_storage"
-            )
-            _assign_argtypes("maxwell_3d", current_accuracy, current_dtype, "backward")
+# Argtypes are assigned lazily in get_backend_function().

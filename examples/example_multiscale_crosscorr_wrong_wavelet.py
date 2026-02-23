@@ -25,7 +25,7 @@ first_source = 0
 batch_size = 16
 model_gradient_sampling_interval = 5
 storage_mode = "device"
-storage_compression = "fp8"
+storage_compression = "bf16"
 
 model_path = "examples/data/OverThrust.npy"
 epsilon_true_raw = np.load(model_path)

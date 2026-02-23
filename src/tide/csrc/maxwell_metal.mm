@@ -91,15 +91,15 @@ id<MTLLibrary> g_library = nil;
 constexpr int kStencilVariants = 4;
 
 id<MTLComputePipelineState> g_pso_forward_h[kStencilVariants] = {nil, nil, nil,
-                                                                  nil};
+                                                                 nil};
 id<MTLComputePipelineState> g_pso_forward_e[kStencilVariants] = {nil, nil, nil,
-                                                                  nil};
+                                                                 nil};
 id<MTLComputePipelineState> g_pso_add_sources = nil;
 id<MTLComputePipelineState> g_pso_record_recv = nil;
 id<MTLComputePipelineState> g_pso_forward_e_storage[kStencilVariants] = {
     nil, nil, nil, nil};
 id<MTLComputePipelineState> g_pso_backward_h[kStencilVariants] = {nil, nil, nil,
-                                                                   nil};
+                                                                  nil};
 id<MTLComputePipelineState> g_pso_backward_e_grad[kStencilVariants] = {
     nil, nil, nil, nil};
 id<MTLComputePipelineState> g_pso_convert_grad = nil;
@@ -108,16 +108,16 @@ std::once_flag g_init_flag;
 
 inline int stencil_index_from_fd_pad(int64_t fd_pad) {
   switch (fd_pad) {
-    case 1:
-      return 0; // stencil 2
-    case 2:
-      return 1; // stencil 4
-    case 3:
-      return 2; // stencil 6
-    case 4:
-      return 3; // stencil 8
-    default:
-      return -1;
+  case 1:
+    return 0; // stencil 2
+  case 2:
+    return 1; // stencil 4
+  case 3:
+    return 2; // stencil 6
+  case 4:
+    return 3; // stencil 8
+  default:
+    return -1;
   }
 }
 
@@ -214,9 +214,9 @@ void metal_init() {
       return pso;
     };
 
-    auto make_stencil_pso = [&](const char *base_name,
-                                const char *suffix)
-        -> id<MTLComputePipelineState> {
+    auto make_stencil_pso =
+        [&](const char *base_name,
+            const char *suffix) -> id<MTLComputePipelineState> {
       char func_name[128];
       snprintf(func_name, sizeof(func_name), "%s_%s", base_name, suffix);
       return make_pso(func_name);
@@ -972,14 +972,13 @@ static void maxwell_tm_float_backward_mps_impl(
     float *m_lambda_ey_z, float *m_lambda_hx_z, float *m_lambda_hz_x,
     float *ey_store_1, void *ey_store_3, char const *const *ey_filenames,
     float *curl_store_1, void *curl_store_3, char const *const *curl_filenames,
-    float *grad_f, float *grad_ca, float *grad_cb, float *grad_eps,
-    float *grad_sigma, float *grad_ca_shot, float *grad_cb_shot,
-    float const *ay, float const *by, float const *ayh, float const *byh,
-    float const *ax, float const *bx, float const *axh, float const *bxh,
-    float const *ky, float const *kyh, float const *kx, float const *kxh,
-    int64_t const *sources_i, int64_t const *receivers_i, float rdy_h,
-    float rdx_h, float dt_h, int64_t nt, int64_t n_shots, int64_t ny,
-    int64_t nx, int64_t n_src, int64_t n_rec, int64_t step_ratio,
+    float *grad_f, float *grad_ca, float *grad_cb, float *grad_ca_shot,
+    float *grad_cb_shot, float const *ay, float const *by, float const *ayh,
+    float const *byh, float const *ax, float const *bx, float const *axh,
+    float const *bxh, float const *ky, float const *kyh, float const *kx,
+    float const *kxh, int64_t const *sources_i, int64_t const *receivers_i,
+    float rdy_h, float rdx_h, float dt_h, int64_t nt, int64_t n_shots,
+    int64_t ny, int64_t nx, int64_t n_src, int64_t n_rec, int64_t step_ratio,
     int64_t storage_mode, int64_t shot_bytes_uncomp, bool ca_rg, bool cb_rg,
     bool ca_bat, bool cb_bat, bool cq_bat, int64_t start_t, int64_t pml_y0,
     int64_t pml_x0, int64_t pml_y1, int64_t pml_x1, int64_t n_threads,
@@ -1250,40 +1249,6 @@ static void maxwell_tm_float_backward_mps_impl(
       [cmdBuf waitUntilCompleted];
     }
 
-    // convert_grad_ca_cb_to_eps_sigma on GPU
-    if ((ca_rg || cb_rg) && (grad_eps || grad_sigma)) {
-      id<MTLBuffer> buf_grad_eps =
-          grad_eps ? make_zero_buffer(grad_model_bytes) : nil;
-      id<MTLBuffer> buf_grad_sigma =
-          grad_sigma ? make_zero_buffer(grad_model_bytes) : nil;
-      BackwardParams bp = make_bparams(
-          ny, nx, n_shots, n_src, n_rec, pml_y0, pml_y1, pml_x0, pml_x1, fd_pad,
-          rdy_h, rdx_h, dt_h, ca_bat, cb_bat, cq_bat, ca_rg, cb_rg, step_ratio);
-      int64_t out_shots = ca_bat ? n_shots : 1;
-      MTLSize gridSize_grad =
-          MTLSizeMake((NSUInteger)nx, (NSUInteger)ny, (NSUInteger)out_shots);
-      id<MTLCommandBuffer> cmdBuf = [g_queue commandBuffer];
-      id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-      [enc setComputePipelineState:g_pso_convert_grad];
-      [enc setBuffer:buf_ca offset:0 atIndex:0];
-      [enc setBuffer:buf_cb offset:0 atIndex:1];
-      [enc setBuffer:(buf_grad_ca ? buf_grad_ca : buf_ca) offset:0 atIndex:2];
-      [enc setBuffer:(buf_grad_cb ? buf_grad_cb : buf_ca) offset:0 atIndex:3];
-      [enc setBuffer:(buf_grad_eps ? buf_grad_eps : buf_ca) offset:0 atIndex:4];
-      [enc setBuffer:(buf_grad_sigma ? buf_grad_sigma : buf_ca)
-              offset:0
-             atIndex:5];
-      [enc setBytes:&bp length:sizeof(BackwardParams) atIndex:6];
-      [enc dispatchThreads:gridSize_grad threadsPerThreadgroup:tgSize_field];
-      [enc endEncoding];
-      [cmdBuf commit];
-      [cmdBuf waitUntilCompleted];
-      if (buf_grad_eps && grad_eps)
-        copy_back(buf_grad_eps, grad_eps, grad_model_bytes);
-      if (buf_grad_sigma && grad_sigma)
-        copy_back(buf_grad_sigma, grad_sigma, grad_model_bytes);
-    }
-
     // Copy results back
     copy_back(buf_lambda_ey, lambda_ey, field_bytes);
     copy_back(buf_lambda_hx, lambda_hx, field_bytes);
@@ -1334,22 +1299,21 @@ static void maxwell_tm_float_backward_mps_impl(
       float *ley, float *lhx, float *lhz, float *mlex, float *mlez,            \
       float *mlhxz, float *mlhzx, float *eys1, void *eys3,                     \
       char const *const *eyfn, float *cs1, void *cs3, char const *const *cfn,  \
-      float *gf, float *gca, float *gcb, float *ge, float *gs, float *gcas,    \
-      float *gcbs, float const *ay, float const *by, float const *ayh,         \
-      float const *byh, float const *ax, float const *bx, float const *axh,    \
-      float const *bxh, float const *ky, float const *kyh, float const *kx,    \
-      float const *kxh, int64_t const *si, int64_t const *ri, float rdy,       \
-      float rdx, float dt, int64_t nt, int64_t ns, int64_t ny, int64_t nx,     \
-      int64_t nsrc, int64_t nrec, int64_t sr, int64_t sm, int64_t sbu,         \
-      bool carg, bool cbrg, bool cab, bool cbb, bool cqb, int64_t st,          \
-      int64_t py0, int64_t px0, int64_t py1, int64_t px1, int64_t nth,         \
-      int64_t dev) {                                                           \
+      float *gf, float *gca, float *gcb, float *gcas, float *gcbs,             \
+      float const *ay, float const *by, float const *ayh, float const *byh,    \
+      float const *ax, float const *bx, float const *axh, float const *bxh,    \
+      float const *ky, float const *kyh, float const *kx, float const *kxh,    \
+      int64_t const *si, int64_t const *ri, float rdy, float rdx, float dt,    \
+      int64_t nt, int64_t ns, int64_t ny, int64_t nx, int64_t nsrc,            \
+      int64_t nrec, int64_t sr, int64_t sm, int64_t sbu, bool carg, bool cbrg, \
+      bool cab, bool cbb, bool cqb, int64_t st, int64_t py0, int64_t px0,      \
+      int64_t py1, int64_t px1, int64_t nth, int64_t dev) {                    \
     maxwell_tm_float_backward_mps_impl(                                        \
         ca, cb, cq, gr, ley, lhx, lhz, mlex, mlez, mlhxz, mlhzx, eys1, eys3,   \
-        eyfn, cs1, cs3, cfn, gf, gca, gcb, ge, gs, gcas, gcbs, ay, by, ayh,    \
-        byh, ax, bx, axh, bxh, ky, kyh, kx, kxh, si, ri, rdy, rdx, dt, nt, ns, \
-        ny, nx, nsrc, nrec, sr, sm, sbu, carg, cbrg, cab, cbb, cqb, st, py0,   \
-        px0, py1, px1, nth, dev, FD_PAD_VAL);                                  \
+        eyfn, cs1, cs3, cfn, gf, gca, gcb, gcas, gcbs, ay, by, ayh, byh, ax,   \
+        bx, axh, bxh, ky, kyh, kx, kxh, si, ri, rdy, rdx, dt, nt, ns, ny, nx,  \
+        nsrc, nrec, sr, sm, sbu, carg, cbrg, cab, cbb, cqb, st, py0, px0, py1, \
+        px1, nth, dev, FD_PAD_VAL);                                            \
   }
 
 DEFINE_METAL_FORWARD_STORAGE(2, 1)

@@ -6,9 +6,6 @@
 
 #include "storage_utils.h"
 
-#ifndef TIDE_CUDA_FP8_ENABLED
-#define TIDE_CUDA_FP8_ENABLED 0
-#endif
 #ifndef TIDE_CUDA_ARCHES_STR
 #define TIDE_CUDA_ARCHES_STR "unknown"
 #endif
@@ -53,10 +50,6 @@ static void report_cuda_error(const char* op, cudaError_t err) {
 }
 
 extern "C" {
-
-int tide_cuda_fp8_enabled(void) {
-  return TIDE_CUDA_FP8_ENABLED ? 1 : 0;
-}
 
 const char* tide_cuda_arches(void) {
   return TIDE_CUDA_ARCHES_STR;
