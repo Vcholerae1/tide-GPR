@@ -20,6 +20,8 @@ using tide_scalar_t =
                               tide_field_t>::type;
 constexpr bool kFieldIsHalf = std::is_same<tide_field_t, half>::value;
 
+namespace {
+
 #define LAMBDA_HX(dy, dx) lambda_hx[ND_INDEX(i, dy, dx)]
 #define LAMBDA_HZ(dy, dx) lambda_hz[ND_INDEX(i, dy, dx)]
 // Forward kernel: Update H fields (Hx and Hz)
