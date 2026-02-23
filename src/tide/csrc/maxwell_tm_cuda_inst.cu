@@ -786,15 +786,12 @@ extern "C" void FUNC(forward)(
   int64_t gridy = (ny_h - 2 * TIDE_FD_PAD + 2 + dimBlock.y - 1) / dimBlock.y;
   int64_t gridz = n_shots_h;
   dim3 dimGrid(gridx, gridy, gridz);
-#if TIDE_FD_PAD > 1
-  size_t const shmem_h_bytes = (size_t)(dimBlock.x + 2 * TIDE_FD_PAD) *
-                               (size_t)(dimBlock.y + 2 * TIDE_FD_PAD) *
-                               sizeof(TIDE_DTYPE);
+  size_t const shmem_h_bytes =
+      (TIDE_FD_PAD > 1)
+          ? (size_t)(dimBlock.x + 2 * TIDE_FD_PAD) *
+                (size_t)(dimBlock.y + 2 * TIDE_FD_PAD) * sizeof(TIDE_DTYPE)
+          : 0;
   size_t const shmem_e_bytes = 0;
-#else
-  size_t const shmem_h_bytes = 0;
-  size_t const shmem_e_bytes = 0;
-#endif
 
   dim3 dimBlock_sources(32, 1, 1);
   dim3 dimGrid_sources((n_sources_per_shot_h + dimBlock_sources.x - 1) /
@@ -948,15 +945,12 @@ extern "C" void FUNC(forward_with_storage)(
   int64_t gridy = (ny_h - 2 * TIDE_FD_PAD + 2 + dimBlock.y - 1) / dimBlock.y;
   int64_t gridz = n_shots_h;
   dim3 dimGrid(gridx, gridy, gridz);
-#if TIDE_FD_PAD > 1
-  size_t const shmem_h_bytes = (size_t)(dimBlock.x + 2 * TIDE_FD_PAD) *
-                               (size_t)(dimBlock.y + 2 * TIDE_FD_PAD) *
-                               sizeof(TIDE_DTYPE);
+  size_t const shmem_h_bytes =
+      (TIDE_FD_PAD > 1)
+          ? (size_t)(dimBlock.x + 2 * TIDE_FD_PAD) *
+                (size_t)(dimBlock.y + 2 * TIDE_FD_PAD) * sizeof(TIDE_DTYPE)
+          : 0;
   size_t const shmem_e_bytes = 2 * shmem_h_bytes;
-#else
-  size_t const shmem_h_bytes = 0;
-  size_t const shmem_e_bytes = 0;
-#endif
 
   dim3 dimBlock_sources(32, 1, 1);
   dim3 dimGrid_sources((n_sources_per_shot_h + dimBlock_sources.x - 1) /
