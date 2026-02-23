@@ -1,5 +1,25 @@
+#undef DIFFY1
+#undef DIFFX1
+#undef DIFFYH1
+#undef DIFFXH1
+#undef DIFFY1_ADJ
+#undef DIFFX1_ADJ
+#undef DIFFYH1_ADJ
+#undef DIFFXH1_ADJ
+
+#ifdef STAGGERED_GRID_H
+#undef STAGGERED_GRID_H
+#endif
+#include "staggered_grid.h"
+
 #define TIDE_FD_PAD (tide::StencilTraits<TIDE_STENCIL>::FD_PAD)
 namespace FUNC(Inst) {
+using tide_field_t = TIDE_DTYPE;
+using tide_scalar_t =
+    typename std::conditional<std::is_same<tide_field_t, half>::value, float,
+                              tide_field_t>::type;
+constexpr bool kFieldIsHalf = std::is_same<tide_field_t, half>::value;
+
 #define LAMBDA_HX(dy, dx) lambda_hx[ND_INDEX(i, dy, dx)]
 #define LAMBDA_HZ(dy, dx) lambda_hz[ND_INDEX(i, dy, dx)]
 // Forward kernel: Update H fields (Hx and Hz)
@@ -706,8 +726,8 @@ extern "C" void FUNC(forward)(
     TIDE_DTYPE const *const bxh, TIDE_DTYPE const *const ky,
     TIDE_DTYPE const *const kyh, TIDE_DTYPE const *const kx,
     TIDE_DTYPE const *const kxh, int64_t const *const sources_i,
-    int64_t const *const receivers_i, scalar_t const rdy_h,
-    scalar_t const rdx_h, scalar_t const dt_h, int64_t const nt,
+    int64_t const *const receivers_i, tide_scalar_t const rdy_h,
+    tide_scalar_t const rdx_h, tide_scalar_t const dt_h, int64_t const nt,
     int64_t const n_shots_h, int64_t const ny_h, int64_t const nx_h,
     int64_t const n_sources_per_shot_h, int64_t const n_receivers_per_shot_h,
     int64_t const step_ratio_h, bool const ca_batched_h,
@@ -723,7 +743,7 @@ extern "C" void FUNC(forward)(
   int64_t const shot_numel_h = ny_h * nx_h;
 
   // Copy constants to device with caching to avoid redundant copies
-  static scalar_t cached_rdy = 0, cached_rdx = 0;
+  static tide_scalar_t cached_rdy = 0, cached_rdx = 0;
   static int64_t cached_n_shots = -1, cached_ny = -1, cached_nx = -1;
   static int64_t cached_shot_numel = -1, cached_n_sources_per_shot = -1,
                  cached_n_receivers_per_shot = -1;
@@ -744,8 +764,10 @@ extern "C" void FUNC(forward)(
       cached_ca_batched != ca_batched_h || cached_cb_batched != cb_batched_h ||
       cached_cq_batched != cq_batched_h) {
 
-    cudaMemcpyToSymbol(rdy, &rdy_h, sizeof(scalar_t));
-    cudaMemcpyToSymbol(rdx, &rdx_h, sizeof(scalar_t));
+    double const rdy_const = static_cast<double>(rdy_h);
+    double const rdx_const = static_cast<double>(rdx_h);
+    cudaMemcpyToSymbol(rdy, &rdy_const, sizeof(double));
+    cudaMemcpyToSymbol(rdx, &rdx_const, sizeof(double));
     cudaMemcpyToSymbol(n_shots, &n_shots_h, sizeof(int64_t));
     cudaMemcpyToSymbol(ny, &ny_h, sizeof(int64_t));
     cudaMemcpyToSymbol(nx, &nx_h, sizeof(int64_t));
@@ -844,8 +866,8 @@ extern "C" void FUNC(forward_with_storage)(
     TIDE_DTYPE const *const bxh, TIDE_DTYPE const *const ky,
     TIDE_DTYPE const *const kyh, TIDE_DTYPE const *const kx,
     TIDE_DTYPE const *const kxh, int64_t const *const sources_i,
-    int64_t const *const receivers_i, scalar_t const rdy_h,
-    scalar_t const rdx_h, scalar_t const dt_h, int64_t const nt,
+    int64_t const *const receivers_i, tide_scalar_t const rdy_h,
+    tide_scalar_t const rdx_h, tide_scalar_t const dt_h, int64_t const nt,
     int64_t const n_shots_h, int64_t const ny_h, int64_t const nx_h,
     int64_t const n_sources_per_shot_h, int64_t const n_receivers_per_shot_h,
     int64_t const step_ratio_h, int64_t const storage_mode_h,
@@ -880,7 +902,7 @@ extern "C" void FUNC(forward_with_storage)(
   }
 
   // Copy constants to device with caching to avoid redundant copies
-  static scalar_t cached_rdy2 = 0, cached_rdx2 = 0;
+  static tide_scalar_t cached_rdy2 = 0, cached_rdx2 = 0;
   static int64_t cached_n_shots2 = -1, cached_ny2 = -1, cached_nx2 = -1;
   static int64_t cached_shot_numel2 = -1, cached_n_sources_per_shot2 = -1,
                  cached_n_receivers_per_shot2 = -1;
@@ -903,8 +925,10 @@ extern "C" void FUNC(forward_with_storage)(
       cached_cb_batched2 != cb_batched_h ||
       cached_cq_batched2 != cq_batched_h) {
 
-    cudaMemcpyToSymbol(rdy, &rdy_h, sizeof(scalar_t));
-    cudaMemcpyToSymbol(rdx, &rdx_h, sizeof(scalar_t));
+    double const rdy_const = static_cast<double>(rdy_h);
+    double const rdx_const = static_cast<double>(rdx_h);
+    cudaMemcpyToSymbol(rdy, &rdy_const, sizeof(double));
+    cudaMemcpyToSymbol(rdx, &rdx_const, sizeof(double));
     cudaMemcpyToSymbol(n_shots, &n_shots_h, sizeof(int64_t));
     cudaMemcpyToSymbol(ny, &ny_h, sizeof(int64_t));
     cudaMemcpyToSymbol(nx, &nx_h, sizeof(int64_t));
@@ -1117,7 +1141,8 @@ extern "C" void FUNC(backward)(
     TIDE_DTYPE const *const ky, TIDE_DTYPE const *const kyh,
     TIDE_DTYPE const *const kx, TIDE_DTYPE const *const kxh,
     int64_t const *const sources_i, int64_t const *const receivers_i,
-    scalar_t const rdy_h, scalar_t const rdx_h, scalar_t const dt_h,
+    tide_scalar_t const rdy_h, tide_scalar_t const rdx_h,
+    tide_scalar_t const dt_h,
     int64_t const nt, int64_t const n_shots_h, int64_t const ny_h,
     int64_t const nx_h, int64_t const n_sources_per_shot_h,
     int64_t const n_receivers_per_shot_h, int64_t const step_ratio_h,
@@ -1152,7 +1177,7 @@ extern "C" void FUNC(backward)(
   }
 
   // Copy constants to device with caching to avoid redundant copies
-  static scalar_t cached_rdy3 = 0, cached_rdx3 = 0;
+  static tide_scalar_t cached_rdy3 = 0, cached_rdx3 = 0;
   static int64_t cached_n_shots3 = -1, cached_ny3 = -1, cached_nx3 = -1;
   static int64_t cached_shot_numel3 = -1, cached_n_sources_per_shot3 = -1,
                  cached_n_receivers_per_shot3 = -1;
@@ -1175,8 +1200,10 @@ extern "C" void FUNC(backward)(
       cached_cb_batched3 != cb_batched_h ||
       cached_cq_batched3 != cq_batched_h) {
 
-    cudaMemcpyToSymbol(rdy, &rdy_h, sizeof(scalar_t));
-    cudaMemcpyToSymbol(rdx, &rdx_h, sizeof(scalar_t));
+    double const rdy_const = static_cast<double>(rdy_h);
+    double const rdx_const = static_cast<double>(rdx_h);
+    cudaMemcpyToSymbol(rdy, &rdy_const, sizeof(double));
+    cudaMemcpyToSymbol(rdx, &rdx_const, sizeof(double));
     cudaMemcpyToSymbol(n_shots, &n_shots_h, sizeof(int64_t));
     cudaMemcpyToSymbol(ny, &ny_h, sizeof(int64_t));
     cudaMemcpyToSymbol(nx, &nx_h, sizeof(int64_t));

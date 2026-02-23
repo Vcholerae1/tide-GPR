@@ -336,6 +336,8 @@ using namespace tide;
 #undef FUNC
 #define FUNC(name) CAT(name, TIDE_STENCIL, TIDE_DTYPE, cpu)
 
+#undef TIDE_STENCIL
+#undef TIDE_DTYPE
 #define TIDE_STENCIL 2
 #define TIDE_DTYPE float
 #include "maxwell_tm_inst.cpp"

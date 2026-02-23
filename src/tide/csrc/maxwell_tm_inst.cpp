@@ -1,3 +1,16 @@
+#undef DIFFY1
+#undef DIFFX1
+#undef DIFFYH1
+#undef DIFFXH1
+#undef DIFFY1_ADJ
+#undef DIFFX1_ADJ
+#undef DIFFYH1_ADJ
+#undef DIFFXH1_ADJ
+
+#ifdef STAGGERED_GRID_H
+#undef STAGGERED_GRID_H
+#endif
+#include "staggered_grid.h"
 
 #define TIDE_FD_PAD (tide::StencilTraits<TIDE_STENCIL>::FD_PAD)
 #define EY(dy, dx) ey[idx + (dy) * nx + (dx)]
