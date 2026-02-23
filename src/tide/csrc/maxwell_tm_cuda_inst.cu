@@ -54,7 +54,8 @@ __global__ __launch_bounds__(256) void forward_kernel_h(
 
   GridParams<TIDE_DTYPE> params = {
       ay,      ayh,   ax,    axh,        by,     byh,    bx,
-      bxh,     ky,    kyh,   kx,         kxh,    rdy,    rdx,
+      bxh,     ky,    kyh,   kx,         kxh,    static_cast<TIDE_DTYPE>(rdy),
+      static_cast<TIDE_DTYPE>(rdx),
       n_shots, ny,    nx,    shot_numel, pml_y0, pml_y1, pml_x0,
       pml_x1,  false, false, cq_batched // ca/cb batched unused
   };
@@ -97,7 +98,8 @@ __global__ __launch_bounds__(256) void forward_kernel_e(
 
   GridParams<TIDE_DTYPE> params = {
       ay,      ayh,        ax,         axh,        by,     byh,    bx,
-      bxh,     ky,         kyh,        kx,         kxh,    rdy,    rdx,
+      bxh,     ky,         kyh,        kx,         kxh,
+      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
       n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
       pml_x1,  ca_batched, cb_batched, false // cq batched unused
   };
@@ -143,7 +145,8 @@ __global__ __launch_bounds__(256) void forward_kernel_e_with_storage(
 
   GridParams<TIDE_DTYPE> params = {
       ay,      ayh,        ax,         axh,        by,     byh,    bx,
-      bxh,     ky,         kyh,        kx,         kxh,    rdy,    rdx,
+      bxh,     ky,         kyh,        kx,         kxh,
+      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
       n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
       pml_x1,  ca_batched, cb_batched, false // cq batched unused
   };
@@ -192,7 +195,8 @@ __global__ __launch_bounds__(256) void forward_kernel_e_with_storage_bf16(
 
   GridParams<TIDE_DTYPE> params = {
       ay,      ayh,        ax,         axh,        by,     byh,    bx,
-      bxh,     ky,         kyh,        kx,         kxh,    rdy,    rdx,
+      bxh,     ky,         kyh,        kx,         kxh,
+      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
       n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
       pml_x1,  ca_batched, cb_batched, false // cq batched unused
   };
@@ -238,7 +242,8 @@ backward_kernel_lambda_h(TIDE_DTYPE const *__restrict const cb,
   GridParams<TIDE_DTYPE> params =
       {
           ay,      ayh,   ax,         axh,        by,     byh,    bx,
-          bxh,     ky,    kyh,        kx,         kxh,    rdy,    rdx,
+          bxh,     ky,    kyh,        kx,         kxh,
+          static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
           n_shots, ny,    nx,         shot_numel, pml_y0, pml_y1, pml_x0,
           pml_x1,  false, cb_batched, false // ca/cq batched unused
       };
@@ -472,7 +477,8 @@ backward_kernel_lambda_e(TIDE_DTYPE const *__restrict const ca,
 
   GridParams<TIDE_DTYPE> params = {
       ay,      ayh,        ax,    axh,        by,     byh,    bx,
-      bxh,     ky,         kyh,   kx,         kxh,    rdy,    rdx,
+      bxh,     ky,         kyh,   kx,         kxh,
+      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
       n_shots, ny,         nx,    shot_numel, pml_y0, pml_y1, pml_x0,
       pml_x1,  ca_batched, false, cq_batched // cb batched unused
   };
