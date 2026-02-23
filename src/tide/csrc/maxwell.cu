@@ -38,7 +38,6 @@
 #include <stdio.h>
 #include <type_traits>
 #include "common_gpu.h"
-#include "staggered_grid.h"
 #include "storage_utils.h"
 
 #ifndef TIDE_DEVICE
@@ -74,19 +73,13 @@
 
 #define MAX(a, b) (a > b ? a : b)
 
-using field_t = TIDE_DTYPE;
-using accum_t = typename std::conditional<std::is_same<field_t, half>::value,
-                                          float, field_t>::type;
-using scalar_t = typename std::conditional<std::is_same<field_t, half>::value,
-                                           float, field_t>::type;
-constexpr bool kFieldIsHalf = std::is_same<field_t, half>::value;
-constexpr accum_t kEp0 = (accum_t)8.8541878128e-12;
-
 namespace {
 
 // Device constants
-__constant__ scalar_t rdy;
-__constant__ scalar_t rdx;
+// Keep a single scalar type for grid spacing in the unified TU build.
+// Per-dtype kernels cast as needed.
+__constant__ double rdy;
+__constant__ double rdx;
 __constant__ int64_t n_shots;
 __constant__ int64_t ny;
 __constant__ int64_t nx;
