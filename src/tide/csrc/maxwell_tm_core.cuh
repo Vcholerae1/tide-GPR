@@ -470,10 +470,10 @@ forward_kernel_h_core(GridParams<T> const &params, T const *cq_ptr, T const *ey,
     // Update Hx: Hx = Hx - cq * dEy/dz
     if (y < params.ny - FD_PAD) {
       bool pml_y = y < pml_y0h || y >= pml_y1h;
-      GlobalFieldAccessor<T> EY(ey, params.nx);
+      GlobalFieldAccessor<T> ey_acc(ey, params.nx);
 
       T dey_dz = DiffForward<STENCIL_ORDER>::diff_yh1(
-          EY, shot_idx * params.shot_numel, y, x, params.nx, params.rdy);
+          ey_acc, shot_idx * params.shot_numel, y, x, params.nx, params.rdy);
 
       if (pml_y) {
         m_ey_z[i] = params.byh[y] * m_ey_z[i] + params.ayh[y] * dey_dz;
@@ -486,10 +486,10 @@ forward_kernel_h_core(GridParams<T> const &params, T const *cq_ptr, T const *ey,
     // Update Hz: Hz = Hz + cq * dEy/dx
     if (x < params.nx - FD_PAD) {
       bool pml_x = x < pml_x0h || x >= pml_x1h;
-      GlobalFieldAccessor<T> EY(ey, params.nx);
+      GlobalFieldAccessor<T> ey_acc(ey, params.nx);
 
       T dey_dx = DiffForward<STENCIL_ORDER>::diff_xh1(
-          EY, shot_idx * params.shot_numel, y, x, params.nx, params.rdx);
+          ey_acc, shot_idx * params.shot_numel, y, x, params.nx, params.rdx);
 
       if (pml_x) {
         m_ey_x[i] = params.bxh[x] * m_ey_x[i] + params.axh[x] * dey_dx;
