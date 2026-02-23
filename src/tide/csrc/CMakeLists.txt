@@ -3,6 +3,11 @@
 cmake_minimum_required(VERSION 3.18)
 project(tide_backend LANGUAGES C CXX)
 
+# Require a modern C++ dialect for shared template headers (e.g. constexpr).
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 option(TIDE_ENABLE_CUDA "Enable CUDA backend" ON)
 option(TIDE_ENABLE_METAL "Enable Metal backend (Apple GPU)" ON)
 option(TIDE_ENABLE_NATIVE_ARCH "Enable native CPU tuning flags (-march=native)" OFF)
