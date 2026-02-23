@@ -173,6 +173,7 @@ record_adjoint_at_sources(T *__restrict const grad_f,
 
 using namespace tide;
 
+} // namespace
 
 #undef FUNC
 #define FUNC(name) CAT(name, TIDE_STENCIL, TIDE_DTYPE, cuda)
