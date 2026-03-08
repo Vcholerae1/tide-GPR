@@ -15,7 +15,7 @@ Common settings: `stencil=2`, `pml_width=8`, Ricker source.
 Precision is configurable with `--compute-dtype` and `--mp-mode`.
 
 ## Steps
-1. Pick runtime device in priority order: `mps` (with Metal backend), then `cuda`, then `cpu`.
+1. Pick runtime device in priority order: `cuda`, then `cpu`.
 2. For each scenario and mode (`forward`, `forward+backward`):
 3. Run 3 warmup iterations.
 4. Run 10 timed iterations and synchronize device around each measurement.

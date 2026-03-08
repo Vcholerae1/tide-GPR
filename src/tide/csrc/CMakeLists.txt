@@ -3,15 +3,25 @@
 cmake_minimum_required(VERSION 3.18)
 project(tide_backend LANGUAGES C CXX)
 
+# Keep csrc source tree clean: always configure/build out-of-source.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+    message(FATAL_ERROR
+        "In-source build is not supported.\n"
+        "Use: cmake -S src/tide/csrc -B build/csrc"
+    )
+endif()
+
 # Require a modern C++ dialect for shared template headers (e.g. constexpr).
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(TIDE_ENABLE_CUDA "Enable CUDA backend" ON)
-option(TIDE_ENABLE_METAL "Enable Metal backend (Apple GPU)" ON)
 option(TIDE_ENABLE_NATIVE_ARCH "Enable native CPU tuning flags (-march=native)" OFF)
 option(TIDE_CUDA_PROFILE_BUILD "Enable CUDA line info and verbose ptxas output" OFF)
+option(TIDE_ENABLE_HALF_KERNELS "Enable CUDA half-precision kernel instantiations" OFF)
+set(TIDE_TM_BLOCK_X "32" CACHE STRING "TM CUDA thread block size in X")
+set(TIDE_TM_BLOCK_Y "8" CACHE STRING "TM CUDA thread block size in Y")
 
 # Detect and enable CUDA if present and enabled
 if(TIDE_ENABLE_CUDA)
@@ -176,13 +186,19 @@ if(CMAKE_BUILD_TYPE MATCHES Release)
 endif()
 
 # --- Helper Macros for Object Libraries ---
-macro(add_tide_cpu_object_library BASENAME)
+macro(add_tide_cpu_object_library BASENAME SOURCE_REL_PATH)
     set(TARGET_NAME "${BASENAME}_cpu_obj")
-    add_library(${TARGET_NAME} OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/${BASENAME}.cpp)
+    add_library(${TARGET_NAME} OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_REL_PATH})
     target_compile_definitions(${TARGET_NAME} PRIVATE 
         TIDE_DEVICE=cpu
     )
-    target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_include_directories(${TARGET_NAME} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/common
+        ${CMAKE_CURRENT_SOURCE_DIR}/storage
+        ${CMAKE_CURRENT_SOURCE_DIR}/tm2d
+        ${CMAKE_CURRENT_SOURCE_DIR}/em3d
+    )
     list(APPEND TIDE_OBJECTS $<TARGET_OBJECTS:${TARGET_NAME}>)
     list(APPEND CPU_TARGETS ${TARGET_NAME})
 
@@ -199,6 +215,12 @@ macro(add_tide_cpu_object_library BASENAME)
 endmacro()
 
 if(CUDAToolkit_FOUND)
+    if(TIDE_ENABLE_HALF_KERNELS)
+        set(TIDE_ENABLE_HALF_KERNELS_DEF 1)
+    else()
+        set(TIDE_ENABLE_HALF_KERNELS_DEF 0)
+    endif()
+
     # Use explicit architectures. Some CMake defaults resolve to 75 even on
     # Ada GPUs. Prefer "all but sm_4x" (and only those supported by nvcc)
     # by default unless the user explicitly sets it.
@@ -237,13 +259,22 @@ if(CUDAToolkit_FOUND)
     set(TIDE_CUDA_ARCHES "${CMAKE_CUDA_ARCHITECTURES}")
     string(REPLACE ";" "," TIDE_CUDA_ARCHES_STR "${TIDE_CUDA_ARCHES}")
 
-    macro(add_tide_cuda_object_library BASENAME)
+    macro(add_tide_cuda_object_library BASENAME SOURCE_REL_PATH)
         set(TARGET_NAME "${BASENAME}_cuda_obj")
-        add_library(${TARGET_NAME} OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/${BASENAME}.cu)
+        add_library(${TARGET_NAME} OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_REL_PATH})
         target_compile_definitions(${TARGET_NAME} PRIVATE
             TIDE_DEVICE=cuda
+            TIDE_ENABLE_HALF_KERNELS=${TIDE_ENABLE_HALF_KERNELS_DEF}
+            TIDE_TM_BLOCK_X=${TIDE_TM_BLOCK_X}
+            TIDE_TM_BLOCK_Y=${TIDE_TM_BLOCK_Y}
         )
-        target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_include_directories(${TARGET_NAME} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/common
+            ${CMAKE_CURRENT_SOURCE_DIR}/storage
+            ${CMAKE_CURRENT_SOURCE_DIR}/tm2d
+            ${CMAKE_CURRENT_SOURCE_DIR}/em3d
+        )
         list(APPEND TIDE_OBJECTS $<TARGET_OBJECTS:${TARGET_NAME}>)
         
         set_target_properties(${TARGET_NAME} PROPERTIES CUDA_ARCHITECTURES "${TIDE_CUDA_ARCHES}")
@@ -273,11 +304,14 @@ set(TIDE_OBJECTS)
 set(CPU_TARGETS)
 
 # --- Storage utilities ---
-set(STORAGE_UTILS_CPU_SRC ${CMAKE_CURRENT_SOURCE_DIR}/storage_utils.c)
+set(STORAGE_UTILS_CPU_SRC ${CMAKE_CURRENT_SOURCE_DIR}/storage/storage_utils.c)
 set(STORAGE_UTILS_CUDA_SRC "")
 
 # --- CPU object libraries ---
-add_tide_cpu_object_library(maxwell)
+add_tide_cpu_object_library(maxwell tm2d/maxwell.cpp)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/em3d/maxwell_3d.cpp)
+    add_tide_cpu_object_library(maxwell_3d em3d/maxwell_3d.cpp)
+endif()
 
 if(OPENMP_CONFIGURED)
     foreach(CPU_TARGET ${CPU_TARGETS})
@@ -294,55 +328,19 @@ if(CUDAToolkit_FOUND)
         list(APPEND CMAKE_CUDA_FLAGS -Xcompiler=-fPIC)
     endif()
 
-    add_tide_cuda_object_library(maxwell)
+    add_tide_cuda_object_library(maxwell tm2d/maxwell.cu)
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/em3d/maxwell_3d.cu)
+        add_tide_cuda_object_library(maxwell_3d em3d/maxwell_3d.cu)
+    endif()
 
     # --- Storage utilities ---
-    set(STORAGE_UTILS_CUDA_SRC ${CMAKE_CURRENT_SOURCE_DIR}/storage_utils.cu)
+    set(STORAGE_UTILS_CUDA_SRC ${CMAKE_CURRENT_SOURCE_DIR}/storage/storage_utils.cu)
     set_source_files_properties(${STORAGE_UTILS_CUDA_SRC} PROPERTIES CUDA_ARCHITECTURES "${TIDE_CUDA_ARCHES}")
-endif()
-
-# --- Metal backend (Apple GPU) ---
-# Uses runtime shader compilation (no offline Metal compiler needed).
-# The .metal source is loaded and compiled by the Metal framework at first use.
-set(TIDE_METAL_FOUND FALSE)
-if(TIDE_ENABLE_METAL AND APPLE)
-    set(TIDE_METAL_FOUND TRUE)
-    message(STATUS "Metal backend enabled (runtime shader compilation)")
-
-    # Compile Obj-C++ bridge
-    set(METAL_BRIDGE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/maxwell_metal.mm)
-    set(METAL_BRIDGE_TARGET maxwell_metal_obj)
-    add_library(${METAL_BRIDGE_TARGET} OBJECT ${METAL_BRIDGE_SRC})
-    set_target_properties(${METAL_BRIDGE_TARGET} PROPERTIES
-        POSITION_INDEPENDENT_CODE ON
-    )
-    target_compile_options(${METAL_BRIDGE_TARGET} PRIVATE
-        -fobjc-arc -std=c++17
-    )
-    if(CMAKE_BUILD_TYPE MATCHES Release)
-        target_compile_options(${METAL_BRIDGE_TARGET} PRIVATE -O2)
-    endif()
-    target_include_directories(${METAL_BRIDGE_TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    list(APPEND TIDE_OBJECTS $<TARGET_OBJECTS:${METAL_BRIDGE_TARGET}>)
 endif()
 
 # --- Final Library Build ---
 # Combine all objects into a single shared library
 add_library(tide_C SHARED ${TIDE_OBJECTS} ${STORAGE_UTILS_CUDA_SRC} ${STORAGE_UTILS_CPU_SRC})
-
-# Link Metal frameworks and copy shader source if Metal backend is enabled
-if(TIDE_METAL_FOUND)
-    target_link_libraries(tide_C PRIVATE "-framework Metal" "-framework Foundation")
-    # Copy .metal shader source next to the shared library for runtime loading
-    set(METAL_SHADER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/maxwell.metal)
-    set(METAL_OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
-    add_custom_command(TARGET tide_C POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${METAL_SHADER_SRC}
-                ${METAL_OUTPUT_DIR}/maxwell.metal
-        COMMENT "Copying maxwell.metal shader source to output directory"
-    )
-endif()
 
 if(WIN32)
     set_target_properties(tide_C PROPERTIES OUTPUT_NAME "libtide_C")
@@ -392,13 +390,9 @@ if(CUDAToolkit_FOUND)
     message(STATUS "  CUDA: ON")
     message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
     message(STATUS "  CUDA Profile Build: ${TIDE_CUDA_PROFILE_BUILD}")
+    message(STATUS "  TM Block: ${TIDE_TM_BLOCK_X}x${TIDE_TM_BLOCK_Y}")
 else()
     message(STATUS "  CUDA: OFF")
-endif()
-if(TIDE_METAL_FOUND)
-    message(STATUS "  Metal: ON")
-else()
-    message(STATUS "  Metal: OFF")
 endif()
 message(STATUS "  Output Directory: ${CMAKE_CURRENT_SOURCE_DIR}/..")
 message(STATUS "")
@@ -409,11 +403,6 @@ install(TARGETS tide_C
     ARCHIVE DESTINATION tide
     RUNTIME DESTINATION tide
 )
-
-# Install .metal shader source alongside the library
-if(TIDE_METAL_FOUND)
-    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/maxwell.metal DESTINATION tide)
-endif()
 
 # Bundle OpenMP runtime on Windows (Clang's libomp.dll)
 if(WIN32)

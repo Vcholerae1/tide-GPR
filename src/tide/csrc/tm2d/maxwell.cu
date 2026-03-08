@@ -55,25 +55,24 @@
 #define CAT(name, accuracy, dtype, device) CAT_I(name, accuracy, dtype, device)
 #define FUNC(name) CAT(name, TIDE_STENCIL, TIDE_DTYPE, TIDE_DEVICE)
 
-// 2D indexing macros
-#define ND_INDEX(i, dy, dx) (i + (dy) * nx + (dx))
-#define ND_INDEX_J(j, dy, dx) (j + (dy) * nx + (dx))
-
-#define gpuErrchk(ans)                                                         \
-  {                                                                            \
-    gpuAssert((ans), __FILE__, __LINE__);                                      \
-  }
-// Field access macros
-#define EY(dy, dx) ey[ND_INDEX(i, dy, dx)]
-#define HX(dy, dx) hx[ND_INDEX(i, dy, dx)]
-#define HZ(dy, dx) hz[ND_INDEX(i, dy, dx)]
-
-// Adjoint field access macros
-// Removed old Adjoint PML memory variable macros
-
-#define MAX(a, b) (a > b ? a : b)
+#include "maxwell_tm_core.cuh"
 
 namespace {
+
+TIDE_HOST_DEVICE int64_t tide_nd_index(int64_t base, int64_t dy, int64_t dx,
+                                       int64_t nx) {
+  return base + dy * nx + dx;
+}
+
+TIDE_HOST_DEVICE int64_t tide_nd_index_j(int64_t base, int64_t dy, int64_t dx,
+                                         int64_t nx) {
+  return base + dy * nx + dx;
+}
+
+template <typename T>
+TIDE_HOST_DEVICE T tide_max(T a, T b) {
+  return a > b ? a : b;
+}
 
 // Device constants
 // Keep a single scalar type for grid spacing in the unified TU build.
@@ -169,83 +168,9 @@ record_adjoint_at_sources(T *__restrict const grad_f,
   }
 }
 
-#include "maxwell_tm_core.cuh"
-
-using namespace tide;
-
 } // namespace
 
 #undef FUNC
 #define FUNC(name) CAT(name, TIDE_STENCIL, TIDE_DTYPE, cuda)
 
-#define TIDE_STENCIL 2
-#define TIDE_DTYPE float
-#include "maxwell_tm_cuda_inst.cu"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 4
-#define TIDE_DTYPE float
-#include "maxwell_tm_cuda_inst.cu"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 6
-#define TIDE_DTYPE float
-#include "maxwell_tm_cuda_inst.cu"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 8
-#define TIDE_DTYPE float
-#include "maxwell_tm_cuda_inst.cu"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 2
-#define TIDE_DTYPE double
-#include "maxwell_tm_cuda_inst.cu"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 4
-#define TIDE_DTYPE double
-#include "maxwell_tm_cuda_inst.cu"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 6
-#define TIDE_DTYPE double
-#include "maxwell_tm_cuda_inst.cu"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 8
-#define TIDE_DTYPE double
-#include "maxwell_tm_cuda_inst.cu"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 2
-#define TIDE_DTYPE half
-#include "maxwell_tm_cuda_inst.cu"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 4
-#define TIDE_DTYPE half
-#include "maxwell_tm_cuda_inst.cu"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 6
-#define TIDE_DTYPE half
-#include "maxwell_tm_cuda_inst.cu"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 8
-#define TIDE_DTYPE half
-#include "maxwell_tm_cuda_inst.cu"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
+#include "maxwell_tm_cuda_instantiations.inc"

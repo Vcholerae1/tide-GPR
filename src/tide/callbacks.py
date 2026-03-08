@@ -1,12 +1,7 @@
 """Callback state and helpers for TIDE propagators."""
 
-from typing import (
-    TYPE_CHECKING,
-    Callable,
-    Dict,
-    Optional,
-    Union,
-)
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from types import EllipsisType
@@ -54,13 +49,13 @@ class CallbackState:
         dt: float,
         step: int,
         nt: int,
-        wavefields: Dict[str, torch.Tensor],
-        models: Dict[str, torch.Tensor],
-        gradients: Optional[Dict[str, torch.Tensor]] = None,
-        fd_pad: Optional[list[int]] = None,
-        pml_width: Optional[list[int]] = None,
+        wavefields: dict[str, torch.Tensor],
+        models: dict[str, torch.Tensor],
+        gradients: dict[str, torch.Tensor] | None = None,
+        fd_pad: list[int] | None = None,
+        pml_width: list[int] | None = None,
         is_backward: bool = False,
-        grid_spacing: Optional[list[float]] = None,
+        grid_spacing: list[float] | None = None,
     ) -> None:
         """Initialize the callback state.
 
@@ -273,7 +268,7 @@ class CallbackState:
             return x[idx]
 
         # Batched: [..., ny, nx] or [..., nz, ny, nx]
-        idx_batched: tuple[Union["EllipsisType", slice], ...] = (
+        idx_batched: tuple["EllipsisType" | slice, ...] = (
             ...,
             *(
                 _slice(
@@ -298,20 +293,20 @@ class CallbackState:
 
 
 # Type alias for callback functions
-Callback = Callable[[CallbackState], None]
+type Callback = Callable[[CallbackState], None]
 
 
 def create_callback_state(
     dt: float,
     step: int,
     nt: int,
-    wavefields: Dict[str, torch.Tensor],
-    models: Dict[str, torch.Tensor],
-    gradients: Optional[Dict[str, torch.Tensor]] = None,
-    fd_pad: Optional[list[int]] = None,
-    pml_width: Optional[list[int]] = None,
+    wavefields: dict[str, torch.Tensor],
+    models: dict[str, torch.Tensor],
+    gradients: dict[str, torch.Tensor] | None = None,
+    fd_pad: list[int] | None = None,
+    pml_width: list[int] | None = None,
     is_backward: bool = False,
-    grid_spacing: Optional[list[float]] = None,
+    grid_spacing: list[float] | None = None,
 ) -> CallbackState:
     """Factory function to create a CallbackState.
 

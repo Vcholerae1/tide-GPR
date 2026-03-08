@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import Sequence
+from collections.abc import Sequence
 
 import torch
 
@@ -46,7 +46,9 @@ def build_nondim_context(
     eps_ref_r = float(epsilon_r.detach().min().item())
     mu_ref_r = float(mu_r.detach().min().item())
     if eps_ref_r <= 0.0:
-        raise ValueError("epsilon must be strictly positive for nondimensional scaling.")
+        raise ValueError(
+            "epsilon must be strictly positive for nondimensional scaling."
+        )
     if mu_ref_r <= 0.0:
         raise ValueError("mu must be strictly positive for nondimensional scaling.")
 

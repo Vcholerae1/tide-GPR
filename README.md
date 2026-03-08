@@ -53,6 +53,12 @@ cd tide
 uv build
 ```
 
+To rebuild only the native backend during development:
+
+```bash
+bash scripts/build_csrc.sh
+```
+
 **Requirements:**
 - Python >= 3.12
 - PyTorch >= 2.9.1

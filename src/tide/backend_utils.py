@@ -2,12 +2,12 @@ import ctypes
 import itertools
 import pathlib
 import platform
-from ctypes import c_bool, c_double, c_float, c_int, c_int64, c_void_p
-from typing import Any, Optional, TypeAlias
+from ctypes import c_bool, c_double, c_float, c_int64, c_void_p
+from typing import Any
 
 import torch
 
-CFunctionPointer: TypeAlias = Any
+type CFunctionPointer = Any
 
 # Platform-specific shared library extension
 SO_EXT = {"Linux": "so", "Darwin": "dylib", "Windows": "dll"}.get(platform.system())
@@ -16,7 +16,7 @@ if SO_EXT is None:
 
 # Supported configurations for backend function variants.
 _SUPPORTED_ACCURACIES = (2, 4, 6, 8)
-_SUPPORTED_DEVICES = ("cpu", "cuda", "mps")
+_SUPPORTED_DEVICES = ("cpu", "cuda")
 _SUPPORTED_BACKEND_DTYPES = ("half", "float", "double")
 
 # Mapping from torch dtypes to backend dtype strings and from backend dtype strings to C types.
@@ -47,7 +47,7 @@ def _candidate_lib_paths() -> list[pathlib.Path]:
     return list(dict.fromkeys(candidates))
 
 
-_dll: Optional[ctypes.CDLL] = None
+_dll: ctypes.CDLL | None = None
 _lib_path: pathlib.Path = (
     pathlib.Path(__file__).resolve().parent / f"libtide_C.{SO_EXT}"
 )
@@ -98,7 +98,7 @@ def get_library_path() -> pathlib.Path:
     return _lib_path
 
 
-def cuda_build_arches() -> Optional[str]:
+def cuda_build_arches() -> str | None:
     """Return the CUDA arch list the backend was compiled for, if available."""
     _load_backend_once()
     if _dll is None or not hasattr(_dll, "tide_cuda_arches"):
@@ -109,16 +109,6 @@ def cuda_build_arches() -> Optional[str]:
     if not value:
         return None
     return value.decode("utf-8", errors="replace")
-
-
-def metal_available() -> bool:
-    """Return True if the compiled backend includes Metal (Apple GPU) support."""
-    _load_backend_once()
-    if _dll is None or not hasattr(_dll, "tide_metal_available"):
-        return False
-    func = _dll.tide_metal_available
-    func.restype = c_int
-    return bool(func())
 
 
 # Each argtype spec is a declarative list of (ctype, count, comment) triples.
@@ -133,7 +123,7 @@ _I = c_int64
 _B = c_bool
 
 # (ctype, count, comment) — comment documents the argument names in order.
-_Spec = list[tuple[Any, int, str]]
+type _Spec = list[tuple[Any, int, str]]
 
 
 def _build(spec: _Spec) -> list[Any]:
@@ -355,9 +345,7 @@ def _template_argtypes(template_name: str, backend_dtype: str) -> list[Any]:
         raise KeyError(f"Unknown backend template {template_name!r}.") from exc
 
     float_type = _BACKEND_DTYPE_TO_CTYPE[backend_dtype]
-    argtypes = [
-        float_type if ctype is FLOAT_TYPE else ctype for ctype in _build(spec)
-    ]
+    argtypes = [float_type if ctype is FLOAT_TYPE else ctype for ctype in _build(spec)]
     _ARGTYPES_CACHE[cache_key] = argtypes
     return argtypes
 
@@ -375,9 +363,7 @@ def _assign_argtypes_for_variant(
     argtypes = _template_argtypes(template_name, backend_dtype)
 
     for device_name in _SUPPORTED_DEVICES:
-        func_name = (
-            f"{propagator}_{accuracy}_{backend_dtype}_{pass_name}_{device_name}"
-        )
+        func_name = f"{propagator}_{accuracy}_{backend_dtype}_{pass_name}_{device_name}"
         func = getattr(_dll, func_name, None)
         if func is None:
             continue
@@ -443,7 +429,7 @@ def get_backend_function(
         raise AttributeError(f"Backend function {func_name} not found.") from e
 
 
-def tensor_to_ptr(tensor: Optional[torch.Tensor]) -> int:
+def tensor_to_ptr(tensor: torch.Tensor | None) -> int:
     """Convert a PyTorch tensor to a C pointer (int).
 
     Args:
@@ -460,7 +446,7 @@ def tensor_to_ptr(tensor: Optional[torch.Tensor]) -> int:
     return tensor.data_ptr()
 
 
-def ensure_contiguous(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+def ensure_contiguous(tensor: torch.Tensor | None) -> torch.Tensor | None:
     """Ensure a tensor is contiguous in memory.
 
     Args:

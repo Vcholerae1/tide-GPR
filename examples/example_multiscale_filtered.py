@@ -8,10 +8,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from scipy.ndimage import gaussian_filter
+from sotb_wrapper import interface as sotb_interface
 
 import tide
 
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
@@ -26,7 +27,7 @@ d_source = 4
 first_source = 0
 # Shots per batch (batch size).
 batch_size = 16
-model_gradient_sampling_interval = 5
+model_gradient_sampling_interval = 10
 
 
 model_path = "examples/data/OverThrust.npy"
@@ -67,10 +68,21 @@ filter_specs = {
     "lp700": {"lowpass_mhz": 600, "desc": "600 MHz forward result low-pass to 600 MHz"},
 }
 inversion_schedule = [
-    {"data_key": "lp250", "adamw_epochs": 40, "lbfgs_epochs": 6},
-    {"data_key": "lp500", "adamw_epochs": 30, "lbfgs_epochs": 6},
-    {"data_key": "lp700", "adamw_epochs": 10, "lbfgs_epochs": 6},
+    {"data_key": "lp250", "adamw_epochs": 0, "lbfgs_epochs": 10},
+    {"data_key": "lp500", "adamw_epochs": 0, "lbfgs_epochs": 10},
+    {"data_key": "lp700", "adamw_epochs": 0, "lbfgs_epochs": 10},
 ]
+
+# SOTB PLBFGS settings (paper-inspired diagonal preconditioning).
+plbfgs_conv = 1e-8
+plbfgs_nls_max = 20
+plbfgs_l = 5
+plbfgs_precond_smooth_sigma = 3.0
+plbfgs_precond_damping = 5e-2
+plbfgs_precond_power = 0.5
+plbfgs_precond_clip_lo = 0.3
+plbfgs_precond_clip_hi = 3.0
+plbfgs_precond_blend = 0.7
 
 print(f"Base forward frequency: {base_forward_freq / 1e6:.0f} MHz")
 print("FIR low-pass schedule on observed data:")
@@ -180,9 +192,9 @@ def _build_distance_geom(
     if nugrid < 2 or ntgrid < 2:
         raise ValueError("nugrid and ntgrid must both be >= 2.")
 
-    t = torch.arange(nt_local, device=device_local, dtype=dtype_local) * torch.as_tensor(
-        dt_local, device=device_local, dtype=dtype_local
-    )
+    t = torch.arange(
+        nt_local, device=device_local, dtype=dtype_local
+    ) * torch.as_tensor(dt_local, device=device_local, dtype=dtype_local)
     if t0 is None:
         t0 = t[0]
     if t1 is None:
@@ -204,14 +216,18 @@ def _build_distance_geom(
     pn = torch.stack((t_norm, u_norm), dim=1)
     seg_start = pn[:-1]
     seg_delta = pn[1:] - pn[:-1]
-    seg_lsq = (seg_delta * seg_delta).sum(dim=1).clamp_min(
-        torch.as_tensor(eps, device=device_local, dtype=dtype_local)
+    seg_lsq = (
+        (seg_delta * seg_delta)
+        .sum(dim=1)
+        .clamp_min(torch.as_tensor(eps, device=device_local, dtype=dtype_local))
     )
 
     t_axis_norm = torch.linspace(
         t_norm[0], t_norm[-1], ntgrid, device=device_local, dtype=dtype_local
     )
-    u_axis_norm = torch.linspace(0.0, 1.0, nugrid, device=device_local, dtype=dtype_local)
+    u_axis_norm = torch.linspace(
+        0.0, 1.0, nugrid, device=device_local, dtype=dtype_local
+    )
     tt = t_axis_norm.unsqueeze(0).expand(nugrid, ntgrid)
     uu = u_axis_norm.unsqueeze(1).expand(nugrid, ntgrid)
     points = torch.stack((tt.reshape(-1), uu.reshape(-1)), dim=1)
@@ -285,9 +301,9 @@ def _build_distance_geom_batch(
     if nugrid < 2 or ntgrid < 2:
         raise ValueError("nugrid and ntgrid must both be >= 2.")
 
-    t = torch.arange(nt_local, device=device_local, dtype=dtype_local) * torch.as_tensor(
-        dt_local, device=device_local, dtype=dtype_local
-    )
+    t = torch.arange(
+        nt_local, device=device_local, dtype=dtype_local
+    ) * torch.as_tensor(dt_local, device=device_local, dtype=dtype_local)
     t0 = t[0]
     t1 = t[-1]
     t_span = (t1 - t0).clamp_min(
@@ -307,14 +323,18 @@ def _build_distance_geom_batch(
     pn = torch.stack((t_norm.unsqueeze(0).expand(B, -1), u_norm), dim=2)  # [B, nt, 2]
     seg_start = pn[:, :-1, :]  # [B, S, 2]
     seg_delta = pn[:, 1:, :] - pn[:, :-1, :]  # [B, S, 2]
-    seg_lsq = (seg_delta * seg_delta).sum(dim=2).clamp_min(
-        torch.as_tensor(eps, device=device_local, dtype=dtype_local)
+    seg_lsq = (
+        (seg_delta * seg_delta)
+        .sum(dim=2)
+        .clamp_min(torch.as_tensor(eps, device=device_local, dtype=dtype_local))
     )  # [B, S]
 
     t_axis_norm = torch.linspace(
         t_norm[0], t_norm[-1], ntgrid, device=device_local, dtype=dtype_local
     )
-    u_axis_norm = torch.linspace(0.0, 1.0, nugrid, device=device_local, dtype=dtype_local)
+    u_axis_norm = torch.linspace(
+        0.0, 1.0, nugrid, device=device_local, dtype=dtype_local
+    )
     tt = t_axis_norm.unsqueeze(0).expand(nugrid, ntgrid)
     uu = u_axis_norm.unsqueeze(1).expand(nugrid, ntgrid)
     points = torch.stack((tt.reshape(-1), uu.reshape(-1)), dim=1)  # [P, 2]
@@ -331,7 +351,9 @@ def _build_distance_geom_batch(
 
         # [B, Pc, S, 2]
         b = p.unsqueeze(0).unsqueeze(2) - seg_start.unsqueeze(1)
-        lam = (b * seg_delta.unsqueeze(1)).sum(dim=3) / seg_lsq.unsqueeze(1)  # [B, Pc, S]
+        lam = (b * seg_delta.unsqueeze(1)).sum(dim=3) / seg_lsq.unsqueeze(
+            1
+        )  # [B, Pc, S]
         lam = torch.clamp(lam, 0.0, 1.0)
         ds = b - lam.unsqueeze(3) * seg_delta.unsqueeze(1)  # [B, Pc, S, 2]
         dsq = (ds * ds).sum(dim=3)  # [B, Pc, S]
@@ -340,7 +362,9 @@ def _build_distance_geom_batch(
         row_b = torch.arange(B, device=device_local)[:, None]  # [B,1]
         row_p = torch.arange(p1 - p0, device=device_local)[None, :]  # [1,Pc]
         l = lam[row_b, row_p, iclose]  # [B, Pc]
-        xclose = seg_start[row_b, iclose, :] + l.unsqueeze(2) * seg_delta[row_b, iclose, :]
+        xclose = (
+            seg_start[row_b, iclose, :] + l.unsqueeze(2) * seg_delta[row_b, iclose, :]
+        )
         d = torch.sqrt(
             dsq[row_b, row_p, iclose].clamp_min(
                 torch.as_tensor(eps, device=device_local, dtype=dtype_local)
@@ -437,16 +461,13 @@ def _pdf_deriv_marg(
     dx1dy1 = torch.tensor([0.0, 1.0], device=device_local, dtype=dtype_local)
 
     dlamdy0 = (
-        2.0 * c[:, 1] * lr
-        + torch.sum((p - dx0dy0) * c - (p - x0) * dx0dy0, dim=1)
+        2.0 * c[:, 1] * lr + torch.sum((p - dx0dy0) * c - (p - x0) * dx0dy0, dim=1)
     ) / lsq
     clip_mask = (lr == 0.0) | (lr == 1.0)
     dlamdy0[clip_mask] = 0.0
     dxdy0 = dx0dy0 + dlamdy0[:, None] * c - lr[:, None] * dx0dy0
 
-    dlamdy1 = (
-        -2.0 * c[:, 1] * lr + torch.sum(p * c + (p - x0) * dx1dy1, dim=1)
-    ) / lsq
+    dlamdy1 = (-2.0 * c[:, 1] * lr + torch.sum(p * c + (p - x0) * dx1dy1, dim=1)) / lsq
     dlamdy1[clip_mask] = 0.0
     dxdy1 = dlamdy1[:, None] * c + lr[:, None] * dx1dy1
 
@@ -592,9 +613,9 @@ def _trace_ot_loss_grad(
     nt_local = int(pred_trace.numel())
 
     # Keep observed/predicted fingerprints on the same window, following OT_LS_FWI.
-    t = torch.arange(nt_local, device=device_local, dtype=dtype_local) * torch.as_tensor(
-        dt_local, device=device_local, dtype=dtype_local
-    )
+    t = torch.arange(
+        nt_local, device=device_local, dtype=dtype_local
+    ) * torch.as_tensor(dt_local, device=device_local, dtype=dtype_local)
     grid_t0 = t[0]
     grid_t1 = t[-1]
     grid_u0 = 2.0 * torch.min(pred_trace)
@@ -688,7 +709,10 @@ def ot_marginal_w2_loss_and_grad(
     eps: float = 1e-12,
     return_components: bool = False,
     trace_batch_size: int = 8,
-) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+) -> (
+    tuple[torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, dict[str, Any]]
+):
     if d_pred.shape != d_obs.shape:
         raise ValueError(
             f"d_pred and d_obs must have the same shape, got {d_pred.shape} vs {d_obs.shape}."
@@ -773,7 +797,9 @@ def ot_marginal_w2_loss_and_grad(
     return loss, grad_pred
 
 
-def apply_external_trace_grad(d_pred: torch.Tensor, grad_pred: torch.Tensor) -> torch.Tensor:
+def apply_external_trace_grad(
+    d_pred: torch.Tensor, grad_pred: torch.Tensor
+) -> torch.Tensor:
     if d_pred.shape != grad_pred.shape:
         raise ValueError(
             f"d_pred and grad_pred must have identical shapes, got {d_pred.shape} vs {grad_pred.shape}."
@@ -948,7 +974,7 @@ def generate_base_and_filtered_observed():
     return observed_base, observed_sets, src_amp_full
 
 
-sigma_smooth = 8
+sigma_smooth = 30
 epsilon_init_raw = gaussian_filter(epsilon_true_raw, sigma=sigma_smooth)
 epsilon_init_np = epsilon_init_raw.copy()
 epsilon_init_np[:air_layer, :] = 1.0
@@ -968,12 +994,6 @@ mu_fixed = torch.ones_like(epsilon_inv)
 air_mask = torch.zeros_like(epsilon_inv, dtype=torch.bool)
 air_mask[:air_layer, :] = True
 
-loss_mode = "ot_manual"  # Options: "ot_manual", "mse"
-ot_lambda_d = 0.04
-ot_nugrid = 40
-ot_ntgrid = nt
-ot_trace_batch_size = 16
-ot_reduction = "sum"  # Use trace-sum reduction to amplify update magnitude.
 all_losses = []
 stage_breaks = []
 
@@ -983,14 +1003,73 @@ time_start_all = time.time()
 print("Generating base observed data once, then FIR filtering...")
 observed_raw, observed_sets, src_amp_full = generate_base_and_filtered_observed()
 print(f"Base forward modeled at {base_forward_freq / 1e6:.0f} MHz.")
-print(f"Loss mode: {loss_mode}")
-print(f"OT trace batch size: {ot_trace_batch_size}")
-print(f"OT reduction: {ot_reduction}")
+if sotb_interface is None:
+    raise RuntimeError(
+        "sotb-wrapper is not importable. Install via "
+        "`uv pip install --python .venv/bin/python sotb-wrapper`."
+    )
+print("Loss mode: mse")
+print("LBFGS backend: SOTB PLBFGS (diagonal GN-style preconditioner)")
+print(
+    "PLBFGS preconditioner: "
+    f"smooth_sigma={plbfgs_precond_smooth_sigma}, "
+    f"damping={plbfgs_precond_damping:.1e}, "
+    f"power={plbfgs_precond_power:.2f}, "
+    f"clip=[{plbfgs_precond_clip_lo:.2f}, {plbfgs_precond_clip_hi:.2f}], "
+    f"blend={plbfgs_precond_blend:.2f}"
+)
 report_pde_totals("After observed generation: ")
 save_filter_comparison(observed_raw, observed_sets, output_dir)
 
 vmin_stage = epsilon_true_np.min()
 vmax_stage = epsilon_true_np.max()
+n_param_eps = int(epsilon_inv.numel())
+air_mask_np = air_mask.detach().cpu().numpy().reshape(-1)
+
+
+def pack_eps_param(epsilon_param: torch.Tensor) -> np.ndarray:
+    return (
+        epsilon_param.detach()
+        .contiguous()
+        .view(-1)
+        .to(device="cpu", dtype=torch.float32)
+        .numpy()
+        .astype(np.float32, copy=False)
+    )
+
+
+def unpack_eps_param(x: np.ndarray, epsilon_param: torch.Tensor) -> None:
+    eps_vec = torch.from_numpy(x).to(device=device, dtype=torch.float32)
+    with torch.no_grad():
+        epsilon_param.copy_(eps_vec.view_as(epsilon_param))
+
+
+def pack_eps_grad(epsilon_param: torch.Tensor) -> np.ndarray:
+    if epsilon_param.grad is None:
+        grad = torch.zeros_like(epsilon_param)
+    else:
+        grad = epsilon_param.grad
+    grad_np = (
+        grad.detach()
+        .contiguous()
+        .view(-1)
+        .to(device="cpu", dtype=torch.float32)
+        .numpy()
+        .astype(np.float32, copy=False)
+    )
+    np.nan_to_num(grad_np, copy=False)
+    return grad_np
+
+
+def build_eps_bounds() -> tuple[np.ndarray, np.ndarray]:
+    lb = np.full(n_param_eps, 1.0, dtype=np.float32)
+    ub = np.full(n_param_eps, 9.0, dtype=np.float32)
+    lb[air_mask_np] = 1.0
+    ub[air_mask_np] = 1.0
+    return lb, ub
+
+
+lb_bounds, ub_bounds = build_eps_bounds()
 
 for stage_idx, cfg in enumerate(inversion_schedule, 1):
     data_key = cfg["data_key"]
@@ -1024,22 +1103,8 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
             add_pde_counts(int(shot_indices.numel()), forward=True)
             syn_filtered = apply_fir_lowpass(syn, dt=dt, cutoff_hz=lowpass_hz)
             obs_batch = observed_filtered[:, shot_indices, :]
-            if loss_mode == "ot_manual":
-                loss, grad_syn = ot_marginal_w2_loss_and_grad(
-                    syn_filtered,
-                    obs_batch,
-                    dt=dt,
-                    lambda_d=ot_lambda_d,
-                    nugrid=ot_nugrid,
-                    ntgrid=ot_ntgrid,
-                    reduction=ot_reduction,
-                    trace_batch_size=ot_trace_batch_size,
-                )
-                surrogate = apply_external_trace_grad(syn_filtered, grad_syn)
-                surrogate.backward()
-            else:
-                loss = torch.nn.functional.mse_loss(syn_filtered, obs_batch)
-                loss.backward()
+            loss = F.mse_loss(syn_filtered, obs_batch)
+            loss.backward()
             add_pde_counts(int(shot_indices.numel()), adjoint=True)
             epoch_loss += loss.item()
 
@@ -1060,18 +1125,98 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
         if (epoch + 1) % 1 == 0 or epoch == 0:
             print(f"  AdamW epoch {epoch + 1}/{n_epochs_adamw}  Loss={epoch_loss:.6e}")
 
-    # Stage 2: L-BFGS
-    optimizer_lbfgs = torch.optim.LBFGS(
-        [epsilon_inv],
-        lr=1.0,
-        history_size=5,
-        max_iter=5,
-        line_search_fn="strong_wolfe",
-    )
+    # Stage 2: SOTB P-LBFGS
+    sotb = sotb_interface.sotb_wrapper()
+    sotb.udf = sotb_interface.UserDefined()
+    x = pack_eps_param(epsilon_inv)
+    n = int(x.size)
 
-    def closure():
-        optimizer_lbfgs.zero_grad()
-        total_loss = torch.zeros((), device=device)
+    def build_plbfgs_preconditioner_diag() -> np.ndarray:
+        if epsilon_inv.grad is not None:
+            epsilon_inv.grad.zero_()
+
+        p_diag = torch.zeros_like(epsilon_inv)
+        for shot_indices in make_shot_batches():
+            if epsilon_inv.grad is not None:
+                epsilon_inv.grad.zero_()
+
+            syn = forward_shots(
+                epsilon_inv,
+                sigma_fixed,
+                mu_fixed,
+                shot_indices,
+                src_amp_full,
+                requires_grad=True,
+            )
+            add_pde_counts(int(shot_indices.numel()), forward=True)
+            syn_filtered = apply_fir_lowpass(syn, dt=dt, cutoff_hz=lowpass_hz)
+            obs_batch = observed_filtered[:, shot_indices, :]
+            loss = F.mse_loss(syn_filtered, obs_batch)
+            loss.backward()
+            add_pde_counts(int(shot_indices.numel()), adjoint=True)
+
+            if epsilon_inv.grad is not None:
+                g = torch.nan_to_num(
+                    epsilon_inv.grad.detach(), nan=0.0, posinf=0.0, neginf=0.0
+                )
+                g = g.clone()
+                g[air_mask] = 0.0
+                p_diag += g * g
+
+        p_np = p_diag.detach().cpu().numpy().astype(np.float32, copy=False)
+        if plbfgs_precond_smooth_sigma > 0:
+            p_np = gaussian_filter(p_np, sigma=plbfgs_precond_smooth_sigma)
+        p_flat = p_np.reshape(-1)
+        p_flat[~np.isfinite(p_flat)] = 0.0
+
+        valid = ~air_mask_np
+        p_valid = p_flat[valid]
+        if p_valid.size == 0:
+            b0 = np.ones(n_param_eps, dtype=np.float32)
+            b0[air_mask_np] = 0.0
+            return b0
+
+        scale = float(np.quantile(p_valid, 0.95))
+        if not np.isfinite(scale) or scale <= 0.0:
+            scale = 1.0
+        p_flat = p_flat / scale
+
+        b0 = np.power(p_flat + plbfgs_precond_damping, -plbfgs_precond_power)
+        b0[~np.isfinite(b0)] = 0.0
+        b_valid = b0[valid]
+        if b_valid.size > 0:
+            med = float(np.median(b_valid))
+            if np.isfinite(med) and med > 0.0:
+                b0 = b0 / med
+
+            np.clip(b0, plbfgs_precond_clip_lo, plbfgs_precond_clip_hi, out=b0)
+
+            # Blend towards identity to avoid over-aggressive scaling.
+            b0 = (1.0 - plbfgs_precond_blend) + plbfgs_precond_blend * b0
+
+        b0[air_mask_np] = 0.0
+        return b0.astype(np.float32, copy=False)
+
+    print("  Building PLBFGS preconditioner (diag GN proxy + smoothing)...")
+    b0_diag = build_plbfgs_preconditioner_diag()
+    b0_valid = b0_diag[~air_mask_np]
+    if b0_valid.size > 0:
+        print(
+            f"  B0 stats (valid): min={b0_valid.min():.3e} "
+            f"median={np.median(b0_valid):.3e} max={b0_valid.max():.3e}"
+        )
+
+    def evaluate_from_x() -> tuple[float, np.ndarray, np.ndarray]:
+        unpack_eps_param(x, epsilon_inv)
+        with torch.no_grad():
+            epsilon_inv.clamp_(1.0, 9.0)
+            epsilon_inv[air_mask] = 1.0
+        x[:] = pack_eps_param(epsilon_inv)
+
+        if epsilon_inv.grad is not None:
+            epsilon_inv.grad.zero_()
+
+        total_loss = 0.0
         for shot_indices in make_shot_batches():
             syn = forward_shots(
                 epsilon_inv,
@@ -1084,41 +1229,82 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
             add_pde_counts(int(shot_indices.numel()), forward=True)
             syn_filtered = apply_fir_lowpass(syn, dt=dt, cutoff_hz=lowpass_hz)
             obs_batch = observed_filtered[:, shot_indices, :]
-            if loss_mode == "ot_manual":
-                loss, grad_syn = ot_marginal_w2_loss_and_grad(
-                    syn_filtered,
-                    obs_batch,
-                    dt=dt,
-                    lambda_d=ot_lambda_d,
-                    nugrid=ot_nugrid,
-                    ntgrid=ot_ntgrid,
-                    reduction=ot_reduction,
-                    trace_batch_size=ot_trace_batch_size,
-                )
-                surrogate = apply_external_trace_grad(syn_filtered, grad_syn)
-                surrogate.backward()
-            else:
-                loss = torch.nn.functional.mse_loss(syn_filtered, obs_batch)
-                loss.backward()
+            loss = F.mse_loss(syn_filtered, obs_batch)
+            loss.backward()
             add_pde_counts(int(shot_indices.numel()), adjoint=True)
-            total_loss = total_loss + loss
+            total_loss += float(loss.item())
 
         if epsilon_inv.grad is not None:
             epsilon_inv.grad[air_mask] = 0.0
+            epsilon_inv.grad.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
             valid_grads = epsilon_inv.grad[~air_mask].abs()
             if valid_grads.numel() > 0:
                 clip_val = torch.quantile(valid_grads, 0.98)
                 torch.nn.utils.clip_grad_value_([epsilon_inv], clip_val.item())
-        return total_loss
 
-    for epoch in range(n_epochs_lbfgs):
-        loss = optimizer_lbfgs.step(closure)
-        with torch.no_grad():
-            epsilon_inv.clamp_(1.0, 9.0)
-            epsilon_inv[air_mask] = 1.0
-        loss_value = loss.item()
-        all_losses.append(loss_value)
-        print(f"  LBFGS epoch {epoch + 1}/{n_epochs_lbfgs}  Loss={loss_value:.6e}")
+        grad = pack_eps_grad(epsilon_inv)
+        grad_preco = (b0_diag * grad).astype(np.float32, copy=False)
+        np.nan_to_num(grad_preco, copy=False)
+        x[:] = pack_eps_param(epsilon_inv)
+        return total_loss, grad, grad_preco
+
+    fcost, grad, grad_preco = evaluate_from_x()
+    sotb.set_inputs(
+        fcost,
+        niter_max=n_epochs_lbfgs,
+        conv=plbfgs_conv,
+        print_flag=0,
+        nls_max=plbfgs_nls_max,
+        l=plbfgs_l,
+    )
+    q_plb = np.zeros(n, dtype=np.float32)
+
+    flag = 0
+    eval_count = 0
+    safety_max_evals = max(20, n_epochs_lbfgs * 80)
+    last_eval_loss = float(fcost)
+    last_logged_iter = int(sotb.udf.cpt_iter)
+
+    while flag not in (2, 4):
+        flag = sotb.PLBFGS(
+            n, x, fcost, grad, grad_preco, q_plb, flag, lb=lb_bounds, ub=ub_bounds
+        )
+        curr_iter_after = int(sotb.udf.cpt_iter)
+
+        # Log only accepted iterations (cpt_iter increases when a step is accepted).
+        if curr_iter_after > last_logged_iter:
+            all_losses.append(last_eval_loss)
+            print(
+                f"  SOTB PLBFGS iter {curr_iter_after}/{n_epochs_lbfgs}  "
+                f"Loss={last_eval_loss:.6e}"
+            )
+            last_logged_iter = curr_iter_after
+
+        if flag == 1:
+            fcost, grad, grad_preco = evaluate_from_x()
+            eval_count += 1
+            last_eval_loss = float(fcost)
+        elif flag == 5:
+            # SOTB PLBFGS reverse-communication:
+            # flag=5 asks user to apply preconditioner to q_plb.
+            q_plb[:] = (b0_diag * q_plb).astype(np.float32, copy=False)
+            np.nan_to_num(q_plb, copy=False)
+            q_plb[air_mask_np] = 0.0
+        elif flag not in (2, 3, 4):
+            print(f"  SOTB PLBFGS returned unexpected flag={flag}")
+
+        if eval_count >= safety_max_evals:
+            print(
+                f"  SOTB PLBFGS safety stop after {eval_count} evaluations "
+                f"(last flag={flag})"
+            )
+            break
+
+    unpack_eps_param(x, epsilon_inv)
+    with torch.no_grad():
+        epsilon_inv.clamp_(1.0, 9.0)
+        epsilon_inv[air_mask] = 1.0
+    print(f"  SOTB PLBFGS finished with flag={flag}")
 
     stage_breaks.append(len(all_losses) - 1)
     report_pde_delta(f"Stage {stage_idx} ", stage_forward_start, stage_adjoint_start)
@@ -1165,7 +1351,7 @@ ax = axes[1, 1]
 ax.semilogy(all_losses, label="Loss")
 for idx in stage_breaks:
     ax.axvline(idx, color="r", linestyle="--", alpha=0.5)
-ax.set_title("Loss Curve (AdamW -> LBFGS stages)")
+ax.set_title("Loss Curve (AdamW -> SOTB PLBFGS stages)")
 ax.set_xlabel("Epoch")
 ax.set_ylabel("Loss")
 ax.grid(True)

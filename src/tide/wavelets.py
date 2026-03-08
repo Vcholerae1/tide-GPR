@@ -8,7 +8,6 @@ All wavelets return PyTorch tensors and support optional dtype specification.
 """
 
 import math
-from typing import Optional
 
 import torch
 
@@ -17,9 +16,9 @@ def ricker(
     freq: float,
     length: int,
     dt: float,
-    peak_time: Optional[float] = None,
-    dtype: Optional[torch.dtype] = None,
-    device: Optional[torch.device] = None,
+    peak_time: float | None = None,
+    dtype: torch.dtype | None = None,
+    device: torch.device | None = None,
 ) -> torch.Tensor:
     """Return a Ricker wavelet (Mexican hat wavelet).
 
@@ -69,4 +68,3 @@ def ricker(
     y = (1 - 2 * pi2_f2_t2) * torch.exp(-pi2_f2_t2)
 
     return y
-

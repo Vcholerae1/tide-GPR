@@ -42,23 +42,30 @@
 #endif
 
 #include "common_cpu.h"
-#include "staggered_grid.h"
 #include "storage_utils.h"
-
 #define CAT_I(name, accuracy, dtype, device)                                   \
   maxwell_tm_##accuracy##_##dtype##_##name##_##device
 #define CAT(name, accuracy, dtype, device) CAT_I(name, accuracy, dtype, device)
 #define FUNC(name) CAT(name, TIDE_STENCIL, TIDE_DTYPE, cpu)
 
-// 2D indexing macros
-#define IDX(y, x) ((y) * nx + (x))
-#define IDX_SHOT(shot, y, x) ((shot) * shot_numel + (y) * nx + (x))
+static inline int64_t tide_idx_2d(int64_t y, int64_t x, int64_t nx) {
+  return y * nx + x;
+}
 
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
+static inline int64_t tide_idx_2d_shot(int64_t shot, int64_t y, int64_t x,
+                                       int64_t shot_numel, int64_t nx) {
+  return shot * shot_numel + tide_idx_2d(y, x, nx);
+}
 
-// Vacuum permittivity (F/m) to convert dL/d(epsilon_abs) -> dL/d(epsilon_r)
-#define EP0 ((TIDE_DTYPE)8.8541878128e-12)
+template <typename T> static inline T tide_max(T a, T b) {
+  return a > b ? a : b;
+}
+
+template <typename T> static inline T tide_min(T a, T b) {
+  return a < b ? a : b;
+}
+
+static constexpr TIDE_DTYPE kEp0 = (TIDE_DTYPE)8.8541878128e-12;
 
 typedef uint16_t tide_bfloat16;
 
@@ -81,36 +88,6 @@ static inline float tide_bf16_to_float(tide_bfloat16 value) {
   tmp.u = ((uint32_t)value) << 16;
   return tmp.f;
 }
-
-// Field access macros for stencil operations (removed for template
-// compatibility)
-
-// Material parameter access macros
-#define CA(dy, dx)                                                             \
-  (ca_batched ? ca[IDX_SHOT(shot_idx, y + (dy), x + (dx))]                     \
-              : ca[IDX(y + (dy), x + (dx))])
-#define CB(dy, dx)                                                             \
-  (cb_batched ? cb[IDX_SHOT(shot_idx, y + (dy), x + (dx))]                     \
-              : cb[IDX(y + (dy), x + (dx))])
-#define CQ(dy, dx)                                                             \
-  (cq_batched ? cq[IDX_SHOT(shot_idx, y + (dy), x + (dx))]                     \
-              : cq[IDX(y + (dy), x + (dx))])
-
-// PML memory variable macros
-#define M_EY_X(dy, dx) m_ey_x[IDX_SHOT(shot_idx, y + (dy), x + (dx))]
-#define M_EY_Z(dy, dx) m_ey_z[IDX_SHOT(shot_idx, y + (dy), x + (dx))]
-#define M_HX_Z(dy, dx) m_hx_z[IDX_SHOT(shot_idx, y + (dy), x + (dx))]
-#define M_HZ_X(dy, dx) m_hz_x[IDX_SHOT(shot_idx, y + (dy), x + (dx))]
-
-// Adjoint PML memory variable macros
-#define M_LAMBDA_EY_X(dy, dx)                                                  \
-  m_lambda_ey_x[IDX_SHOT(shot_idx, y + (dy), x + (dx))]
-#define M_LAMBDA_EY_Z(dy, dx)                                                  \
-  m_lambda_ey_z[IDX_SHOT(shot_idx, y + (dy), x + (dx))]
-#define M_LAMBDA_HX_Z(dy, dx)                                                  \
-  m_lambda_hx_z[IDX_SHOT(shot_idx, y + (dy), x + (dx))]
-#define M_LAMBDA_HZ_X(dy, dx)                                                  \
-  m_lambda_hz_x[IDX_SHOT(shot_idx, y + (dy), x + (dx))]
 
 template <typename T>
 static void add_sources_ey(T *__restrict const ey,
@@ -333,55 +310,4 @@ static inline void *boundary_store_ptr(void *store_1, void *store_3,
 using namespace tide;
 
 
-#undef FUNC
-#define FUNC(name) CAT(name, TIDE_STENCIL, TIDE_DTYPE, cpu)
-
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-#define TIDE_STENCIL 2
-#define TIDE_DTYPE float
-#include "maxwell_tm_inst.cpp"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 4
-#define TIDE_DTYPE float
-#include "maxwell_tm_inst.cpp"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 6
-#define TIDE_DTYPE float
-#include "maxwell_tm_inst.cpp"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 8
-#define TIDE_DTYPE float
-#include "maxwell_tm_inst.cpp"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 2
-#define TIDE_DTYPE double
-#include "maxwell_tm_inst.cpp"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 4
-#define TIDE_DTYPE double
-#include "maxwell_tm_inst.cpp"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 6
-#define TIDE_DTYPE double
-#include "maxwell_tm_inst.cpp"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
-
-#define TIDE_STENCIL 8
-#define TIDE_DTYPE double
-#include "maxwell_tm_inst.cpp"
-#undef TIDE_STENCIL
-#undef TIDE_DTYPE
+#include "maxwell_tm_cpu_instantiations.inc"
