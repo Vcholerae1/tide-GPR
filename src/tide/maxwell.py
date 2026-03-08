@@ -9,7 +9,9 @@ from .callbacks import Callback, CallbackState
 from .cfl import cfl_condition
 from .grid_utils import (
     _normalize_grid_spacing_2d,
+    _normalize_grid_spacing_3d,
     _normalize_pml_width_2d,
+    _normalize_pml_width_3d,
 )
 from .padding import create_or_pad, zero_interior
 from .resampling import downsample_and_movedim, upsample
@@ -3178,3 +3180,2156 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             None,  # n_threads
             None,  # _backend_device
         )
+
+
+_COMPONENT_TO_INDEX_3D = {"ex": 0, "ey": 1, "ez": 2}
+
+
+def _normalize_component_3d(component: str, *, name: str) -> str:
+    if not isinstance(component, str):
+        raise TypeError(f"{name} must be a string, got {type(component).__name__}.")
+    value = component.strip().lower()
+    if value not in _COMPONENT_TO_INDEX_3D:
+        raise ValueError(f"{name} must be one of 'ex', 'ey', or 'ez', got {component!r}.")
+    return value
+
+
+class Maxwell3D(torch.nn.Module):
+    """3D Maxwell equations solver using FDTD + CPML.
+
+    This class is the 3D counterpart to `MaxwellTM`. It supports forward modeling
+    and inversion through PyTorch autograd on `(epsilon, sigma)`.
+    """
+
+    def __init__(
+        self,
+        epsilon: torch.Tensor,
+        sigma: torch.Tensor,
+        mu: torch.Tensor,
+        grid_spacing: Union[float, Sequence[float]],
+        epsilon_requires_grad: Optional[bool] = None,
+        sigma_requires_grad: Optional[bool] = None,
+    ) -> None:
+        super().__init__()
+        if epsilon_requires_grad is not None and not isinstance(
+            epsilon_requires_grad, bool
+        ):
+            raise TypeError(
+                f"epsilon_requires_grad must be bool or None, got {type(epsilon_requires_grad).__name__}",
+            )
+        if sigma_requires_grad is not None and not isinstance(
+            sigma_requires_grad, bool
+        ):
+            raise TypeError(
+                f"sigma_requires_grad must be bool or None, got {type(sigma_requires_grad).__name__}",
+            )
+        if not isinstance(epsilon, torch.Tensor):
+            raise TypeError(
+                f"epsilon must be torch.Tensor, got {type(epsilon).__name__}",
+            )
+        if not isinstance(sigma, torch.Tensor):
+            raise TypeError(
+                f"sigma must be torch.Tensor, got {type(sigma).__name__}",
+            )
+        if not isinstance(mu, torch.Tensor):
+            raise TypeError(
+                f"mu must be torch.Tensor, got {type(mu).__name__}",
+            )
+        if epsilon_requires_grad is None:
+            epsilon_requires_grad = epsilon.requires_grad
+        if sigma_requires_grad is None:
+            sigma_requires_grad = sigma.requires_grad
+
+        self.epsilon = torch.nn.Parameter(epsilon, requires_grad=epsilon_requires_grad)
+        self.sigma = torch.nn.Parameter(sigma, requires_grad=sigma_requires_grad)
+        self.register_buffer("mu", mu)
+        self.grid_spacing = grid_spacing
+
+    def forward(
+        self,
+        dt: float,
+        source_amplitude: Optional[torch.Tensor],
+        source_location: Optional[torch.Tensor],
+        receiver_location: Optional[torch.Tensor],
+        stencil: int = 2,
+        pml_width: Union[int, Sequence[int]] = 20,
+        max_vel: Optional[float] = None,
+        Ex_0: Optional[torch.Tensor] = None,
+        Ey_0: Optional[torch.Tensor] = None,
+        Ez_0: Optional[torch.Tensor] = None,
+        Hx_0: Optional[torch.Tensor] = None,
+        Hy_0: Optional[torch.Tensor] = None,
+        Hz_0: Optional[torch.Tensor] = None,
+        m_hz_y: Optional[torch.Tensor] = None,
+        m_hy_z: Optional[torch.Tensor] = None,
+        m_hx_z: Optional[torch.Tensor] = None,
+        m_hz_x: Optional[torch.Tensor] = None,
+        m_hy_x: Optional[torch.Tensor] = None,
+        m_hx_y: Optional[torch.Tensor] = None,
+        m_ey_z: Optional[torch.Tensor] = None,
+        m_ez_y: Optional[torch.Tensor] = None,
+        m_ez_x: Optional[torch.Tensor] = None,
+        m_ex_z: Optional[torch.Tensor] = None,
+        m_ex_y: Optional[torch.Tensor] = None,
+        m_ey_x: Optional[torch.Tensor] = None,
+        nt: Optional[int] = None,
+        model_gradient_sampling_interval: int = 1,
+        freq_taper_frac: float = 0.0,
+        time_pad_frac: float = 0.0,
+        time_taper: bool = False,
+        save_snapshots: Optional[bool] = None,
+        forward_callback: Optional[Callback] = None,
+        backward_callback: Optional[Callback] = None,
+        callback_frequency: int = 1,
+        source_component: str = "ey",
+        receiver_component: str = "ey",
+        python_backend: Union[bool, str] = False,
+        storage_mode: str = "device",
+        storage_path: str = ".",
+        storage_compression: Union[bool, str] = False,
+        storage_bytes_limit_device: Optional[int] = None,
+        storage_bytes_limit_host: Optional[int] = None,
+        storage_chunk_steps: int = 0,
+        n_threads: Optional[int] = None,
+    ):
+        assert isinstance(self.epsilon, torch.Tensor)
+        assert isinstance(self.sigma, torch.Tensor)
+        assert isinstance(self.mu, torch.Tensor)
+        return maxwell3d(
+            self.epsilon,
+            self.sigma,
+            self.mu,
+            self.grid_spacing,
+            dt,
+            source_amplitude,
+            source_location,
+            receiver_location,
+            stencil,
+            pml_width,
+            max_vel,
+            Ex_0,
+            Ey_0,
+            Ez_0,
+            Hx_0,
+            Hy_0,
+            Hz_0,
+            m_hz_y,
+            m_hy_z,
+            m_hx_z,
+            m_hz_x,
+            m_hy_x,
+            m_hx_y,
+            m_ey_z,
+            m_ez_y,
+            m_ez_x,
+            m_ex_z,
+            m_ex_y,
+            m_ey_x,
+            nt,
+            model_gradient_sampling_interval,
+            freq_taper_frac,
+            time_pad_frac,
+            time_taper,
+            save_snapshots,
+            forward_callback,
+            backward_callback,
+            callback_frequency,
+            source_component,
+            receiver_component,
+            python_backend,
+            storage_mode,
+            storage_path,
+            storage_compression,
+            storage_bytes_limit_device,
+            storage_bytes_limit_host,
+            storage_chunk_steps,
+            n_threads,
+        )
+
+
+def maxwell3d(
+    epsilon: torch.Tensor,
+    sigma: torch.Tensor,
+    mu: torch.Tensor,
+    grid_spacing: Union[float, Sequence[float]],
+    dt: float,
+    source_amplitude: Optional[torch.Tensor],
+    source_location: Optional[torch.Tensor],
+    receiver_location: Optional[torch.Tensor],
+    stencil: int = 2,
+    pml_width: Union[int, Sequence[int]] = 20,
+    max_vel: Optional[float] = None,
+    Ex_0: Optional[torch.Tensor] = None,
+    Ey_0: Optional[torch.Tensor] = None,
+    Ez_0: Optional[torch.Tensor] = None,
+    Hx_0: Optional[torch.Tensor] = None,
+    Hy_0: Optional[torch.Tensor] = None,
+    Hz_0: Optional[torch.Tensor] = None,
+    m_hz_y: Optional[torch.Tensor] = None,
+    m_hy_z: Optional[torch.Tensor] = None,
+    m_hx_z: Optional[torch.Tensor] = None,
+    m_hz_x: Optional[torch.Tensor] = None,
+    m_hy_x: Optional[torch.Tensor] = None,
+    m_hx_y: Optional[torch.Tensor] = None,
+    m_ey_z: Optional[torch.Tensor] = None,
+    m_ez_y: Optional[torch.Tensor] = None,
+    m_ez_x: Optional[torch.Tensor] = None,
+    m_ex_z: Optional[torch.Tensor] = None,
+    m_ex_y: Optional[torch.Tensor] = None,
+    m_ey_x: Optional[torch.Tensor] = None,
+    nt: Optional[int] = None,
+    model_gradient_sampling_interval: int = 1,
+    freq_taper_frac: float = 0.0,
+    time_pad_frac: float = 0.0,
+    time_taper: bool = False,
+    save_snapshots: Optional[bool] = None,
+    forward_callback: Optional[Callback] = None,
+    backward_callback: Optional[Callback] = None,
+    callback_frequency: int = 1,
+    source_component: str = "ey",
+    receiver_component: str = "ey",
+    python_backend: Union[bool, str] = False,
+    storage_mode: str = "device",
+    storage_path: str = ".",
+    storage_compression: Union[bool, str] = False,
+    storage_bytes_limit_device: Optional[int] = None,
+    storage_bytes_limit_host: Optional[int] = None,
+    storage_chunk_steps: int = 0,
+    n_threads: Optional[int] = None,
+):
+    """3D Maxwell equations solver.
+
+    Coordinate convention is `[z, y, x]`.
+    """
+    model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
+        model_gradient_sampling_interval
+    )
+    freq_taper_frac = validate_freq_taper_frac(freq_taper_frac)
+    time_pad_frac = validate_time_pad_frac(time_pad_frac)
+
+    if epsilon.ndim != 3:
+        raise RuntimeError("epsilon must be 3D")
+    if sigma.shape != epsilon.shape:
+        raise RuntimeError("sigma must have same shape as epsilon")
+    if mu.shape != epsilon.shape:
+        raise RuntimeError("mu must have same shape as epsilon")
+
+    source_component = _normalize_component_3d(source_component, name="source_component")
+    receiver_component = _normalize_component_3d(
+        receiver_component, name="receiver_component"
+    )
+
+    if source_location is not None and source_location.numel() > 0:
+        if source_location[..., 0].min() < 0 or source_location[..., 0].max() >= epsilon.shape[-3]:
+            raise RuntimeError(
+                f"Source location dim 0 must be in [0, {epsilon.shape[-3] - 1}]"
+            )
+        if source_location[..., 1].min() < 0 or source_location[..., 1].max() >= epsilon.shape[-2]:
+            raise RuntimeError(
+                f"Source location dim 1 must be in [0, {epsilon.shape[-2] - 1}]"
+            )
+        if source_location[..., 2].min() < 0 or source_location[..., 2].max() >= epsilon.shape[-1]:
+            raise RuntimeError(
+                f"Source location dim 2 must be in [0, {epsilon.shape[-1] - 1}]"
+            )
+
+    if receiver_location is not None and receiver_location.numel() > 0:
+        if receiver_location[..., 0].min() < 0 or receiver_location[..., 0].max() >= epsilon.shape[-3]:
+            raise RuntimeError(
+                f"Receiver location dim 0 must be in [0, {epsilon.shape[-3] - 1}]"
+            )
+        if receiver_location[..., 1].min() < 0 or receiver_location[..., 1].max() >= epsilon.shape[-2]:
+            raise RuntimeError(
+                f"Receiver location dim 1 must be in [0, {epsilon.shape[-2] - 1}]"
+            )
+        if receiver_location[..., 2].min() < 0 or receiver_location[..., 2].max() >= epsilon.shape[-1]:
+            raise RuntimeError(
+                f"Receiver location dim 2 must be in [0, {epsilon.shape[-1] - 1}]"
+            )
+
+    if not isinstance(callback_frequency, int):
+        raise TypeError("callback_frequency must be an int.")
+    if callback_frequency <= 0:
+        raise ValueError("callback_frequency must be positive.")
+
+    grid_spacing_list = _normalize_grid_spacing_3d(grid_spacing)
+
+    if max_vel is None:
+        max_vel_computed = float((1.0 / torch.sqrt(epsilon * mu)).max().item()) * C0
+    else:
+        max_vel_computed = max_vel
+
+    inner_dt, step_ratio = cfl_condition(grid_spacing_list, dt, max_vel_computed)
+
+    source_amplitude_internal = source_amplitude
+    if step_ratio > 1 and source_amplitude is not None and source_amplitude.numel() > 0:
+        source_amplitude_internal = upsample(
+            source_amplitude,
+            step_ratio,
+            freq_taper_frac=freq_taper_frac,
+            time_pad_frac=time_pad_frac,
+            time_taper=time_taper,
+        )
+
+    nt_internal = None
+    if nt is not None:
+        nt_internal = nt * step_ratio
+    elif source_amplitude_internal is not None:
+        nt_internal = source_amplitude_internal.shape[-1]
+
+    if isinstance(python_backend, bool):
+        use_python = python_backend
+    elif isinstance(python_backend, str):
+        use_python = True
+    else:
+        raise TypeError(
+            f"python_backend must be bool or str, but got {type(python_backend).__name__}"
+        )
+
+    result = (maxwell3d_python if use_python else maxwell3d_c_cuda)(
+        epsilon,
+        sigma,
+        mu,
+        grid_spacing,
+        inner_dt,
+        source_amplitude_internal,
+        source_location,
+        receiver_location,
+        stencil,
+        pml_width,
+        max_vel_computed,
+        Ex_0,
+        Ey_0,
+        Ez_0,
+        Hx_0,
+        Hy_0,
+        Hz_0,
+        m_hz_y,
+        m_hy_z,
+        m_hx_z,
+        m_hz_x,
+        m_hy_x,
+        m_hx_y,
+        m_ey_z,
+        m_ez_y,
+        m_ez_x,
+        m_ex_z,
+        m_ex_y,
+        m_ey_x,
+        nt_internal,
+        model_gradient_sampling_interval,
+        freq_taper_frac,
+        time_pad_frac,
+        time_taper,
+        save_snapshots,
+        forward_callback,
+        backward_callback,
+        callback_frequency,
+        source_component,
+        receiver_component,
+        storage_mode,
+        storage_path,
+        storage_compression,
+        storage_bytes_limit_device,
+        storage_bytes_limit_host,
+        storage_chunk_steps,
+        n_threads,
+    )
+
+    (
+        Ex_out,
+        Ey_out,
+        Ez_out,
+        Hx_out,
+        Hy_out,
+        Hz_out,
+        m_hz_y_out,
+        m_hy_z_out,
+        m_hx_z_out,
+        m_hz_x_out,
+        m_hy_x_out,
+        m_hx_y_out,
+        m_ey_z_out,
+        m_ez_y_out,
+        m_ez_x_out,
+        m_ex_z_out,
+        m_ex_y_out,
+        m_ey_x_out,
+        receiver_amplitudes,
+    ) = result
+
+    if step_ratio > 1 and receiver_amplitudes.numel() > 0:
+        receiver_amplitudes = downsample_and_movedim(
+            receiver_amplitudes,
+            step_ratio,
+            freq_taper_frac=freq_taper_frac,
+            time_pad_frac=time_pad_frac,
+            time_taper=time_taper,
+        )
+        receiver_amplitudes = torch.movedim(receiver_amplitudes, -1, 0)
+
+    return (
+        Ex_out,
+        Ey_out,
+        Ez_out,
+        Hx_out,
+        Hy_out,
+        Hz_out,
+        m_hz_y_out,
+        m_hy_z_out,
+        m_hx_z_out,
+        m_hz_x_out,
+        m_hy_x_out,
+        m_hx_y_out,
+        m_ey_z_out,
+        m_ez_y_out,
+        m_ez_x_out,
+        m_ex_z_out,
+        m_ex_y_out,
+        m_ey_x_out,
+        receiver_amplitudes,
+    )
+
+
+def _select_e_component(
+    component: str,
+    ex: torch.Tensor,
+    ey: torch.Tensor,
+    ez: torch.Tensor,
+) -> torch.Tensor:
+    if component == "ex":
+        return ex
+    if component == "ey":
+        return ey
+    return ez
+
+
+def _inject_component(
+    field: torch.Tensor,
+    flat_shape: int,
+    indices: torch.Tensor,
+    values: torch.Tensor,
+    output_shape: tuple[int, int, int, int],
+) -> torch.Tensor:
+    return (
+        field.reshape(output_shape[0], flat_shape)
+        .scatter_add(1, indices, values)
+        .reshape(output_shape)
+    )
+
+
+def maxwell3d_python(
+    epsilon: torch.Tensor,
+    sigma: torch.Tensor,
+    mu: torch.Tensor,
+    grid_spacing: Union[float, Sequence[float]],
+    dt: float,
+    source_amplitude: Optional[torch.Tensor],
+    source_location: Optional[torch.Tensor],
+    receiver_location: Optional[torch.Tensor],
+    stencil: int,
+    pml_width: Union[int, Sequence[int]],
+    max_vel: Optional[float],
+    Ex_0: Optional[torch.Tensor],
+    Ey_0: Optional[torch.Tensor],
+    Ez_0: Optional[torch.Tensor],
+    Hx_0: Optional[torch.Tensor],
+    Hy_0: Optional[torch.Tensor],
+    Hz_0: Optional[torch.Tensor],
+    m_hz_y_0: Optional[torch.Tensor],
+    m_hy_z_0: Optional[torch.Tensor],
+    m_hx_z_0: Optional[torch.Tensor],
+    m_hz_x_0: Optional[torch.Tensor],
+    m_hy_x_0: Optional[torch.Tensor],
+    m_hx_y_0: Optional[torch.Tensor],
+    m_ey_z_0: Optional[torch.Tensor],
+    m_ez_y_0: Optional[torch.Tensor],
+    m_ez_x_0: Optional[torch.Tensor],
+    m_ex_z_0: Optional[torch.Tensor],
+    m_ex_y_0: Optional[torch.Tensor],
+    m_ey_x_0: Optional[torch.Tensor],
+    nt: Optional[int],
+    model_gradient_sampling_interval: int,
+    freq_taper_frac: float,
+    time_pad_frac: float,
+    time_taper: bool,
+    save_snapshots: Optional[bool],
+    forward_callback: Optional[Callback],
+    backward_callback: Optional[Callback],
+    callback_frequency: int,
+    source_component: str,
+    receiver_component: str,
+    storage_mode: str = "device",
+    storage_path: str = ".",
+    storage_compression: Union[bool, str] = False,
+    storage_bytes_limit_device: Optional[int] = None,
+    storage_bytes_limit_host: Optional[int] = None,
+    storage_chunk_steps: int = 0,
+    n_threads: Optional[int] = None,
+):
+    """3D Python backend propagation with autograd support."""
+    del (
+        model_gradient_sampling_interval,
+        freq_taper_frac,
+        time_pad_frac,
+        time_taper,
+        save_snapshots,
+        backward_callback,
+        storage_path,
+        storage_bytes_limit_device,
+        storage_bytes_limit_host,
+        storage_chunk_steps,
+        n_threads,
+    )
+    from .padding import create_or_pad, zero_interior
+
+    if epsilon.ndim != 3:
+        raise RuntimeError("epsilon must be 3D")
+    if sigma.shape != epsilon.shape:
+        raise RuntimeError("sigma must have same shape as epsilon")
+    if mu.shape != epsilon.shape:
+        raise RuntimeError("mu must have same shape as epsilon")
+
+    storage_mode_str = storage_mode.lower()
+    if storage_mode_str in {"cpu", "disk"}:
+        raise ValueError(
+            "python_backend does not support storage_mode='cpu' or 'disk'. "
+            "Use the C/CUDA backend or storage_mode='device'/'none'."
+        )
+    storage_kind = _normalize_storage_compression(storage_compression)
+    if storage_kind != "none":
+        raise NotImplementedError(
+            "storage_compression is not implemented yet; set storage_compression=False."
+        )
+
+    device = epsilon.device
+    dtype = epsilon.dtype
+    model_nz, model_ny, model_nx = epsilon.shape
+
+    grid_spacing_list = _normalize_grid_spacing_3d(grid_spacing)
+    dz, dy, dx = grid_spacing_list
+    pml_width_list = _normalize_pml_width_3d(pml_width)
+
+    if nt is None:
+        if source_amplitude is None:
+            raise ValueError("Either nt or source_amplitude must be provided")
+        nt = source_amplitude.shape[-1]
+    nt_steps = int(nt)
+
+    if source_amplitude is not None and source_amplitude.numel() > 0:
+        n_shots = source_amplitude.shape[0]
+    elif source_location is not None and source_location.numel() > 0:
+        n_shots = source_location.shape[0]
+    elif receiver_location is not None and receiver_location.numel() > 0:
+        n_shots = receiver_location.shape[0]
+    else:
+        n_shots = 1
+
+    if max_vel is None:
+        max_vel = float((1.0 / torch.sqrt(epsilon * mu)).max().item()) * C0
+    pml_freq = 0.5 / dt
+
+    fd_pad = stencil // 2
+    fd_pad_list = [fd_pad, fd_pad - 1, fd_pad, fd_pad - 1, fd_pad, fd_pad - 1]
+    total_pad = [fd + pml for fd, pml in zip(fd_pad_list, pml_width_list)]
+
+    padded_nz = model_nz + total_pad[0] + total_pad[1]
+    padded_ny = model_ny + total_pad[2] + total_pad[3]
+    padded_nx = model_nx + total_pad[4] + total_pad[5]
+
+    padded_size = (padded_nz, padded_ny, padded_nx)
+    epsilon_padded = create_or_pad(
+        epsilon, total_pad, device, dtype, padded_size, mode="replicate"
+    )
+    sigma_padded = create_or_pad(
+        sigma, total_pad, device, dtype, padded_size, mode="replicate"
+    )
+    mu_padded = create_or_pad(
+        mu, total_pad, device, dtype, padded_size, mode="replicate"
+    )
+    ca, cb, cq = prepare_parameters(epsilon_padded, sigma_padded, mu_padded, dt)
+    ca = ca[None, :, :, :]
+    cb = cb[None, :, :, :]
+    cq = cq[None, :, :, :]
+
+    size_with_batch = (n_shots, padded_nz, padded_ny, padded_nx)
+
+    def init_wavefield(field_0: Optional[torch.Tensor]) -> torch.Tensor:
+        if field_0 is not None:
+            if field_0.ndim == 3:
+                field_0 = field_0[None, :, :, :].expand(n_shots, -1, -1, -1)
+            return create_or_pad(
+                field_0,
+                fd_pad_list,
+                device,
+                dtype,
+                size_with_batch,
+                mode="constant",
+            )
+        return torch.zeros(size_with_batch, device=device, dtype=dtype)
+
+    Ex = init_wavefield(Ex_0)
+    Ey = init_wavefield(Ey_0)
+    Ez = init_wavefield(Ez_0)
+    Hx = init_wavefield(Hx_0)
+    Hy = init_wavefield(Hy_0)
+    Hz = init_wavefield(Hz_0)
+
+    m_hz_y = init_wavefield(m_hz_y_0)
+    m_hy_z = init_wavefield(m_hy_z_0)
+    m_hx_z = init_wavefield(m_hx_z_0)
+    m_hz_x = init_wavefield(m_hz_x_0)
+    m_hy_x = init_wavefield(m_hy_x_0)
+    m_hx_y = init_wavefield(m_hx_y_0)
+    m_ey_z = init_wavefield(m_ey_z_0)
+    m_ez_y = init_wavefield(m_ez_y_0)
+    m_ez_x = init_wavefield(m_ez_x_0)
+    m_ex_z = init_wavefield(m_ex_z_0)
+    m_ex_y = init_wavefield(m_ex_y_0)
+    m_ey_x = init_wavefield(m_ey_x_0)
+
+    pml_aux = [
+        (m_hz_y, 1),
+        (m_hy_z, 0),
+        (m_hx_z, 0),
+        (m_hz_x, 2),
+        (m_hy_x, 2),
+        (m_hx_y, 1),
+        (m_ey_z, 0),
+        (m_ez_y, 1),
+        (m_ez_x, 2),
+        (m_ex_z, 0),
+        (m_ex_y, 1),
+        (m_ey_x, 2),
+    ]
+    for wf, dim in pml_aux:
+        zero_interior(wf, fd_pad_list, pml_width_list, dim)
+
+    from . import staggered as _staggered
+
+    pml_ab_profiles, pml_k_profiles = _staggered.set_pml_profiles_3d(
+        pml_width=pml_width_list,
+        accuracy=stencil,
+        fd_pad=fd_pad_list,
+        dt=dt,
+        grid_spacing=grid_spacing_list,
+        max_vel=max_vel,
+        dtype=dtype,
+        device=device,
+        pml_freq=pml_freq,
+        nz=padded_nz,
+        ny=padded_ny,
+        nx=padded_nx,
+    )
+    (
+        az,
+        az_h,
+        ay,
+        ay_h,
+        ax,
+        ax_h,
+        bz,
+        bz_h,
+        by,
+        by_h,
+        bx,
+        bx_h,
+    ) = pml_ab_profiles
+    kz, kz_h, ky, ky_h, kx, kx_h = pml_k_profiles
+
+    rdz = torch.tensor(1.0 / dz, device=device, dtype=dtype)
+    rdy = torch.tensor(1.0 / dy, device=device, dtype=dtype)
+    rdx = torch.tensor(1.0 / dx, device=device, dtype=dtype)
+
+    flat_model_shape = padded_nz * padded_ny * padded_nx
+    if source_location is not None and source_location.numel() > 0:
+        source_z = source_location[..., 0] + total_pad[0]
+        source_y = source_location[..., 1] + total_pad[2]
+        source_x = source_location[..., 2] + total_pad[4]
+        sources_i = ((source_z * padded_ny + source_y) * padded_nx + source_x).long()
+        n_sources = source_location.shape[1]
+    else:
+        sources_i = torch.empty(0, device=device, dtype=torch.long)
+        n_sources = 0
+
+    if receiver_location is not None and receiver_location.numel() > 0:
+        receiver_z = receiver_location[..., 0] + total_pad[0]
+        receiver_y = receiver_location[..., 1] + total_pad[2]
+        receiver_x = receiver_location[..., 2] + total_pad[4]
+        receivers_i = (
+            (receiver_z * padded_ny + receiver_y) * padded_nx + receiver_x
+        ).long()
+        n_receivers = receiver_location.shape[1]
+    else:
+        receivers_i = torch.empty(0, device=device, dtype=torch.long)
+        n_receivers = 0
+
+    if n_receivers > 0:
+        receiver_amplitudes = torch.zeros(
+            nt_steps,
+            n_shots,
+            n_receivers,
+            device=device,
+            dtype=dtype,
+        )
+    else:
+        receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
+
+    source_coeff = -1.0 / (dx * dy * dz)
+    if n_sources > 0 and source_amplitude is not None and source_amplitude.numel() > 0:
+        cb_flat = cb.reshape(1, flat_model_shape).expand(n_shots, -1)
+        cb_at_src = cb_flat.gather(1, sources_i)
+    else:
+        cb_at_src = torch.empty(0, device=device, dtype=dtype)
+
+    callback_models = {
+        "epsilon": epsilon_padded,
+        "sigma": sigma_padded,
+        "mu": mu_padded,
+        "ca": ca,
+        "cb": cb,
+        "cq": cq,
+    }
+
+    for step in range(nt_steps):
+        if forward_callback is not None and step % callback_frequency == 0:
+            callback_wavefields = {
+                "Ex": Ex,
+                "Ey": Ey,
+                "Ez": Ez,
+                "Hx": Hx,
+                "Hy": Hy,
+                "Hz": Hz,
+                "m_hz_y": m_hz_y,
+                "m_hy_z": m_hy_z,
+                "m_hx_z": m_hx_z,
+                "m_hz_x": m_hz_x,
+                "m_hy_x": m_hy_x,
+                "m_hx_y": m_hx_y,
+                "m_ey_z": m_ey_z,
+                "m_ez_y": m_ez_y,
+                "m_ez_x": m_ez_x,
+                "m_ex_z": m_ex_z,
+                "m_ex_y": m_ex_y,
+                "m_ey_x": m_ey_x,
+            }
+            forward_callback(
+                CallbackState(
+                    dt=dt,
+                    step=step,
+                    nt=nt_steps,
+                    wavefields=callback_wavefields,
+                    models=callback_models,
+                    gradients=None,
+                    fd_pad=fd_pad_list,
+                    pml_width=pml_width_list,
+                    is_backward=False,
+                    grid_spacing=[dz, dy, dx],
+                )
+            )
+
+        # H update using half-grid derivatives of E
+        dEy_dz = _staggered.diffzh1(Ey, stencil, rdz)
+        dEz_dy = _staggered.diffyh1(Ez, stencil, rdy)
+        dEz_dx = _staggered.diffxh1(Ez, stencil, rdx)
+        dEx_dz = _staggered.diffzh1(Ex, stencil, rdz)
+        dEx_dy = _staggered.diffyh1(Ex, stencil, rdy)
+        dEy_dx = _staggered.diffxh1(Ey, stencil, rdx)
+
+        m_ey_z = bz_h * m_ey_z + az_h * dEy_dz
+        m_ez_y = by_h * m_ez_y + ay_h * dEz_dy
+        m_ez_x = bx_h * m_ez_x + ax_h * dEz_dx
+        m_ex_z = bz_h * m_ex_z + az_h * dEx_dz
+        m_ex_y = by_h * m_ex_y + ay_h * dEx_dy
+        m_ey_x = bx_h * m_ey_x + ax_h * dEy_dx
+
+        dEy_dz_pml = dEy_dz / kz_h + m_ey_z
+        dEz_dy_pml = dEz_dy / ky_h + m_ez_y
+        dEz_dx_pml = dEz_dx / kx_h + m_ez_x
+        dEx_dz_pml = dEx_dz / kz_h + m_ex_z
+        dEx_dy_pml = dEx_dy / ky_h + m_ex_y
+        dEy_dx_pml = dEy_dx / kx_h + m_ey_x
+
+        Hx = Hx - cq * (dEy_dz_pml - dEz_dy_pml)
+        Hy = Hy - cq * (dEz_dx_pml - dEx_dz_pml)
+        Hz = Hz - cq * (dEx_dy_pml - dEy_dx_pml)
+
+        # E update using integer-grid derivatives of H
+        dHy_dz = _staggered.diffz1(Hy, stencil, rdz)
+        dHz_dy = _staggered.diffy1(Hz, stencil, rdy)
+        dHz_dx = _staggered.diffx1(Hz, stencil, rdx)
+        dHx_dz = _staggered.diffz1(Hx, stencil, rdz)
+        dHx_dy = _staggered.diffy1(Hx, stencil, rdy)
+        dHy_dx = _staggered.diffx1(Hy, stencil, rdx)
+
+        m_hy_z = bz * m_hy_z + az * dHy_dz
+        m_hz_y = by * m_hz_y + ay * dHz_dy
+        m_hz_x = bx * m_hz_x + ax * dHz_dx
+        m_hx_z = bz * m_hx_z + az * dHx_dz
+        m_hx_y = by * m_hx_y + ay * dHx_dy
+        m_hy_x = bx * m_hy_x + ax * dHy_dx
+
+        dHy_dz_pml = dHy_dz / kz + m_hy_z
+        dHz_dy_pml = dHz_dy / ky + m_hz_y
+        dHz_dx_pml = dHz_dx / kx + m_hz_x
+        dHx_dz_pml = dHx_dz / kz + m_hx_z
+        dHx_dy_pml = dHx_dy / ky + m_hx_y
+        dHy_dx_pml = dHy_dx / kx + m_hy_x
+
+        Ex = ca * Ex + cb * (dHy_dz_pml - dHz_dy_pml)
+        Ey = ca * Ey + cb * (dHz_dx_pml - dHx_dz_pml)
+        Ez = ca * Ez + cb * (dHx_dy_pml - dHy_dx_pml)
+
+        if (
+            source_amplitude is not None
+            and source_amplitude.numel() > 0
+            and n_sources > 0
+        ):
+            src_amp = source_amplitude[:, :, step]
+            scaled_src = cb_at_src * src_amp * source_coeff
+            if source_component == "ex":
+                Ex = _inject_component(
+                    Ex, flat_model_shape, sources_i, scaled_src, size_with_batch
+                )
+            elif source_component == "ey":
+                Ey = _inject_component(
+                    Ey, flat_model_shape, sources_i, scaled_src, size_with_batch
+                )
+            else:
+                Ez = _inject_component(
+                    Ez, flat_model_shape, sources_i, scaled_src, size_with_batch
+                )
+
+        if n_receivers > 0:
+            rec_field = _select_e_component(receiver_component, Ex, Ey, Ez)
+            receiver_amplitudes[step] = rec_field.reshape(
+                n_shots, flat_model_shape
+            ).gather(1, receivers_i)
+
+    s = (
+        slice(None),
+        slice(
+            fd_pad_list[0], padded_nz - fd_pad_list[1] if fd_pad_list[1] > 0 else None
+        ),
+        slice(
+            fd_pad_list[2], padded_ny - fd_pad_list[3] if fd_pad_list[3] > 0 else None
+        ),
+        slice(
+            fd_pad_list[4], padded_nx - fd_pad_list[5] if fd_pad_list[5] > 0 else None
+        ),
+    )
+
+    return (
+        Ex[s],
+        Ey[s],
+        Ez[s],
+        Hx[s],
+        Hy[s],
+        Hz[s],
+        m_hz_y[s],
+        m_hy_z[s],
+        m_hx_z[s],
+        m_hz_x[s],
+        m_hy_x[s],
+        m_hx_y[s],
+        m_ey_z[s],
+        m_ez_y[s],
+        m_ez_x[s],
+        m_ex_z[s],
+        m_ex_y[s],
+        m_ey_x[s],
+        receiver_amplitudes,
+    )
+
+
+class Maxwell3DForwardFunc(torch.autograd.Function):
+    """Autograd function for 3D C/CUDA backend propagation."""
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx: Any,
+        ca: torch.Tensor,
+        cb: torch.Tensor,
+        cq: torch.Tensor,
+        source_amplitudes_scaled: torch.Tensor,
+        profiles: tuple[torch.Tensor, ...],
+        indices: tuple[torch.Tensor, torch.Tensor],
+        wavefields: tuple[torch.Tensor, ...],
+        meta: dict[str, Any],
+    ) -> tuple[torch.Tensor, ...]:
+        from . import backend_utils
+
+        (
+            az,
+            bz,
+            az_h,
+            bz_h,
+            ay,
+            by,
+            ay_h,
+            by_h,
+            ax,
+            bx,
+            ax_h,
+            bx_h,
+            kz,
+            kz_h,
+            ky,
+            ky_h,
+            kx,
+            kx_h,
+        ) = profiles
+        sources_i, receivers_i = indices
+        (
+            Ex,
+            Ey,
+            Ez,
+            Hx,
+            Hy,
+            Hz,
+            m_hz_y,
+            m_hy_z,
+            m_hx_z,
+            m_hz_x,
+            m_hy_x,
+            m_hx_y,
+            m_ey_z,
+            m_ez_y,
+            m_ez_x,
+            m_ex_z,
+            m_ex_y,
+            m_ey_x,
+        ) = wavefields
+
+        device = Ex.device
+        dtype = Ex.dtype
+
+        nt = int(meta["nt"])
+        n_shots = int(meta["n_shots"])
+        nz = int(meta["nz"])
+        ny = int(meta["ny"])
+        nx = int(meta["nx"])
+        n_sources = int(meta["n_sources"])
+        n_receivers = int(meta["n_receivers"])
+        step_ratio = int(meta["step_ratio"])
+        accuracy = int(meta["accuracy"])
+        pml_z0 = int(meta["pml_z0"])
+        pml_y0 = int(meta["pml_y0"])
+        pml_x0 = int(meta["pml_x0"])
+        pml_z1 = int(meta["pml_z1"])
+        pml_y1 = int(meta["pml_y1"])
+        pml_x1 = int(meta["pml_x1"])
+        source_component_idx = int(meta["source_component_idx"])
+        receiver_component_idx = int(meta["receiver_component_idx"])
+        n_threads = int(meta["n_threads"])
+        callback_frequency = int(meta["callback_frequency"])
+        forward_callback = meta["forward_callback"]
+        models = meta["models"]
+        fd_pad = meta["fd_pad"]
+        pml_width = meta["pml_width"]
+        grid_spacing = meta["grid_spacing"]
+        dt = float(meta["dt"])
+
+        ca_requires_grad = bool(ca.requires_grad)
+        cb_requires_grad = bool(cb.requires_grad)
+        requires_grad = ca_requires_grad or cb_requires_grad
+        if not requires_grad:
+            raise RuntimeError("Maxwell3DForwardFunc should only be used when gradients are required.")
+
+        if n_receivers > 0:
+            receiver_amplitudes = torch.zeros(
+                nt, n_shots, n_receivers, device=device, dtype=dtype
+            )
+        else:
+            receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
+
+        step_ratio = max(1, step_ratio)
+        num_steps_stored = (nt + step_ratio - 1) // step_ratio
+        shot_numel = nz * ny * nx
+        shot_bytes_uncomp = shot_numel * dtype.itemsize
+        storage_mode = STORAGE_DEVICE
+
+        # Store E and curl(H) components for adjoint gradients.
+        store_ex = torch.empty(
+            num_steps_stored, n_shots, nz, ny, nx, device=device, dtype=dtype
+        )
+        store_ey = torch.empty(
+            num_steps_stored, n_shots, nz, ny, nx, device=device, dtype=dtype
+        )
+        store_ez = torch.empty(
+            num_steps_stored, n_shots, nz, ny, nx, device=device, dtype=dtype
+        )
+        store_curl_x = torch.empty(
+            num_steps_stored, n_shots, nz, ny, nx, device=device, dtype=dtype
+        )
+        store_curl_y = torch.empty(
+            num_steps_stored, n_shots, nz, ny, nx, device=device, dtype=dtype
+        )
+        store_curl_z = torch.empty(
+            num_steps_stored, n_shots, nz, ny, nx, device=device, dtype=dtype
+        )
+        empty_store = torch.empty(0, device=device, dtype=dtype)
+
+        forward_func = backend_utils.get_backend_function(
+            "maxwell_3d", "forward_with_storage", accuracy, dtype, device
+        )
+        device_idx = (
+            device.index if device.type == "cuda" and device.index is not None else 0
+        )
+        effective_callback_freq = nt if forward_callback is None else callback_frequency
+        if effective_callback_freq <= 0:
+            effective_callback_freq = nt if nt > 0 else 1
+
+        for step in range(0, nt, effective_callback_freq):
+            if forward_callback is not None:
+                forward_callback(
+                    CallbackState(
+                        dt=dt,
+                        step=step,
+                        nt=nt,
+                        wavefields={
+                            "Ex": Ex,
+                            "Ey": Ey,
+                            "Ez": Ez,
+                            "Hx": Hx,
+                            "Hy": Hy,
+                            "Hz": Hz,
+                            "m_hz_y": m_hz_y,
+                            "m_hy_z": m_hy_z,
+                            "m_hx_z": m_hx_z,
+                            "m_hz_x": m_hz_x,
+                            "m_hy_x": m_hy_x,
+                            "m_hx_y": m_hx_y,
+                            "m_ey_z": m_ey_z,
+                            "m_ez_y": m_ez_y,
+                            "m_ez_x": m_ez_x,
+                            "m_ex_z": m_ex_z,
+                            "m_ex_y": m_ex_y,
+                            "m_ey_x": m_ey_x,
+                        },
+                        models=models,
+                        gradients={},
+                        fd_pad=list(fd_pad),
+                        pml_width=list(pml_width),
+                        is_backward=False,
+                        grid_spacing=list(grid_spacing),
+                    )
+                )
+
+            step_nt = min(nt - step, effective_callback_freq)
+            forward_func(
+                backend_utils.tensor_to_ptr(ca),
+                backend_utils.tensor_to_ptr(cb),
+                backend_utils.tensor_to_ptr(cq),
+                backend_utils.tensor_to_ptr(source_amplitudes_scaled),
+                backend_utils.tensor_to_ptr(Ex),
+                backend_utils.tensor_to_ptr(Ey),
+                backend_utils.tensor_to_ptr(Ez),
+                backend_utils.tensor_to_ptr(Hx),
+                backend_utils.tensor_to_ptr(Hy),
+                backend_utils.tensor_to_ptr(Hz),
+                backend_utils.tensor_to_ptr(m_hz_y),
+                backend_utils.tensor_to_ptr(m_hy_z),
+                backend_utils.tensor_to_ptr(m_hx_z),
+                backend_utils.tensor_to_ptr(m_hz_x),
+                backend_utils.tensor_to_ptr(m_hy_x),
+                backend_utils.tensor_to_ptr(m_hx_y),
+                backend_utils.tensor_to_ptr(m_ey_z),
+                backend_utils.tensor_to_ptr(m_ez_y),
+                backend_utils.tensor_to_ptr(m_ez_x),
+                backend_utils.tensor_to_ptr(m_ex_z),
+                backend_utils.tensor_to_ptr(m_ex_y),
+                backend_utils.tensor_to_ptr(m_ey_x),
+                backend_utils.tensor_to_ptr(receiver_amplitudes),
+                backend_utils.tensor_to_ptr(store_ex),
+                backend_utils.tensor_to_ptr(empty_store),
+                0,
+                backend_utils.tensor_to_ptr(store_ey),
+                backend_utils.tensor_to_ptr(empty_store),
+                0,
+                backend_utils.tensor_to_ptr(store_ez),
+                backend_utils.tensor_to_ptr(empty_store),
+                0,
+                backend_utils.tensor_to_ptr(store_curl_x),
+                backend_utils.tensor_to_ptr(empty_store),
+                0,
+                backend_utils.tensor_to_ptr(store_curl_y),
+                backend_utils.tensor_to_ptr(empty_store),
+                0,
+                backend_utils.tensor_to_ptr(store_curl_z),
+                backend_utils.tensor_to_ptr(empty_store),
+                0,
+                backend_utils.tensor_to_ptr(az),
+                backend_utils.tensor_to_ptr(bz),
+                backend_utils.tensor_to_ptr(az_h),
+                backend_utils.tensor_to_ptr(bz_h),
+                backend_utils.tensor_to_ptr(ay),
+                backend_utils.tensor_to_ptr(by),
+                backend_utils.tensor_to_ptr(ay_h),
+                backend_utils.tensor_to_ptr(by_h),
+                backend_utils.tensor_to_ptr(ax),
+                backend_utils.tensor_to_ptr(bx),
+                backend_utils.tensor_to_ptr(ax_h),
+                backend_utils.tensor_to_ptr(bx_h),
+                backend_utils.tensor_to_ptr(kz),
+                backend_utils.tensor_to_ptr(kz_h),
+                backend_utils.tensor_to_ptr(ky),
+                backend_utils.tensor_to_ptr(ky_h),
+                backend_utils.tensor_to_ptr(kx),
+                backend_utils.tensor_to_ptr(kx_h),
+                backend_utils.tensor_to_ptr(sources_i),
+                backend_utils.tensor_to_ptr(receivers_i),
+                float(meta["rdz"]),
+                float(meta["rdy"]),
+                float(meta["rdx"]),
+                dt,
+                step_nt,
+                n_shots,
+                nz,
+                ny,
+                nx,
+                n_sources,
+                n_receivers,
+                step_ratio,
+                storage_mode,
+                shot_bytes_uncomp,
+                ca_requires_grad,
+                cb_requires_grad,
+                False,
+                False,
+                False,
+                step,
+                pml_z0,
+                pml_y0,
+                pml_x0,
+                pml_z1,
+                pml_y1,
+                pml_x1,
+                source_component_idx,
+                receiver_component_idx,
+                n_threads,
+                device_idx,
+            )
+
+        ctx.save_for_backward(
+            ca,
+            cb,
+            cq,
+            az,
+            bz,
+            az_h,
+            bz_h,
+            ay,
+            by,
+            ay_h,
+            by_h,
+            ax,
+            bx,
+            ax_h,
+            bx_h,
+            kz,
+            kz_h,
+            ky,
+            ky_h,
+            kx,
+            kx_h,
+            sources_i,
+            receivers_i,
+            store_ex,
+            store_ey,
+            store_ez,
+            store_curl_x,
+            store_curl_y,
+            store_curl_z,
+        )
+        ctx.meta = {
+            "dt": dt,
+            "nt": nt,
+            "n_shots": n_shots,
+            "nz": nz,
+            "ny": ny,
+            "nx": nx,
+            "n_sources": n_sources,
+            "n_receivers": n_receivers,
+            "step_ratio": step_ratio,
+            "accuracy": accuracy,
+            "pml_z0": pml_z0,
+            "pml_y0": pml_y0,
+            "pml_x0": pml_x0,
+            "pml_z1": pml_z1,
+            "pml_y1": pml_y1,
+            "pml_x1": pml_x1,
+            "source_component_idx": source_component_idx,
+            "receiver_component_idx": receiver_component_idx,
+            "ca_requires_grad": ca_requires_grad,
+            "cb_requires_grad": cb_requires_grad,
+            "models": models,
+            "fd_pad": fd_pad,
+            "pml_width": pml_width,
+            "backward_callback": meta["backward_callback"],
+            "callback_frequency": callback_frequency,
+            "n_threads": n_threads,
+            "rdz": float(meta["rdz"]),
+            "rdy": float(meta["rdy"]),
+            "rdx": float(meta["rdx"]),
+            "shot_bytes_uncomp": shot_bytes_uncomp,
+        }
+
+        return (
+            Ex,
+            Ey,
+            Ez,
+            Hx,
+            Hy,
+            Hz,
+            m_hz_y,
+            m_hy_z,
+            m_hx_z,
+            m_hz_x,
+            m_hy_x,
+            m_hx_y,
+            m_ey_z,
+            m_ez_y,
+            m_ez_x,
+            m_ex_z,
+            m_ex_y,
+            m_ey_x,
+            receiver_amplitudes,
+        )
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx: Any, *grad_outputs: torch.Tensor
+    ) -> tuple[Optional[torch.Tensor], ...]:
+        from . import backend_utils
+
+        saved = ctx.saved_tensors
+        ca, cb, cq = saved[0], saved[1], saved[2]
+        az, bz, az_h, bz_h = saved[3], saved[4], saved[5], saved[6]
+        ay, by, ay_h, by_h = saved[7], saved[8], saved[9], saved[10]
+        ax, bx, ax_h, bx_h = saved[11], saved[12], saved[13], saved[14]
+        kz, kz_h, ky, ky_h, kx, kx_h = saved[15], saved[16], saved[17], saved[18], saved[19], saved[20]
+        sources_i, receivers_i = saved[21], saved[22]
+        store_ex, store_ey, store_ez = saved[23], saved[24], saved[25]
+        store_curl_x, store_curl_y, store_curl_z = saved[26], saved[27], saved[28]
+
+        meta = ctx.meta
+        device = ca.device
+        dtype = ca.dtype
+
+        nt = int(meta["nt"])
+        n_shots = int(meta["n_shots"])
+        nz = int(meta["nz"])
+        ny = int(meta["ny"])
+        nx = int(meta["nx"])
+        n_sources = int(meta["n_sources"])
+        n_receivers = int(meta["n_receivers"])
+        step_ratio = int(meta["step_ratio"])
+        accuracy = int(meta["accuracy"])
+        pml_z0 = int(meta["pml_z0"])
+        pml_y0 = int(meta["pml_y0"])
+        pml_x0 = int(meta["pml_x0"])
+        pml_z1 = int(meta["pml_z1"])
+        pml_y1 = int(meta["pml_y1"])
+        pml_x1 = int(meta["pml_x1"])
+        source_component_idx = int(meta["source_component_idx"])
+        receiver_component_idx = int(meta["receiver_component_idx"])
+        ca_requires_grad = bool(meta["ca_requires_grad"])
+        cb_requires_grad = bool(meta["cb_requires_grad"])
+        backward_callback = meta["backward_callback"]
+        callback_frequency = int(meta["callback_frequency"])
+        models = meta["models"]
+        fd_pad = meta["fd_pad"]
+        pml_width = meta["pml_width"]
+        n_threads = int(meta["n_threads"])
+        shot_bytes_uncomp = int(meta["shot_bytes_uncomp"])
+        dt = float(meta["dt"])
+
+        grad_r = grad_outputs[-1]
+        if grad_r is None or grad_r.numel() == 0:
+            grad_r = torch.zeros(nt, n_shots, n_receivers, device=device, dtype=dtype)
+        else:
+            grad_r = grad_r.contiguous()
+
+        lambda_ex = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+        lambda_ey = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+        lambda_ez = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+        lambda_hx = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+        lambda_hy = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+        lambda_hz = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+
+        m_lambda_ey_z = torch.zeros_like(lambda_ex)
+        m_lambda_ez_y = torch.zeros_like(lambda_ex)
+        m_lambda_ez_x = torch.zeros_like(lambda_ex)
+        m_lambda_ex_z = torch.zeros_like(lambda_ex)
+        m_lambda_ex_y = torch.zeros_like(lambda_ex)
+        m_lambda_ey_x = torch.zeros_like(lambda_ex)
+        m_lambda_hz_y = torch.zeros_like(lambda_ex)
+        m_lambda_hy_z = torch.zeros_like(lambda_ex)
+        m_lambda_hx_z = torch.zeros_like(lambda_ex)
+        m_lambda_hz_x = torch.zeros_like(lambda_ex)
+        m_lambda_hy_x = torch.zeros_like(lambda_ex)
+        m_lambda_hx_y = torch.zeros_like(lambda_ex)
+
+        if n_sources > 0:
+            grad_f = torch.zeros(nt, n_shots, n_sources, device=device, dtype=dtype)
+        else:
+            grad_f = torch.empty(0, device=device, dtype=dtype)
+
+        if ca_requires_grad:
+            grad_ca = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+            grad_ca_shot = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+        else:
+            grad_ca = torch.empty(0, device=device, dtype=dtype)
+            grad_ca_shot = torch.empty(0, device=device, dtype=dtype)
+
+        if cb_requires_grad:
+            grad_cb = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+            grad_cb_shot = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+        else:
+            grad_cb = torch.empty(0, device=device, dtype=dtype)
+            grad_cb_shot = torch.empty(0, device=device, dtype=dtype)
+
+        if ca_requires_grad or cb_requires_grad:
+            grad_eps = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+            grad_sigma = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+        else:
+            grad_eps = torch.empty(0, device=device, dtype=dtype)
+            grad_sigma = torch.empty(0, device=device, dtype=dtype)
+
+        empty_store = torch.empty(0, device=device, dtype=dtype)
+        backward_func = backend_utils.get_backend_function(
+            "maxwell_3d", "backward", accuracy, dtype, device
+        )
+        device_idx = (
+            device.index if device.type == "cuda" and device.index is not None else 0
+        )
+        effective_callback_freq = nt if backward_callback is None else callback_frequency
+        if effective_callback_freq <= 0:
+            effective_callback_freq = nt if nt > 0 else 1
+
+        for step in range(nt, 0, -effective_callback_freq):
+            step_nt = min(step, effective_callback_freq)
+            backward_func(
+                backend_utils.tensor_to_ptr(ca),
+                backend_utils.tensor_to_ptr(cb),
+                backend_utils.tensor_to_ptr(cq),
+                backend_utils.tensor_to_ptr(grad_r),
+                backend_utils.tensor_to_ptr(lambda_ex),
+                backend_utils.tensor_to_ptr(lambda_ey),
+                backend_utils.tensor_to_ptr(lambda_ez),
+                backend_utils.tensor_to_ptr(lambda_hx),
+                backend_utils.tensor_to_ptr(lambda_hy),
+                backend_utils.tensor_to_ptr(lambda_hz),
+                backend_utils.tensor_to_ptr(m_lambda_ey_z),
+                backend_utils.tensor_to_ptr(m_lambda_ez_y),
+                backend_utils.tensor_to_ptr(m_lambda_ez_x),
+                backend_utils.tensor_to_ptr(m_lambda_ex_z),
+                backend_utils.tensor_to_ptr(m_lambda_ex_y),
+                backend_utils.tensor_to_ptr(m_lambda_ey_x),
+                backend_utils.tensor_to_ptr(m_lambda_hz_y),
+                backend_utils.tensor_to_ptr(m_lambda_hy_z),
+                backend_utils.tensor_to_ptr(m_lambda_hx_z),
+                backend_utils.tensor_to_ptr(m_lambda_hz_x),
+                backend_utils.tensor_to_ptr(m_lambda_hy_x),
+                backend_utils.tensor_to_ptr(m_lambda_hx_y),
+                backend_utils.tensor_to_ptr(store_ex),
+                backend_utils.tensor_to_ptr(empty_store),
+                0,
+                backend_utils.tensor_to_ptr(store_ey),
+                backend_utils.tensor_to_ptr(empty_store),
+                0,
+                backend_utils.tensor_to_ptr(store_ez),
+                backend_utils.tensor_to_ptr(empty_store),
+                0,
+                backend_utils.tensor_to_ptr(store_curl_x),
+                backend_utils.tensor_to_ptr(empty_store),
+                0,
+                backend_utils.tensor_to_ptr(store_curl_y),
+                backend_utils.tensor_to_ptr(empty_store),
+                0,
+                backend_utils.tensor_to_ptr(store_curl_z),
+                backend_utils.tensor_to_ptr(empty_store),
+                0,
+                backend_utils.tensor_to_ptr(grad_f),
+                backend_utils.tensor_to_ptr(grad_ca),
+                backend_utils.tensor_to_ptr(grad_cb),
+                backend_utils.tensor_to_ptr(grad_eps),
+                backend_utils.tensor_to_ptr(grad_sigma),
+                backend_utils.tensor_to_ptr(grad_ca_shot),
+                backend_utils.tensor_to_ptr(grad_cb_shot),
+                backend_utils.tensor_to_ptr(az),
+                backend_utils.tensor_to_ptr(bz),
+                backend_utils.tensor_to_ptr(az_h),
+                backend_utils.tensor_to_ptr(bz_h),
+                backend_utils.tensor_to_ptr(ay),
+                backend_utils.tensor_to_ptr(by),
+                backend_utils.tensor_to_ptr(ay_h),
+                backend_utils.tensor_to_ptr(by_h),
+                backend_utils.tensor_to_ptr(ax),
+                backend_utils.tensor_to_ptr(bx),
+                backend_utils.tensor_to_ptr(ax_h),
+                backend_utils.tensor_to_ptr(bx_h),
+                backend_utils.tensor_to_ptr(kz),
+                backend_utils.tensor_to_ptr(kz_h),
+                backend_utils.tensor_to_ptr(ky),
+                backend_utils.tensor_to_ptr(ky_h),
+                backend_utils.tensor_to_ptr(kx),
+                backend_utils.tensor_to_ptr(kx_h),
+                backend_utils.tensor_to_ptr(sources_i),
+                backend_utils.tensor_to_ptr(receivers_i),
+                float(meta["rdz"]),
+                float(meta["rdy"]),
+                float(meta["rdx"]),
+                dt,
+                step_nt,
+                n_shots,
+                nz,
+                ny,
+                nx,
+                n_sources,
+                n_receivers,
+                step_ratio,
+                STORAGE_DEVICE,
+                shot_bytes_uncomp,
+                ca_requires_grad,
+                cb_requires_grad,
+                False,
+                False,
+                False,
+                step,
+                pml_z0,
+                pml_y0,
+                pml_x0,
+                pml_z1,
+                pml_y1,
+                pml_x1,
+                source_component_idx,
+                receiver_component_idx,
+                n_threads,
+                device_idx,
+            )
+
+            if backward_callback is not None:
+                callback_gradients = {}
+                if ca_requires_grad:
+                    callback_gradients["ca"] = grad_ca
+                if cb_requires_grad:
+                    callback_gradients["cb"] = grad_cb
+                if ca_requires_grad or cb_requires_grad:
+                    callback_gradients["epsilon"] = grad_eps
+                    callback_gradients["sigma"] = grad_sigma
+                backward_callback(
+                    CallbackState(
+                        dt=dt,
+                        step=step - 1,
+                        nt=nt,
+                        wavefields={
+                            "lambda_Ex": lambda_ex,
+                            "lambda_Ey": lambda_ey,
+                            "lambda_Ez": lambda_ez,
+                            "lambda_Hx": lambda_hx,
+                            "lambda_Hy": lambda_hy,
+                            "lambda_Hz": lambda_hz,
+                        },
+                        models=models,
+                        gradients=callback_gradients,
+                        fd_pad=list(fd_pad),
+                        pml_width=list(pml_width),
+                        is_backward=True,
+                    )
+                )
+
+        if n_sources > 0:
+            grad_f_flat = grad_f.reshape(nt * n_shots * n_sources)
+        else:
+            grad_f_flat = None
+
+        grad_ca_out = grad_ca.unsqueeze(0) if ca_requires_grad else None
+        grad_cb_out = grad_cb.unsqueeze(0) if cb_requires_grad else None
+        return (
+            grad_ca_out,
+            grad_cb_out,
+            None,
+            grad_f_flat,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
+def maxwell3d_c_cuda(
+    epsilon: torch.Tensor,
+    sigma: torch.Tensor,
+    mu: torch.Tensor,
+    grid_spacing: Union[float, Sequence[float]],
+    dt: float,
+    source_amplitude: Optional[torch.Tensor],
+    source_location: Optional[torch.Tensor],
+    receiver_location: Optional[torch.Tensor],
+    stencil: int,
+    pml_width: Union[int, Sequence[int]],
+    max_vel: Optional[float],
+    Ex_0: Optional[torch.Tensor],
+    Ey_0: Optional[torch.Tensor],
+    Ez_0: Optional[torch.Tensor],
+    Hx_0: Optional[torch.Tensor],
+    Hy_0: Optional[torch.Tensor],
+    Hz_0: Optional[torch.Tensor],
+    m_hz_y_0: Optional[torch.Tensor],
+    m_hy_z_0: Optional[torch.Tensor],
+    m_hx_z_0: Optional[torch.Tensor],
+    m_hz_x_0: Optional[torch.Tensor],
+    m_hy_x_0: Optional[torch.Tensor],
+    m_hx_y_0: Optional[torch.Tensor],
+    m_ey_z_0: Optional[torch.Tensor],
+    m_ez_y_0: Optional[torch.Tensor],
+    m_ez_x_0: Optional[torch.Tensor],
+    m_ex_z_0: Optional[torch.Tensor],
+    m_ex_y_0: Optional[torch.Tensor],
+    m_ey_x_0: Optional[torch.Tensor],
+    nt: Optional[int],
+    model_gradient_sampling_interval: int,
+    freq_taper_frac: float,
+    time_pad_frac: float,
+    time_taper: bool,
+    save_snapshots: Optional[bool],
+    forward_callback: Optional[Callback],
+    backward_callback: Optional[Callback],
+    callback_frequency: int,
+    source_component: str,
+    receiver_component: str,
+    storage_mode: str = "device",
+    storage_path: str = ".",
+    storage_compression: Union[bool, str] = False,
+    storage_bytes_limit_device: Optional[int] = None,
+    storage_bytes_limit_host: Optional[int] = None,
+    storage_chunk_steps: int = 0,
+    n_threads: Optional[int] = None,
+):
+    """3D C/CUDA forward propagation path with Python fallback for gradients."""
+    from . import backend_utils, staggered
+    from .padding import create_or_pad, zero_interior
+    import warnings
+
+    del (
+        storage_path,
+        storage_bytes_limit_device,
+        storage_bytes_limit_host,
+        storage_chunk_steps,
+        freq_taper_frac,
+        time_pad_frac,
+        time_taper,
+    )
+
+    if epsilon.ndim != 3:
+        raise RuntimeError("epsilon must be 3D")
+    if sigma.shape != epsilon.shape:
+        raise RuntimeError("sigma must have same shape as epsilon")
+    if mu.shape != epsilon.shape:
+        raise RuntimeError("mu must have same shape as epsilon")
+
+    storage_mode_str = str(storage_mode).lower()
+    if storage_mode_str not in {"device", "cpu", "disk", "none", "auto"}:
+        raise ValueError(
+            "storage_mode must be 'device', 'cpu', 'disk', 'none', or 'auto', "
+            f"but got {storage_mode!r}"
+        )
+
+    n_threads_val = 0
+    if n_threads is not None:
+        n_threads_val = int(n_threads)
+        if n_threads_val < 0:
+            raise ValueError("n_threads must be >= 0 when provided.")
+
+    storage_kind = _normalize_storage_compression(storage_compression)
+    requires_grad = epsilon.requires_grad or sigma.requires_grad
+    functorch_active = torch._C._are_functorch_transforms_active()
+
+    def _fallback_reason(reason: str):
+        fallback_storage_mode = storage_mode
+        if str(fallback_storage_mode).lower() in {"cpu", "disk", "auto"}:
+            fallback_storage_mode = "device"
+        warnings.warn(
+            f"{reason}; falling back to Python backend.",
+            RuntimeWarning,
+        )
+        return maxwell3d_python(
+            epsilon,
+            sigma,
+            mu,
+            grid_spacing,
+            dt,
+            source_amplitude,
+            source_location,
+            receiver_location,
+            stencil,
+            pml_width,
+            max_vel,
+            Ex_0,
+            Ey_0,
+            Ez_0,
+            Hx_0,
+            Hy_0,
+            Hz_0,
+            m_hz_y_0,
+            m_hy_z_0,
+            m_hx_z_0,
+            m_hz_x_0,
+            m_hy_x_0,
+            m_hx_y_0,
+            m_ey_z_0,
+            m_ez_y_0,
+            m_ez_x_0,
+            m_ex_z_0,
+            m_ex_y_0,
+            m_ey_x_0,
+            nt,
+            model_gradient_sampling_interval,
+            0.0,
+            0.0,
+            False,
+            save_snapshots,
+            forward_callback,
+            backward_callback,
+            callback_frequency,
+            source_component,
+            receiver_component,
+            storage_mode=fallback_storage_mode,
+            storage_compression=storage_compression,
+            n_threads=n_threads,
+        )
+
+    if not backend_utils.is_backend_available():
+        return _fallback_reason("C/CUDA backend library is unavailable")
+
+    if functorch_active:
+        return _fallback_reason(
+            "torch.func transforms are not supported for 3D C/CUDA backend"
+        )
+
+    if requires_grad:
+        if storage_kind != "none":
+            return _fallback_reason(
+                "3D C/CUDA gradient path currently requires storage_compression=False"
+            )
+        if storage_mode_str == "none":
+            return _fallback_reason(
+                "storage_mode='none' is incompatible with 3D gradient computation"
+            )
+        if storage_mode_str in {"cpu", "disk"}:
+            return _fallback_reason(
+                "3D C/CUDA gradient path currently supports storage_mode='device' or 'auto' only"
+            )
+        if storage_mode_str == "auto":
+            storage_mode_str = "device"
+    else:
+        if storage_kind != "none":
+            warnings.warn(
+                "3D C/CUDA forward path ignores storage_compression when gradients are not requested.",
+                RuntimeWarning,
+            )
+        if save_snapshots:
+            warnings.warn(
+                "save_snapshots is ignored in 3D C/CUDA forward-only path.",
+                RuntimeWarning,
+            )
+        if backward_callback is not None:
+            warnings.warn(
+                "backward_callback is ignored when model parameters do not require gradients.",
+                RuntimeWarning,
+            )
+
+    device = epsilon.device
+    dtype = epsilon.dtype
+    model_nz, model_ny, model_nx = epsilon.shape
+
+    grid_spacing_list = _normalize_grid_spacing_3d(grid_spacing)
+    dz, dy, dx = grid_spacing_list
+    pml_width_list = _normalize_pml_width_3d(pml_width)
+
+    if nt is None:
+        if source_amplitude is None:
+            raise ValueError("Either nt or source_amplitude must be provided")
+        nt = source_amplitude.shape[-1]
+    nt_steps = int(nt)
+
+    gradient_sampling_interval = int(model_gradient_sampling_interval)
+    if gradient_sampling_interval < 1:
+        gradient_sampling_interval = 1
+    if nt_steps > 0:
+        gradient_sampling_interval = min(gradient_sampling_interval, nt_steps)
+
+    if source_amplitude is not None and source_amplitude.numel() > 0:
+        n_shots = source_amplitude.shape[0]
+    elif source_location is not None and source_location.numel() > 0:
+        n_shots = source_location.shape[0]
+    elif receiver_location is not None and receiver_location.numel() > 0:
+        n_shots = receiver_location.shape[0]
+    else:
+        n_shots = 1
+
+    if max_vel is None:
+        max_vel = float((1.0 / torch.sqrt(epsilon * mu)).max().item()) * C0
+    pml_freq = 0.5 / dt
+
+    fd_pad = stencil // 2
+    fd_pad_list = [fd_pad, fd_pad - 1, fd_pad, fd_pad - 1, fd_pad, fd_pad - 1]
+    total_pad = [fd + pml for fd, pml in zip(fd_pad_list, pml_width_list)]
+
+    padded_nz = model_nz + total_pad[0] + total_pad[1]
+    padded_ny = model_ny + total_pad[2] + total_pad[3]
+    padded_nx = model_nx + total_pad[4] + total_pad[5]
+
+    padded_size = (padded_nz, padded_ny, padded_nx)
+    epsilon_padded = create_or_pad(
+        epsilon, total_pad, device, dtype, padded_size, mode="replicate"
+    )
+    sigma_padded = create_or_pad(
+        sigma, total_pad, device, dtype, padded_size, mode="replicate"
+    )
+    mu_padded = create_or_pad(mu, total_pad, device, dtype, padded_size, mode="replicate")
+
+    ca, cb, cq = prepare_parameters(epsilon_padded, sigma_padded, mu_padded, dt)
+    size_with_batch = (n_shots, padded_nz, padded_ny, padded_nx)
+
+    def init_wavefield(field_0: Optional[torch.Tensor]) -> torch.Tensor:
+        if field_0 is not None:
+            if field_0.ndim == 3:
+                field_0 = field_0[None, :, :, :].expand(n_shots, -1, -1, -1)
+            return create_or_pad(
+                field_0,
+                fd_pad_list,
+                device,
+                dtype,
+                size_with_batch,
+                mode="constant",
+            ).contiguous()
+        return torch.zeros(size_with_batch, device=device, dtype=dtype)
+
+    Ex = init_wavefield(Ex_0)
+    Ey = init_wavefield(Ey_0)
+    Ez = init_wavefield(Ez_0)
+    Hx = init_wavefield(Hx_0)
+    Hy = init_wavefield(Hy_0)
+    Hz = init_wavefield(Hz_0)
+
+    m_hz_y = init_wavefield(m_hz_y_0)
+    m_hy_z = init_wavefield(m_hy_z_0)
+    m_hx_z = init_wavefield(m_hx_z_0)
+    m_hz_x = init_wavefield(m_hz_x_0)
+    m_hy_x = init_wavefield(m_hy_x_0)
+    m_hx_y = init_wavefield(m_hx_y_0)
+    m_ey_z = init_wavefield(m_ey_z_0)
+    m_ez_y = init_wavefield(m_ez_y_0)
+    m_ez_x = init_wavefield(m_ez_x_0)
+    m_ex_z = init_wavefield(m_ex_z_0)
+    m_ex_y = init_wavefield(m_ex_y_0)
+    m_ey_x = init_wavefield(m_ey_x_0)
+
+    pml_aux = [
+        (m_hz_y, 1),
+        (m_hy_z, 0),
+        (m_hx_z, 0),
+        (m_hz_x, 2),
+        (m_hy_x, 2),
+        (m_hx_y, 1),
+        (m_ey_z, 0),
+        (m_ez_y, 1),
+        (m_ez_x, 2),
+        (m_ex_z, 0),
+        (m_ex_y, 1),
+        (m_ey_x, 2),
+    ]
+    for wf, dim in pml_aux:
+        zero_interior(wf, fd_pad_list, pml_width_list, dim)
+
+    pml_ab_profiles, pml_k_profiles = staggered.set_pml_profiles_3d(
+        pml_width=pml_width_list,
+        accuracy=stencil,
+        fd_pad=fd_pad_list,
+        dt=dt,
+        grid_spacing=grid_spacing_list,
+        max_vel=max_vel,
+        dtype=dtype,
+        device=device,
+        pml_freq=pml_freq,
+        nz=padded_nz,
+        ny=padded_ny,
+        nx=padded_nx,
+    )
+    (
+        az,
+        az_h,
+        ay,
+        ay_h,
+        ax,
+        ax_h,
+        bz,
+        bz_h,
+        by,
+        by_h,
+        bx,
+        bx_h,
+    ) = pml_ab_profiles
+    kz, kz_h, ky, ky_h, kx, kx_h = pml_k_profiles
+
+    az_flat = az.reshape(-1).contiguous()
+    bz_flat = bz.reshape(-1).contiguous()
+    az_h_flat = az_h.reshape(-1).contiguous()
+    bz_h_flat = bz_h.reshape(-1).contiguous()
+    ay_flat = ay.reshape(-1).contiguous()
+    by_flat = by.reshape(-1).contiguous()
+    ay_h_flat = ay_h.reshape(-1).contiguous()
+    by_h_flat = by_h.reshape(-1).contiguous()
+    ax_flat = ax.reshape(-1).contiguous()
+    bx_flat = bx.reshape(-1).contiguous()
+    ax_h_flat = ax_h.reshape(-1).contiguous()
+    bx_h_flat = bx_h.reshape(-1).contiguous()
+
+    kz_flat = kz.reshape(-1).contiguous()
+    kz_h_flat = kz_h.reshape(-1).contiguous()
+    ky_flat = ky.reshape(-1).contiguous()
+    ky_h_flat = ky_h.reshape(-1).contiguous()
+    kx_flat = kx.reshape(-1).contiguous()
+    kx_h_flat = kx_h.reshape(-1).contiguous()
+
+    flat_model_shape = padded_nz * padded_ny * padded_nx
+
+    if source_location is not None and source_location.numel() > 0:
+        source_z = source_location[..., 0] + total_pad[0]
+        source_y = source_location[..., 1] + total_pad[2]
+        source_x = source_location[..., 2] + total_pad[4]
+        sources_i = ((source_z * padded_ny + source_y) * padded_nx + source_x).long()
+        sources_i = sources_i.contiguous()
+        n_sources = source_location.shape[1]
+    else:
+        sources_i = torch.empty(0, device=device, dtype=torch.long)
+        n_sources = 0
+
+    if receiver_location is not None and receiver_location.numel() > 0:
+        receiver_z = receiver_location[..., 0] + total_pad[0]
+        receiver_y = receiver_location[..., 1] + total_pad[2]
+        receiver_x = receiver_location[..., 2] + total_pad[4]
+        receivers_i = (
+            (receiver_z * padded_ny + receiver_y) * padded_nx + receiver_x
+        ).long()
+        receivers_i = receivers_i.contiguous()
+        n_receivers = receiver_location.shape[1]
+    else:
+        receivers_i = torch.empty(0, device=device, dtype=torch.long)
+        n_receivers = 0
+
+    if n_sources > 0 and source_amplitude is not None and source_amplitude.numel() > 0:
+        source_coeff = -1.0 / (dx * dy * dz)
+        cb_flat = cb.reshape(1, flat_model_shape).expand(n_shots, -1)
+        cb_at_src = cb_flat.gather(1, sources_i)
+        f = source_amplitude.permute(2, 0, 1).contiguous()
+        f = (f * cb_at_src[None, :, :] * source_coeff).reshape(
+            nt_steps * n_shots * n_sources
+        )
+        f = f.contiguous()
+    else:
+        f = torch.empty(0, device=device, dtype=dtype)
+
+    if n_receivers > 0:
+        receiver_amplitudes = torch.zeros(
+            nt_steps, n_shots, n_receivers, device=device, dtype=dtype
+        )
+    else:
+        receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
+
+    ca = ca[None, :, :, :].contiguous()
+    cb = cb[None, :, :, :].contiguous()
+    cq = cq[None, :, :, :].contiguous()
+
+    callback_models = {
+        "epsilon": epsilon_padded,
+        "sigma": sigma_padded,
+        "mu": mu_padded,
+        "ca": ca,
+        "cb": cb,
+        "cq": cq,
+    }
+
+    pml_z0 = fd_pad_list[0] + pml_width_list[0]
+    pml_z1 = padded_nz - fd_pad_list[1] - pml_width_list[1]
+    pml_y0 = fd_pad_list[2] + pml_width_list[2]
+    pml_y1 = padded_ny - fd_pad_list[3] - pml_width_list[3]
+    pml_x0 = fd_pad_list[4] + pml_width_list[4]
+    pml_x1 = padded_nx - fd_pad_list[5] - pml_width_list[5]
+
+    source_component_idx = _COMPONENT_TO_INDEX_3D[source_component]
+    receiver_component_idx = _COMPONENT_TO_INDEX_3D[receiver_component]
+    if requires_grad:
+        try:
+            _ = backend_utils.get_backend_function(
+                "maxwell_3d", "forward_with_storage", stencil, dtype, device
+            )
+            _ = backend_utils.get_backend_function(
+                "maxwell_3d", "backward", stencil, dtype, device
+            )
+        except (RuntimeError, AttributeError, TypeError) as e:
+            return _fallback_reason(f"3D C/CUDA backward symbols are unavailable ({e})")
+
+        meta = {
+            "dt": dt,
+            "nt": nt_steps,
+            "n_shots": n_shots,
+            "nz": padded_nz,
+            "ny": padded_ny,
+            "nx": padded_nx,
+            "n_sources": n_sources,
+            "n_receivers": n_receivers,
+            "step_ratio": gradient_sampling_interval,
+            "accuracy": stencil,
+            "pml_z0": pml_z0,
+            "pml_y0": pml_y0,
+            "pml_x0": pml_x0,
+            "pml_z1": pml_z1,
+            "pml_y1": pml_y1,
+            "pml_x1": pml_x1,
+            "source_component_idx": source_component_idx,
+            "receiver_component_idx": receiver_component_idx,
+            "fd_pad": tuple(fd_pad_list),
+            "pml_width": tuple(pml_width_list),
+            "models": callback_models,
+            "forward_callback": forward_callback,
+            "backward_callback": backward_callback,
+            "callback_frequency": callback_frequency,
+            "n_threads": n_threads_val,
+            "grid_spacing": (dz, dy, dx),
+            "rdz": 1.0 / dz,
+            "rdy": 1.0 / dy,
+            "rdx": 1.0 / dx,
+        }
+
+        outputs = Maxwell3DForwardFunc.apply(
+            ca,
+            cb,
+            cq,
+            f,
+            (
+                az_flat,
+                bz_flat,
+                az_h_flat,
+                bz_h_flat,
+                ay_flat,
+                by_flat,
+                ay_h_flat,
+                by_h_flat,
+                ax_flat,
+                bx_flat,
+                ax_h_flat,
+                bx_h_flat,
+                kz_flat,
+                kz_h_flat,
+                ky_flat,
+                ky_h_flat,
+                kx_flat,
+                kx_h_flat,
+            ),
+            (sources_i, receivers_i),
+            (
+                Ex,
+                Ey,
+                Ez,
+                Hx,
+                Hy,
+                Hz,
+                m_hz_y,
+                m_hy_z,
+                m_hx_z,
+                m_hz_x,
+                m_hy_x,
+                m_hx_y,
+                m_ey_z,
+                m_ez_y,
+                m_ez_x,
+                m_ex_z,
+                m_ex_y,
+                m_ey_x,
+            ),
+            meta,
+        )
+        (
+            Ex,
+            Ey,
+            Ez,
+            Hx,
+            Hy,
+            Hz,
+            m_hz_y,
+            m_hy_z,
+            m_hx_z,
+            m_hz_x,
+            m_hy_x,
+            m_hx_y,
+            m_ey_z,
+            m_ez_y,
+            m_ez_x,
+            m_ex_z,
+            m_ex_y,
+            m_ey_x,
+            receiver_amplitudes,
+        ) = outputs
+    else:
+        try:
+            forward_func = backend_utils.get_backend_function(
+                "maxwell_3d", "forward", stencil, dtype, device
+            )
+        except (RuntimeError, AttributeError, TypeError) as e:
+            return _fallback_reason(f"3D C/CUDA forward symbol is unavailable ({e})")
+
+        device_idx = (
+            device.index if device.type == "cuda" and device.index is not None else 0
+        )
+        effective_callback_freq = nt_steps if forward_callback is None else callback_frequency
+        if effective_callback_freq <= 0:
+            effective_callback_freq = nt_steps if nt_steps > 0 else 1
+
+        for step in range(0, nt_steps, effective_callback_freq):
+            if forward_callback is not None:
+                callback_wavefields = {
+                    "Ex": Ex,
+                    "Ey": Ey,
+                    "Ez": Ez,
+                    "Hx": Hx,
+                    "Hy": Hy,
+                    "Hz": Hz,
+                    "m_hz_y": m_hz_y,
+                    "m_hy_z": m_hy_z,
+                    "m_hx_z": m_hx_z,
+                    "m_hz_x": m_hz_x,
+                    "m_hy_x": m_hy_x,
+                    "m_hx_y": m_hx_y,
+                    "m_ey_z": m_ey_z,
+                    "m_ez_y": m_ez_y,
+                    "m_ez_x": m_ez_x,
+                    "m_ex_z": m_ex_z,
+                    "m_ex_y": m_ex_y,
+                    "m_ey_x": m_ey_x,
+                }
+                forward_callback(
+                    CallbackState(
+                        dt=dt,
+                        step=step,
+                        nt=nt_steps,
+                        wavefields=callback_wavefields,
+                        models=callback_models,
+                        gradients=None,
+                        fd_pad=fd_pad_list,
+                        pml_width=pml_width_list,
+                        is_backward=False,
+                        grid_spacing=[dz, dy, dx],
+                    )
+                )
+
+            step_nt = min(nt_steps - step, effective_callback_freq)
+            forward_func(
+                backend_utils.tensor_to_ptr(ca),
+                backend_utils.tensor_to_ptr(cb),
+                backend_utils.tensor_to_ptr(cq),
+                backend_utils.tensor_to_ptr(f),
+                backend_utils.tensor_to_ptr(Ex),
+                backend_utils.tensor_to_ptr(Ey),
+                backend_utils.tensor_to_ptr(Ez),
+                backend_utils.tensor_to_ptr(Hx),
+                backend_utils.tensor_to_ptr(Hy),
+                backend_utils.tensor_to_ptr(Hz),
+                backend_utils.tensor_to_ptr(m_hz_y),
+                backend_utils.tensor_to_ptr(m_hy_z),
+                backend_utils.tensor_to_ptr(m_hx_z),
+                backend_utils.tensor_to_ptr(m_hz_x),
+                backend_utils.tensor_to_ptr(m_hy_x),
+                backend_utils.tensor_to_ptr(m_hx_y),
+                backend_utils.tensor_to_ptr(m_ey_z),
+                backend_utils.tensor_to_ptr(m_ez_y),
+                backend_utils.tensor_to_ptr(m_ez_x),
+                backend_utils.tensor_to_ptr(m_ex_z),
+                backend_utils.tensor_to_ptr(m_ex_y),
+                backend_utils.tensor_to_ptr(m_ey_x),
+                backend_utils.tensor_to_ptr(receiver_amplitudes),
+                backend_utils.tensor_to_ptr(az_flat),
+                backend_utils.tensor_to_ptr(bz_flat),
+                backend_utils.tensor_to_ptr(az_h_flat),
+                backend_utils.tensor_to_ptr(bz_h_flat),
+                backend_utils.tensor_to_ptr(ay_flat),
+                backend_utils.tensor_to_ptr(by_flat),
+                backend_utils.tensor_to_ptr(ay_h_flat),
+                backend_utils.tensor_to_ptr(by_h_flat),
+                backend_utils.tensor_to_ptr(ax_flat),
+                backend_utils.tensor_to_ptr(bx_flat),
+                backend_utils.tensor_to_ptr(ax_h_flat),
+                backend_utils.tensor_to_ptr(bx_h_flat),
+                backend_utils.tensor_to_ptr(kz_flat),
+                backend_utils.tensor_to_ptr(kz_h_flat),
+                backend_utils.tensor_to_ptr(ky_flat),
+                backend_utils.tensor_to_ptr(ky_h_flat),
+                backend_utils.tensor_to_ptr(kx_flat),
+                backend_utils.tensor_to_ptr(kx_h_flat),
+                backend_utils.tensor_to_ptr(sources_i),
+                backend_utils.tensor_to_ptr(receivers_i),
+                1.0 / dz,
+                1.0 / dy,
+                1.0 / dx,
+                dt,
+                step_nt,
+                n_shots,
+                padded_nz,
+                padded_ny,
+                padded_nx,
+                n_sources,
+                n_receivers,
+                gradient_sampling_interval,
+                False,
+                False,
+                False,
+                step,
+                pml_z0,
+                pml_y0,
+                pml_x0,
+                pml_z1,
+                pml_y1,
+                pml_x1,
+                source_component_idx,
+                receiver_component_idx,
+                n_threads_val,
+                device_idx,
+            )
+
+    s = (
+        slice(None),
+        slice(
+            fd_pad_list[0], padded_nz - fd_pad_list[1] if fd_pad_list[1] > 0 else None
+        ),
+        slice(
+            fd_pad_list[2], padded_ny - fd_pad_list[3] if fd_pad_list[3] > 0 else None
+        ),
+        slice(
+            fd_pad_list[4], padded_nx - fd_pad_list[5] if fd_pad_list[5] > 0 else None
+        ),
+    )
+
+    return (
+        Ex[s],
+        Ey[s],
+        Ez[s],
+        Hx[s],
+        Hy[s],
+        Hz[s],
+        m_hz_y[s],
+        m_hy_z[s],
+        m_hx_z[s],
+        m_hz_x[s],
+        m_hy_x[s],
+        m_hx_y[s],
+        m_ey_z[s],
+        m_ez_y[s],
+        m_ez_x[s],
+        m_ex_z[s],
+        m_ex_y[s],
+        m_ey_x[s],
+        receiver_amplitudes,
+    )

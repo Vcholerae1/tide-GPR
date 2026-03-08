@@ -111,29 +111,52 @@ def zero_interior(
     in the PML regions. Setting the interior to zero allows the propagator
     to skip unnecessary PML calculations in those regions.
 
+
     Args:
-        tensor: The input tensor with shape [batch, ny, nx].
-        fd_pad: Finite difference padding. Can be an int or list [y0, y1, x0, x1].
-        pml_width: The width of PML regions [top, bottom, left, right].
-        dim: The spatial dimension to zero (0 for y, 1 for x).
+        tensor: The input tensor with shape [batch, ny, nx] or [batch, nz, ny, nx].
+        fd_pad: Finite difference padding. Can be an int or list.
+            2D: [y0, y1, x0, x1], 3D: [z0, z1, y0, y1, x0, x1].
+        pml_width: The width of PML regions.
+            2D: [y0, y1, x0, x1], 3D: [z0, z1, y0, y1, x0, x1].
+        dim: The spatial dimension to zero (2D: 0/1, 3D: 0/1/2).
 
     Returns:
         The tensor with interior region zeroed out.
     """
     shape = tensor.shape[1:]  # Spatial dimensions (without batch)
     ndim = len(shape)
+    if ndim not in {2, 3}:
+        raise ValueError(f"zero_interior expects 2D or 3D spatial tensors, got ndim={ndim}")
 
     if isinstance(fd_pad, int):
         fd_pad = [fd_pad] * 2 * ndim
+    if len(fd_pad) != 2 * ndim:
+        raise ValueError(
+            f"fd_pad length must be {2 * ndim} for ndim={ndim}, got {len(fd_pad)}."
+        )
+    if len(pml_width) != 2 * ndim:
+        raise ValueError(
+            f"pml_width length must be {2 * ndim} for ndim={ndim}, got {len(pml_width)}."
+        )
+    if dim < 0 or dim >= ndim:
+        raise ValueError(f"dim must be in [0, {ndim - 1}], got {dim}.")
 
     # Calculate interior slice for the specified dimension
     interior_start = fd_pad[dim * 2] + pml_width[dim * 2]
     interior_end = shape[dim] - pml_width[dim * 2 + 1] - fd_pad[dim * 2 + 1]
 
     # Zero out the interior
-    if dim == 0:  # y dimension
-        tensor[:, interior_start:interior_end, :].fill_(0)
-    else:  # x dimension
-        tensor[:, :, interior_start:interior_end].fill_(0)
+    if ndim == 2:
+        if dim == 0:  # y
+            tensor[:, interior_start:interior_end, :].fill_(0)
+        else:  # x
+            tensor[:, :, interior_start:interior_end].fill_(0)
+    else:
+        if dim == 0:  # z
+            tensor[:, interior_start:interior_end, :, :].fill_(0)
+        elif dim == 1:  # y
+            tensor[:, :, interior_start:interior_end, :].fill_(0)
+        else:  # x
+            tensor[:, :, :, interior_start:interior_end].fill_(0)
 
     return tensor

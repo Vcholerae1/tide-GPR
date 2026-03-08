@@ -61,7 +61,7 @@ n_shots_per_batch = batch_size
 
 assumed_freq = 600e6
 assumed_peak = 1.0 / assumed_freq
-obs_freq = 750e6
+obs_freq = 600e6
 obs_peak = 1.0 / obs_freq + 0.5 / obs_freq
 base_forward_freq = obs_freq
 filter_specs = {
