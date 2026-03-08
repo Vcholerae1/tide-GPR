@@ -14,5 +14,16 @@ cd tide
 uv build
 ```
 
+### Rebuild Native Backend Only (`csrc`)
+
+```bash
+cmake -S src/tide/csrc -B build/csrc -DCMAKE_BUILD_TYPE=Release
+cmake --build build/csrc -j
+```
+
+Notes:
+- Do not configure CMake inside `src/tide/csrc` directly.
+- Backend CMake now rejects in-source builds by design.
+
 ## Notes
 TODO: Document build options and environment variables.

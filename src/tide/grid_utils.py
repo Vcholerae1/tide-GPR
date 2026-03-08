@@ -1,10 +1,10 @@
 """Grid-related helpers for padding and boundary bookkeeping."""
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 
 def _normalize_grid_spacing_2d(
-    grid_spacing: Union[float, Sequence[float]],
+    grid_spacing: float | Sequence[float],
 ) -> list[float]:
     """Normalize 2D grid spacing to [dy, dx]."""
     if isinstance(grid_spacing, (int, float)):
@@ -20,7 +20,7 @@ def _normalize_grid_spacing_2d(
 
 
 def _normalize_grid_spacing_3d(
-    grid_spacing: Union[float, Sequence[float]],
+    grid_spacing: float | Sequence[float],
 ) -> list[float]:
     """Normalize 3D grid spacing to [dz, dy, dx]."""
     if isinstance(grid_spacing, (int, float)):
@@ -42,7 +42,7 @@ def _normalize_grid_spacing_3d(
 
 
 def _normalize_pml_width_2d(
-    pml_width: Union[int, Sequence[int]],
+    pml_width: int | Sequence[int],
 ) -> list[int]:
     """Normalize 2D PML width to [top, bottom, left, right]."""
     if isinstance(pml_width, int):
@@ -65,7 +65,7 @@ def _normalize_pml_width_2d(
 
 
 def _normalize_pml_width_3d(
-    pml_width: Union[int, Sequence[int]],
+    pml_width: int | Sequence[int],
 ) -> list[int]:
     """Normalize 3D PML width to [z0, z1, y0, y1, x0, x1]."""
     if isinstance(pml_width, int):

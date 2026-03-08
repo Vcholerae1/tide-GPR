@@ -1,43 +1,25 @@
-#undef DIFFY1
-#undef DIFFX1
-#undef DIFFYH1
-#undef DIFFXH1
-#undef DIFFY1_ADJ
-#undef DIFFX1_ADJ
-#undef DIFFYH1_ADJ
-#undef DIFFXH1_ADJ
-
-#ifdef STAGGERED_GRID_H
-#undef STAGGERED_GRID_H
-#endif
-#include "staggered_grid.h"
-
-#define TIDE_FD_PAD (tide::StencilTraits<TIDE_STENCIL>::FD_PAD)
-#define EY(dy, dx) ey[idx + (dy) * nx + (dx)]
-#define HX(dy, dx) hx[idx + (dy) * nx + (dx)]
-#define HZ(dy, dx) hz[idx + (dy) * nx + (dx)]
-
 namespace FUNC(Inst) {
+constexpr int kFdPad = ::tide::StencilTraits<TIDE_STENCIL>::FD_PAD;
 static inline void clear_work_halo(TIDE_DTYPE *__restrict const work,
                                    int64_t const shot_offset, int64_t const ny,
                                    int64_t const nx) {
   size_t const row_bytes = (size_t)nx * sizeof(TIDE_DTYPE);
 
-  for (int64_t y = 0; y < TIDE_FD_PAD; ++y) {
+  for (int64_t y = 0; y < kFdPad; ++y) {
     memset(work + shot_offset + y * nx, 0, row_bytes);
   }
-  for (int64_t y = ny - TIDE_FD_PAD + 1; y < ny; ++y) {
+  for (int64_t y = ny - kFdPad + 1; y < ny; ++y) {
     memset(work + shot_offset + y * nx, 0, row_bytes);
   }
 
-  for (int64_t y = TIDE_FD_PAD; y <= ny - TIDE_FD_PAD; ++y) {
+  for (int64_t y = kFdPad; y <= ny - kFdPad; ++y) {
     TIDE_DTYPE *row_ptr = work + shot_offset + y * nx;
     TIDE_OMP_SIMD
-    for (int64_t x = 0; x < TIDE_FD_PAD; ++x) {
+    for (int64_t x = 0; x < kFdPad; ++x) {
       row_ptr[x] = (TIDE_DTYPE)0;
     }
     TIDE_OMP_SIMD
-    for (int64_t x = nx - TIDE_FD_PAD + 1; x < nx; ++x) {
+    for (int64_t x = nx - kFdPad + 1; x < nx; ++x) {
       row_ptr[x] = (TIDE_DTYPE)0;
     }
   }
@@ -68,7 +50,7 @@ static void forward_kernel_h(
     int64_t const pml_y1, int64_t const pml_x0, int64_t const pml_x1,
     bool const cq_batched) {
 
-  GridParams<TIDE_DTYPE> params = {
+  ::tide::GridParams<TIDE_DTYPE> params = {
       ay,      ayh,   ax,    axh,        by,     byh,    bx,
       bxh,     ky,    kyh,   kx,         kxh,    rdy,    rdx,
       n_shots, ny,    nx,    shot_numel, pml_y0, pml_y1, pml_x0,
@@ -82,8 +64,8 @@ static void forward_kernel_h(
 
   TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    for (y = 0; y < ny - TIDE_FD_PAD + 1; ++y) {
-      for (x = 0; x < nx - TIDE_FD_PAD + 1; ++x) {
+    for (y = 0; y < ny - kFdPad + 1; ++y) {
+      for (x = 0; x < nx - kFdPad + 1; ++x) {
         forward_kernel_h_core<TIDE_DTYPE, TIDE_STENCIL>(
             params, cq, ey, hx, hz, m_ey_x, m_ey_z, y, x, shot_idx);
       }
@@ -123,7 +105,7 @@ static void forward_kernel_e_with_storage(
     bool const cb_requires_grad, TIDE_DTYPE *__restrict const ey_store,
     TIDE_DTYPE *__restrict const curl_h_store) {
 
-  GridParams<TIDE_DTYPE> params = {
+  ::tide::GridParams<TIDE_DTYPE> params = {
       ay,      ayh,        ax,         axh,        by,     byh,    bx,
       bxh,     ky,         kyh,        kx,         kxh,    rdy,    rdx,
       n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
@@ -137,8 +119,8 @@ static void forward_kernel_e_with_storage(
 
   TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    for (y = 0; y < ny - TIDE_FD_PAD + 1; ++y) {
-      for (x = 0; x < nx - TIDE_FD_PAD + 1; ++x) {
+    for (y = 0; y < ny - kFdPad + 1; ++y) {
+      for (x = 0; x < nx - kFdPad + 1; ++x) {
         forward_kernel_e_with_storage_core<TIDE_DTYPE, TIDE_DTYPE,
                                            TIDE_STENCIL>(
             params, ca, cb, hx, hz, ey, m_hx_z, m_hz_x, ey_store, curl_h_store,
@@ -173,7 +155,7 @@ static void forward_kernel_e_with_storage_bf16(
     bool const cb_requires_grad, tide_bfloat16 *__restrict const ey_store,
     tide_bfloat16 *__restrict const curl_h_store) {
 
-  GridParams<TIDE_DTYPE> params = {
+  ::tide::GridParams<TIDE_DTYPE> params = {
       ay,      ayh,        ax,         axh,        by,     byh,    bx,
       bxh,     ky,         kyh,        kx,         kxh,    rdy,    rdx,
       n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
@@ -187,8 +169,8 @@ static void forward_kernel_e_with_storage_bf16(
 
   TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    for (y = 0; y < ny - TIDE_FD_PAD + 1; ++y) {
-      for (x = 0; x < nx - TIDE_FD_PAD + 1; ++x) {
+    for (y = 0; y < ny - kFdPad + 1; ++y) {
+      for (x = 0; x < nx - kFdPad + 1; ++x) {
         forward_kernel_e_with_storage_core<TIDE_DTYPE, tide_bfloat16,
                                            TIDE_STENCIL>(
             params, ca, cb, hx, hz, ey, m_hx_z, m_hz_x, ey_store, curl_h_store,
@@ -555,7 +537,7 @@ static void backward_kernel_lambda_h(
   (void)work_x;
   (void)work_z; // No longer needed with new formulation
 
-  GridParams<TIDE_DTYPE> params = {
+  ::tide::GridParams<TIDE_DTYPE> params = {
       ay,     ayh,    ax,     axh,    by,    byh,        bx,   bxh, ky,
       kyh,    kx,     kxh,    rdy,    rdx,   n_shots,    ny,   nx,  shot_numel,
       pml_y0, pml_y1, pml_x0, pml_x1, false, cb_batched, false};
@@ -568,8 +550,8 @@ static void backward_kernel_lambda_h(
 
   TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    for (y = 0; y < ny - TIDE_FD_PAD + 1; ++y) {
-      for (x = 0; x < nx - TIDE_FD_PAD + 1; ++x) {
+    for (y = 0; y < ny - kFdPad + 1; ++y) {
+      for (x = 0; x < nx - kFdPad + 1; ++x) {
         backward_kernel_lambda_h_core<TIDE_DTYPE, TIDE_STENCIL>(
             params, cb, lambda_ey, lambda_hx, lambda_hz, m_lambda_ey_x,
             m_lambda_ey_z, y, x, shot_idx);
@@ -626,7 +608,7 @@ static void backward_kernel_lambda_e_with_grad(
   (void)work_x;
   (void)work_z; // No longer needed with new formulation
 
-  GridParams<TIDE_DTYPE> params = {
+  ::tide::GridParams<TIDE_DTYPE> params = {
       ay,      ayh,        ax,    axh,        by,     byh,    bx,
       bxh,     ky,         kyh,   kx,         kxh,    rdy,    rdx,
       n_shots, ny,         nx,    shot_numel, pml_y0, pml_y1, pml_x0,
@@ -640,8 +622,8 @@ static void backward_kernel_lambda_e_with_grad(
 
   TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    for (y = 0; y < ny - TIDE_FD_PAD + 1; ++y) {
-      for (x = 0; x < nx - TIDE_FD_PAD + 1; ++x) {
+    for (y = 0; y < ny - kFdPad + 1; ++y) {
+      for (x = 0; x < nx - kFdPad + 1; ++x) {
         backward_kernel_lambda_e_with_grad_core<TIDE_DTYPE, TIDE_DTYPE,
                                                 TIDE_STENCIL>(
             params, ca, cq, lambda_hx, lambda_hz, lambda_ey, m_lambda_hx_z,
@@ -685,7 +667,7 @@ static void backward_kernel_lambda_e_with_grad_bf16(
   (void)work_x;
   (void)work_z; // No longer needed with new formulation
 
-  GridParams<TIDE_DTYPE> params = {
+  ::tide::GridParams<TIDE_DTYPE> params = {
       ay,      ayh,        ax,    axh,        by,     byh,    bx,
       bxh,     ky,         kyh,   kx,         kxh,    rdy,    rdx,
       n_shots, ny,         nx,    shot_numel, pml_y0, pml_y1, pml_x0,
@@ -699,8 +681,8 @@ static void backward_kernel_lambda_e_with_grad_bf16(
 
   TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    for (y = 0; y < ny - TIDE_FD_PAD + 1; ++y) {
-      for (x = 0; x < nx - TIDE_FD_PAD + 1; ++x) {
+    for (y = 0; y < ny - kFdPad + 1; ++y) {
+      for (x = 0; x < nx - kFdPad + 1; ++x) {
         backward_kernel_lambda_e_with_grad_core<TIDE_DTYPE, tide_bfloat16,
                                                 TIDE_STENCIL>(
             params, ca, cq, lambda_hx, lambda_hz, lambda_ey, m_lambda_hx_z,
@@ -722,10 +704,10 @@ static void inverse_kernel_e_and_curl(
     int64_t const pml_y1, int64_t const pml_x0, int64_t const pml_x1,
     bool const ca_batched, bool const cb_batched) {
 
-  int64_t const y0 = MAX(TIDE_FD_PAD, pml_y0);
-  int64_t const y1 = MIN(ny - TIDE_FD_PAD + 1, pml_y1);
-  int64_t const x0 = MAX(TIDE_FD_PAD, pml_x0);
-  int64_t const x1 = MIN(nx - TIDE_FD_PAD + 1, pml_x1);
+  int64_t const y0 = tide_max<int64_t>(kFdPad, pml_y0);
+  int64_t const y1 = tide_min<int64_t>(ny - kFdPad + 1, pml_y1);
+  int64_t const x0 = tide_max<int64_t>(kFdPad, pml_x0);
+  int64_t const x1 = tide_min<int64_t>(nx - kFdPad + 1, pml_x1);
 
   TIDE_OMP_INDEX shot_idx;
   TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
@@ -738,13 +720,20 @@ static void inverse_kernel_e_and_curl(
     TIDE_OMP_SIMD_COLLAPSE2
     for (int64_t y = y0; y < y1; ++y) {
       for (int64_t x = x0; x < x1; ++x) {
-        int64_t const idx = IDX(y, x);
+        int64_t const idx = tide_idx_2d(y, x, nx);
         int64_t const store_idx = shot_offset + idx;
         TIDE_DTYPE const ca_val = ca_ptr[idx];
         TIDE_DTYPE const cb_val = cb_ptr[idx];
-
-        TIDE_DTYPE const dhz_dx = DIFFX1(HZ);
-        TIDE_DTYPE const dhx_dz = DIFFY1(HX);
+        auto hz_acc = [&](int64_t base, int yy, int xx) {
+          return hz[base + yy * nx + xx];
+        };
+        auto hx_acc = [&](int64_t base, int yy, int xx) {
+          return hx[base + yy * nx + xx];
+        };
+        TIDE_DTYPE const dhz_dx = tide::DiffForward<TIDE_STENCIL>::diff_x1(
+            hz_acc, shot_offset, (int)y, (int)x, (int)nx, rdx);
+        TIDE_DTYPE const dhx_dz = tide::DiffForward<TIDE_STENCIL>::diff_y1(
+            hx_acc, shot_offset, (int)y, (int)x, (int)nx, rdy);
         TIDE_DTYPE const curl_h = dhz_dx - dhx_dz;
 
         curl_h_out[store_idx] = curl_h;
@@ -762,10 +751,10 @@ static void inverse_kernel_h(
     int64_t const shot_numel, int64_t const pml_y0, int64_t const pml_y1,
     int64_t const pml_x0, int64_t const pml_x1, bool const cq_batched) {
 
-  int64_t const y0 = MAX(TIDE_FD_PAD, pml_y0);
-  int64_t const y1 = MIN(ny - TIDE_FD_PAD + 1, pml_y1);
-  int64_t const x0 = MAX(TIDE_FD_PAD, pml_x0);
-  int64_t const x1 = MIN(nx - TIDE_FD_PAD + 1, pml_x1);
+  int64_t const y0 = tide_max<int64_t>(kFdPad, pml_y0);
+  int64_t const y1 = tide_min<int64_t>(ny - kFdPad + 1, pml_y1);
+  int64_t const x0 = tide_max<int64_t>(kFdPad, pml_x0);
+  int64_t const x1 = tide_min<int64_t>(nx - kFdPad + 1, pml_x1);
 
   TIDE_OMP_INDEX shot_idx;
   TIDE_OMP_PARALLEL_FOR_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
@@ -776,16 +765,21 @@ static void inverse_kernel_h(
     TIDE_OMP_SIMD_COLLAPSE2
     for (int64_t y = y0; y < y1; ++y) {
       for (int64_t x = x0; x < x1; ++x) {
-        int64_t const idx = IDX(y, x);
+        int64_t const idx = tide_idx_2d(y, x, nx);
         TIDE_DTYPE const cq_val = cq_ptr[idx];
 
-        if (y < ny - TIDE_FD_PAD) {
-          TIDE_DTYPE const dey_dz = DIFFYH1(EY);
-          HX(0, 0) += cq_val * dey_dz;
+        auto ey_acc = [&](int64_t base, int yy, int xx) {
+          return ey[base + yy * nx + xx];
+        };
+        if (y < ny - kFdPad) {
+          TIDE_DTYPE const dey_dz = tide::DiffForward<TIDE_STENCIL>::diff_yh1(
+              ey_acc, shot_offset, (int)y, (int)x, (int)nx, rdy);
+          hx[shot_offset + idx] += cq_val * dey_dz;
         }
-        if (x < nx - TIDE_FD_PAD) {
-          TIDE_DTYPE const dey_dx = DIFFXH1(EY);
-          HZ(0, 0) -= cq_val * dey_dx;
+        if (x < nx - kFdPad) {
+          TIDE_DTYPE const dey_dx = tide::DiffForward<TIDE_STENCIL>::diff_xh1(
+              ey_acc, shot_offset, (int)y, (int)x, (int)nx, rdx);
+          hz[shot_offset + idx] -= cq_val * dey_dx;
         }
       }
     }
@@ -1040,7 +1034,6 @@ extern "C"
 #endif
 }
 
-#undef TIDE_FD_PAD
 #undef EY
 #undef HX
 #undef HZ

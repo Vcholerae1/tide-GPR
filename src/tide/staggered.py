@@ -1,5 +1,3 @@
-from typing import Tuple
-
 import torch
 
 from . import utils
@@ -156,7 +154,7 @@ def setup_pml_profiles_1d(
         ones = torch.ones(n, device=device, dtype=dtype)
         return zeros, zeros, zeros, zeros, ones, ones
 
-    def _profiles(start: float) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _profiles(start: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = torch.arange(n, device=device, dtype=dtype) + start
         left_start = float(pml_width0)
         right_start = float(n - 1 - pml_width1)

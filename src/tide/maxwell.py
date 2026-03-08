@@ -1,6 +1,7 @@
 import itertools
 import warnings
-from typing import Any, Callable, Literal, Optional, Sequence, Union
+from collections.abc import Callable, Sequence
+from typing import Any, Literal
 
 import torch
 
@@ -57,14 +58,14 @@ def _get_ctx_handle(handle: int) -> dict[str, Any]:
         raise RuntimeError(f"Unknown context handle: {handle}") from exc
 
 
-def _release_ctx_handle(handle: Optional[int]) -> None:
+def _release_ctx_handle(handle: int | None) -> None:
     if handle is None:
         return
     _CTX_HANDLE_REGISTRY.pop(handle, None)
 
 
 def _init_tm_wavefield(
-    field_0: Optional[torch.Tensor],
+    field_0: torch.Tensor | None,
     *,
     n_shots: int,
     size_with_batch: tuple[int, int, int],
@@ -124,9 +125,9 @@ class MaxwellTM(torch.nn.Module):
         epsilon: torch.Tensor,
         sigma: torch.Tensor,
         mu: torch.Tensor,
-        grid_spacing: Union[float, Sequence[float]],
-        epsilon_requires_grad: Optional[bool] = None,
-        sigma_requires_grad: Optional[bool] = None,
+        grid_spacing: float | Sequence[float],
+        epsilon_requires_grad: bool | None = None,
+        sigma_requires_grad: bool | None = None,
     ) -> None:
         super().__init__()
         if epsilon_requires_grad is not None and not isinstance(
@@ -170,34 +171,34 @@ class MaxwellTM(torch.nn.Module):
     def forward(
         self,
         dt: float,
-        source_amplitude: Optional[torch.Tensor],  # [shot,source,time]
-        source_location: Optional[torch.Tensor],  # [shot,source,2]
-        receiver_location: Optional[torch.Tensor],  # [shot,receiver,2]
+        source_amplitude: torch.Tensor | None,  # [shot,source,time]
+        source_location: torch.Tensor | None,  # [shot,source,2]
+        receiver_location: torch.Tensor | None,  # [shot,receiver,2]
         stencil: int = 2,
-        pml_width: Union[int, Sequence[int]] = 20,
-        max_vel: Optional[float] = None,
-        Ey_0: Optional[torch.Tensor] = None,
-        Hx_0: Optional[torch.Tensor] = None,
-        Hz_0: Optional[torch.Tensor] = None,
-        m_Ey_x: Optional[torch.Tensor] = None,
-        m_Ey_z: Optional[torch.Tensor] = None,
-        m_Hx_z: Optional[torch.Tensor] = None,
-        m_Hz_x: Optional[torch.Tensor] = None,
-        nt: Optional[int] = None,
+        pml_width: int | Sequence[int] = 20,
+        max_vel: float | None = None,
+        Ey_0: torch.Tensor | None = None,
+        Hx_0: torch.Tensor | None = None,
+        Hz_0: torch.Tensor | None = None,
+        m_Ey_x: torch.Tensor | None = None,
+        m_Ey_z: torch.Tensor | None = None,
+        m_Hx_z: torch.Tensor | None = None,
+        m_Hz_x: torch.Tensor | None = None,
+        nt: int | None = None,
         model_gradient_sampling_interval: int = 1,
         freq_taper_frac: float = 0.0,
         time_pad_frac: float = 0.0,
         time_taper: bool = False,
-        save_snapshots: Optional[bool] = None,
-        forward_callback: Optional[Callback] = None,
-        backward_callback: Optional[Callback] = None,
+        save_snapshots: bool | None = None,
+        forward_callback: Callback | None = None,
+        backward_callback: Callback | None = None,
         callback_frequency: int = 1,
-        python_backend: Union[bool, str] = False,
+        python_backend: bool | str = False,
         storage_mode: str = "device",
         storage_path: str = ".",
-        storage_compression: Union[bool, str] = False,
-        storage_bytes_limit_device: Optional[int] = None,
-        storage_bytes_limit_host: Optional[int] = None,
+        storage_compression: bool | str = False,
+        storage_bytes_limit_device: int | None = None,
+        storage_bytes_limit_host: int | None = None,
         storage_chunk_steps: int = 0,
         compute_dtype: str = "fp32",
         mp_mode: str = "throughput",
@@ -265,22 +266,22 @@ def _normalize_mp_mode(value: str) -> Literal["throughput", "balanced", "robust"
 
 
 def _scale_tm_states_to_nondim(
-    Ey_0: Optional[torch.Tensor],
-    Hx_0: Optional[torch.Tensor],
-    Hz_0: Optional[torch.Tensor],
-    m_Ey_x: Optional[torch.Tensor],
-    m_Ey_z: Optional[torch.Tensor],
-    m_Hx_z: Optional[torch.Tensor],
-    m_Hz_x: Optional[torch.Tensor],
+    Ey_0: torch.Tensor | None,
+    Hx_0: torch.Tensor | None,
+    Hz_0: torch.Tensor | None,
+    m_Ey_x: torch.Tensor | None,
+    m_Ey_z: torch.Tensor | None,
+    m_Hx_z: torch.Tensor | None,
+    m_Hz_x: torch.Tensor | None,
     ctx: NondimContext,
 ) -> tuple[
-    Optional[torch.Tensor],
-    Optional[torch.Tensor],
-    Optional[torch.Tensor],
-    Optional[torch.Tensor],
-    Optional[torch.Tensor],
-    Optional[torch.Tensor],
-    Optional[torch.Tensor],
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
 ]:
     return (
         Ey_0,
@@ -371,38 +372,38 @@ def maxwelltm(
     epsilon: torch.Tensor,
     sigma: torch.Tensor,
     mu: torch.Tensor,
-    grid_spacing: Union[float, Sequence[float]],
+    grid_spacing: float | Sequence[float],
     dt: float,
-    source_amplitude: Optional[torch.Tensor],
-    source_location: Optional[torch.Tensor],
-    receiver_location: Optional[torch.Tensor],
+    source_amplitude: torch.Tensor | None,
+    source_location: torch.Tensor | None,
+    receiver_location: torch.Tensor | None,
     stencil: int = 2,
-    pml_width: Union[int, Sequence[int]] = 20,
-    max_vel: Optional[float] = None,
-    Ey_0: Optional[torch.Tensor] = None,
-    Hx_0: Optional[torch.Tensor] = None,
-    Hz_0: Optional[torch.Tensor] = None,
-    m_Ey_x: Optional[torch.Tensor] = None,
-    m_Ey_z: Optional[torch.Tensor] = None,
-    m_Hx_z: Optional[torch.Tensor] = None,
-    m_Hz_x: Optional[torch.Tensor] = None,
-    nt: Optional[int] = None,
+    pml_width: int | Sequence[int] = 20,
+    max_vel: float | None = None,
+    Ey_0: torch.Tensor | None = None,
+    Hx_0: torch.Tensor | None = None,
+    Hz_0: torch.Tensor | None = None,
+    m_Ey_x: torch.Tensor | None = None,
+    m_Ey_z: torch.Tensor | None = None,
+    m_Hx_z: torch.Tensor | None = None,
+    m_Hz_x: torch.Tensor | None = None,
+    nt: int | None = None,
     model_gradient_sampling_interval: int = 1,
     freq_taper_frac: float = 0.0,
     time_pad_frac: float = 0.0,
     time_taper: bool = False,
-    save_snapshots: Optional[bool] = None,
-    forward_callback: Optional[Callback] = None,
-    backward_callback: Optional[Callback] = None,
+    save_snapshots: bool | None = None,
+    forward_callback: Callback | None = None,
+    backward_callback: Callback | None = None,
     callback_frequency: int = 1,
-    python_backend: Union[bool, str] = False,
+    python_backend: bool | str = False,
     storage_mode: str = "device",
     storage_path: str = ".",
-    storage_compression: Union[bool, str] = False,
-    storage_bytes_limit_device: Optional[int] = None,
-    storage_bytes_limit_host: Optional[int] = None,
+    storage_compression: bool | str = False,
+    storage_bytes_limit_device: int | None = None,
+    storage_bytes_limit_host: int | None = None,
     storage_chunk_steps: int = 0,
-    n_threads: Optional[int] = None,
+    n_threads: int | None = None,
     compute_dtype: str = "fp32",
     mp_mode: str = "throughput",
 ):
@@ -477,12 +478,6 @@ def maxwelltm(
     compute_dtype_norm = _normalize_compute_dtype(compute_dtype)
     mp_mode_norm = _normalize_mp_mode(mp_mode)
 
-    # MPS (Apple GPU) dtype guard: Metal does not support float64
-    if epsilon.device.type == "mps" and epsilon.dtype == torch.float64:
-        raise TypeError(
-            "Apple MPS backend does not support float64 (double precision). "
-            "Please use float32 tensors, e.g.: epsilon.float()"
-        )
     if compute_dtype_norm == "fp16" and epsilon.device.type != "cuda":
         raise TypeError(
             "compute_dtype='fp16' is currently supported only on CUDA devices."
@@ -553,7 +548,7 @@ def maxwelltm(
         nt_internal = source_amplitude_internal.shape[-1]
 
     # Optional nondimensional scaling for mixed precision path
-    nondim_ctx: Optional[NondimContext] = None
+    nondim_ctx: NondimContext | None = None
     epsilon_internal = epsilon
     sigma_internal = sigma
     mu_internal = mu
@@ -565,7 +560,7 @@ def maxwelltm(
     m_Ey_z_solver = m_Ey_z
     m_Hx_z_solver = m_Hx_z
     m_Hz_x_solver = m_Hz_x
-    grid_spacing_solver: Union[float, Sequence[float]] = grid_spacing
+    grid_spacing_solver: float | Sequence[float] = grid_spacing
     dt_solver = inner_dt
     max_vel_solver = max_vel_computed
     pml_eps_scale = None
@@ -583,8 +578,13 @@ def maxwelltm(
             nondim_ctx.dt_hat,
         )
 
-        if source_amplitude_internal is not None and source_amplitude_internal.numel() > 0:
-            source_amplitude_solver = source_amplitude_internal * nondim_ctx.source_scale
+        if (
+            source_amplitude_internal is not None
+            and source_amplitude_internal.numel() > 0
+        ):
+            source_amplitude_solver = (
+                source_amplitude_internal * nondim_ctx.source_scale
+            )
 
         (
             Ey_0_solver,
@@ -735,22 +735,22 @@ def maxwelltm(
     )
 
 
-_update_E_jit: Optional[Callable] = None
-_update_E_compile: Optional[Callable] = None
-_update_H_jit: Optional[Callable] = None
-_update_H_compile: Optional[Callable] = None
+_update_E_jit: Callable | None = None
+_update_E_compile: Callable | None = None
+_update_H_jit: Callable | None = None
+_update_H_compile: Callable | None = None
 
 # These will be set after the functions are defined
-_update_E_opt: Optional[Callable] = None
-_update_H_opt: Optional[Callable] = None
+_update_E_opt: Callable | None = None
+_update_H_opt: Callable | None = None
 
 
 def maxwell_func(
-    python_backend: Union[bool, str],
+    python_backend: bool | str,
     *args,
     compute_dtype: str = "fp32",
     mp_mode: str = "throughput",
-    pml_eps_scale: Optional[float] = None,
+    pml_eps_scale: float | None = None,
 ) -> tuple[
     torch.Tensor,  # Ey
     torch.Tensor,  # Hx
@@ -766,22 +766,17 @@ def maxwell_func(
     global _update_H_jit, _update_H_compile, _update_H_opt
 
     # Detect device from the first positional arg (epsilon tensor)
-    _device_type = args[0].device.type if len(args) > 0 and isinstance(args[0], torch.Tensor) else "cpu"
+    _device_type = (
+        args[0].device.type
+        if len(args) > 0 and isinstance(args[0], torch.Tensor)
+        else "cpu"
+    )
 
     # Check if we should use Python backend or C/CUDA backend
     use_python = python_backend
 
-    # MPS (Apple GPU): prefer the compiled Metal backend when available.
-    # Falls back to the Python/PyTorch backend only when Metal kernels are
-    # not compiled into the shared library.
-    if _device_type == "mps" and not use_python:
-        try:
-            from . import backend_utils
-
-            if not backend_utils.metal_available():
-                use_python = True
-        except ImportError:
-            use_python = True
+    if _device_type not in {"cpu", "cuda"} and not use_python:
+        use_python = True
 
     if not use_python:
         # Try to use C/CUDA backend
@@ -856,40 +851,40 @@ def maxwell_python(
     epsilon: torch.Tensor,
     sigma: torch.Tensor,
     mu: torch.Tensor,
-    grid_spacing: Union[float, Sequence[float]],
+    grid_spacing: float | Sequence[float],
     dt: float,
-    source_amplitude: Optional[torch.Tensor],
-    source_location: Optional[torch.Tensor],
-    receiver_location: Optional[torch.Tensor],
+    source_amplitude: torch.Tensor | None,
+    source_location: torch.Tensor | None,
+    receiver_location: torch.Tensor | None,
     stencil: int,
-    pml_width: Union[int, Sequence[int]],
-    max_vel: Optional[float],
-    Ey_0: Optional[torch.Tensor],
-    Hx_0: Optional[torch.Tensor],
-    Hz_0: Optional[torch.Tensor],
-    m_Ey_x_0: Optional[torch.Tensor],
-    m_Ey_z_0: Optional[torch.Tensor],
-    m_Hx_z_0: Optional[torch.Tensor],
-    m_Hz_x_0: Optional[torch.Tensor],
-    nt: Optional[int],
+    pml_width: int | Sequence[int],
+    max_vel: float | None,
+    Ey_0: torch.Tensor | None,
+    Hx_0: torch.Tensor | None,
+    Hz_0: torch.Tensor | None,
+    m_Ey_x_0: torch.Tensor | None,
+    m_Ey_z_0: torch.Tensor | None,
+    m_Hx_z_0: torch.Tensor | None,
+    m_Hz_x_0: torch.Tensor | None,
+    nt: int | None,
     model_gradient_sampling_interval: int,
     freq_taper_frac: float,
     time_pad_frac: float,
     time_taper: bool,
-    save_snapshots: Optional[bool],
-    forward_callback: Optional[Callback],
-    backward_callback: Optional[Callback],
+    save_snapshots: bool | None,
+    forward_callback: Callback | None,
+    backward_callback: Callback | None,
     callback_frequency: int,
     storage_mode: str = "device",
     storage_path: str = ".",
-    storage_compression: Union[bool, str] = False,
-    storage_bytes_limit_device: Optional[int] = None,
-    storage_bytes_limit_host: Optional[int] = None,
+    storage_compression: bool | str = False,
+    storage_bytes_limit_device: int | None = None,
+    storage_bytes_limit_host: int | None = None,
     storage_chunk_steps: int = 0,
-    n_threads: Optional[int] = None,
+    n_threads: int | None = None,
     compute_dtype: str = "fp32",
     mp_mode: str = "throughput",
-    pml_eps_scale: Optional[float] = None,
+    pml_eps_scale: float | None = None,
 ):
     """Performs the forward propagation of the 2D TM Maxwell equations.
 
@@ -1534,40 +1529,40 @@ def maxwell_c_cuda(
     epsilon: torch.Tensor,
     sigma: torch.Tensor,
     mu: torch.Tensor,
-    grid_spacing: Union[float, Sequence[float]],
+    grid_spacing: float | Sequence[float],
     dt: float,
-    source_amplitude: Optional[torch.Tensor],
-    source_location: Optional[torch.Tensor],
-    receiver_location: Optional[torch.Tensor],
+    source_amplitude: torch.Tensor | None,
+    source_location: torch.Tensor | None,
+    receiver_location: torch.Tensor | None,
     stencil: int,
-    pml_width: Union[int, Sequence[int]],
-    max_vel: Optional[float],
-    Ey_0: Optional[torch.Tensor],
-    Hx_0: Optional[torch.Tensor],
-    Hz_0: Optional[torch.Tensor],
-    m_Ey_x_0: Optional[torch.Tensor],
-    m_Ey_z_0: Optional[torch.Tensor],
-    m_Hx_z_0: Optional[torch.Tensor],
-    m_Hz_x_0: Optional[torch.Tensor],
-    nt: Optional[int],
+    pml_width: int | Sequence[int],
+    max_vel: float | None,
+    Ey_0: torch.Tensor | None,
+    Hx_0: torch.Tensor | None,
+    Hz_0: torch.Tensor | None,
+    m_Ey_x_0: torch.Tensor | None,
+    m_Ey_z_0: torch.Tensor | None,
+    m_Hx_z_0: torch.Tensor | None,
+    m_Hz_x_0: torch.Tensor | None,
+    nt: int | None,
     model_gradient_sampling_interval: int,
     freq_taper_frac: float,
     time_pad_frac: float,
     time_taper: bool,
-    save_snapshots: Optional[bool],
-    forward_callback: Optional[Callback],
-    backward_callback: Optional[Callback],
+    save_snapshots: bool | None,
+    forward_callback: Callback | None,
+    backward_callback: Callback | None,
     callback_frequency: int,
     storage_mode: str = "device",
     storage_path: str = ".",
-    storage_compression: Union[bool, str] = False,
-    storage_bytes_limit_device: Optional[int] = None,
-    storage_bytes_limit_host: Optional[int] = None,
+    storage_compression: bool | str = False,
+    storage_bytes_limit_device: int | None = None,
+    storage_bytes_limit_host: int | None = None,
     storage_chunk_steps: int = 0,
-    n_threads: Optional[int] = None,
+    n_threads: int | None = None,
     compute_dtype: str = "fp32",
     mp_mode: str = "throughput",
-    pml_eps_scale: Optional[float] = None,
+    pml_eps_scale: float | None = None,
 ):
     """Performs Maxwell propagation using C/CUDA backend.
 
@@ -1600,40 +1595,10 @@ def maxwell_c_cuda(
     _original_dtype = dtype
     model_ny, model_nx = epsilon.shape  # Original model dimensions
 
-    # MPS (Apple GPU) bridging: The Metal C bridge creates its own MTLBuffers
-    # internally, so we need tensors with valid CPU data_ptr() values.
-    # MPS tensor data_ptr() returns Metal GPU buffer handles that cannot be
-    # read from host code. Moving to CPU on Apple Silicon unified memory is
-    # near-zero-cost (metadata change only, no data copy).
     _original_device = device
-    # _backend_device: used for get_backend_function() symbol lookup.
-    # For MPS, tensors live on CPU but we dispatch to the _mps symbols.
     _backend_device = device
-    if device.type == "mps":
-        device = torch.device("cpu")
-        epsilon = epsilon.to(device)
-        sigma = sigma.to(device)
-        mu = mu.to(device)
-        if source_amplitude is not None:
-            source_amplitude = source_amplitude.to(device)
-        if source_location is not None:
-            source_location = source_location.to(device)
-        if receiver_location is not None:
-            receiver_location = receiver_location.to(device)
-        if Ey_0 is not None:
-            Ey_0 = Ey_0.to(device)
-        if Hx_0 is not None:
-            Hx_0 = Hx_0.to(device)
-        if Hz_0 is not None:
-            Hz_0 = Hz_0.to(device)
-        if m_Ey_x_0 is not None:
-            m_Ey_x_0 = m_Ey_x_0.to(device)
-        if m_Ey_z_0 is not None:
-            m_Ey_z_0 = m_Ey_z_0.to(device)
-        if m_Hx_z_0 is not None:
-            m_Hx_z_0 = m_Hx_z_0.to(device)
-        if m_Hz_x_0 is not None:
-            m_Hz_x_0 = m_Hz_x_0.to(device)
+    if device.type not in {"cpu", "cuda"}:
+        raise NotImplementedError("C/CUDA backend supports only cpu and cuda devices.")
 
     _ = mp_mode
 
@@ -2021,10 +1986,7 @@ def maxwell_c_cuda(
         "compute_dtype": compute_dtype,
     }
 
-    use_autograd_fn = (
-        requires_grad
-        and do_save_snapshots
-    ) or functorch_active
+    use_autograd_fn = (requires_grad and do_save_snapshots) or functorch_active
     if use_autograd_fn:
         # Use autograd Function for gradient computation
         result = MaxwellTMForwardFunc.apply(
@@ -2337,12 +2299,12 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         fd_pad: tuple[int, int, int, int],
         pml_width: tuple[int, int, int, int],
         models: dict,
-        forward_callback: Optional[Callback],
-        backward_callback: Optional[Callback],
+        forward_callback: Callback | None,
+        backward_callback: Callback | None,
         callback_frequency: int,
         storage_mode_str: str,
         storage_path: str,
-        storage_compression: Union[bool, str],
+        storage_compression: bool | str,
         Ey: torch.Tensor,
         Hx: torch.Tensor,
         Hz: torch.Tensor,
@@ -2814,7 +2776,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
     @staticmethod
     def backward(
         ctx: Any, *grad_outputs: torch.Tensor
-    ) -> tuple[Optional[torch.Tensor], ...]:
+    ) -> tuple[torch.Tensor | None, ...]:
         """Computes the gradients during the backward pass using ASM.
 
         Uses the Adjoint State Method (ASM) to compute gradients:
@@ -3065,9 +3027,13 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                         mu_req = models["mu"]
 
                         if models.get("compute_dtype", "fp32") == "fp16":
-                            ca_v, cb_v, _ = prepare_parameters_nondim(eps_req, sig_req, mu_req, dt)
+                            ca_v, cb_v, _ = prepare_parameters_nondim(
+                                eps_req, sig_req, mu_req, dt
+                            )
                         else:
-                            ca_v, cb_v, _ = prepare_parameters(eps_req, sig_req, mu_req, dt)
+                            ca_v, cb_v, _ = prepare_parameters(
+                                eps_req, sig_req, mu_req, dt
+                            )
 
                         vjp_tensors = []
                         vjp_grads = []
@@ -3190,7 +3156,9 @@ def _normalize_component_3d(component: str, *, name: str) -> str:
         raise TypeError(f"{name} must be a string, got {type(component).__name__}.")
     value = component.strip().lower()
     if value not in _COMPONENT_TO_INDEX_3D:
-        raise ValueError(f"{name} must be one of 'ex', 'ey', or 'ez', got {component!r}.")
+        raise ValueError(
+            f"{name} must be one of 'ex', 'ey', or 'ez', got {component!r}."
+        )
     return value
 
 
@@ -3206,9 +3174,9 @@ class Maxwell3D(torch.nn.Module):
         epsilon: torch.Tensor,
         sigma: torch.Tensor,
         mu: torch.Tensor,
-        grid_spacing: Union[float, Sequence[float]],
-        epsilon_requires_grad: Optional[bool] = None,
-        sigma_requires_grad: Optional[bool] = None,
+        grid_spacing: float | Sequence[float],
+        epsilon_requires_grad: bool | None = None,
+        sigma_requires_grad: bool | None = None,
     ) -> None:
         super().__init__()
         if epsilon_requires_grad is not None and not isinstance(
@@ -3248,49 +3216,49 @@ class Maxwell3D(torch.nn.Module):
     def forward(
         self,
         dt: float,
-        source_amplitude: Optional[torch.Tensor],
-        source_location: Optional[torch.Tensor],
-        receiver_location: Optional[torch.Tensor],
+        source_amplitude: torch.Tensor | None,
+        source_location: torch.Tensor | None,
+        receiver_location: torch.Tensor | None,
         stencil: int = 2,
-        pml_width: Union[int, Sequence[int]] = 20,
-        max_vel: Optional[float] = None,
-        Ex_0: Optional[torch.Tensor] = None,
-        Ey_0: Optional[torch.Tensor] = None,
-        Ez_0: Optional[torch.Tensor] = None,
-        Hx_0: Optional[torch.Tensor] = None,
-        Hy_0: Optional[torch.Tensor] = None,
-        Hz_0: Optional[torch.Tensor] = None,
-        m_hz_y: Optional[torch.Tensor] = None,
-        m_hy_z: Optional[torch.Tensor] = None,
-        m_hx_z: Optional[torch.Tensor] = None,
-        m_hz_x: Optional[torch.Tensor] = None,
-        m_hy_x: Optional[torch.Tensor] = None,
-        m_hx_y: Optional[torch.Tensor] = None,
-        m_ey_z: Optional[torch.Tensor] = None,
-        m_ez_y: Optional[torch.Tensor] = None,
-        m_ez_x: Optional[torch.Tensor] = None,
-        m_ex_z: Optional[torch.Tensor] = None,
-        m_ex_y: Optional[torch.Tensor] = None,
-        m_ey_x: Optional[torch.Tensor] = None,
-        nt: Optional[int] = None,
+        pml_width: int | Sequence[int] = 20,
+        max_vel: float | None = None,
+        Ex_0: torch.Tensor | None = None,
+        Ey_0: torch.Tensor | None = None,
+        Ez_0: torch.Tensor | None = None,
+        Hx_0: torch.Tensor | None = None,
+        Hy_0: torch.Tensor | None = None,
+        Hz_0: torch.Tensor | None = None,
+        m_hz_y: torch.Tensor | None = None,
+        m_hy_z: torch.Tensor | None = None,
+        m_hx_z: torch.Tensor | None = None,
+        m_hz_x: torch.Tensor | None = None,
+        m_hy_x: torch.Tensor | None = None,
+        m_hx_y: torch.Tensor | None = None,
+        m_ey_z: torch.Tensor | None = None,
+        m_ez_y: torch.Tensor | None = None,
+        m_ez_x: torch.Tensor | None = None,
+        m_ex_z: torch.Tensor | None = None,
+        m_ex_y: torch.Tensor | None = None,
+        m_ey_x: torch.Tensor | None = None,
+        nt: int | None = None,
         model_gradient_sampling_interval: int = 1,
         freq_taper_frac: float = 0.0,
         time_pad_frac: float = 0.0,
         time_taper: bool = False,
-        save_snapshots: Optional[bool] = None,
-        forward_callback: Optional[Callback] = None,
-        backward_callback: Optional[Callback] = None,
+        save_snapshots: bool | None = None,
+        forward_callback: Callback | None = None,
+        backward_callback: Callback | None = None,
         callback_frequency: int = 1,
         source_component: str = "ey",
         receiver_component: str = "ey",
-        python_backend: Union[bool, str] = False,
+        python_backend: bool | str = False,
         storage_mode: str = "device",
         storage_path: str = ".",
-        storage_compression: Union[bool, str] = False,
-        storage_bytes_limit_device: Optional[int] = None,
-        storage_bytes_limit_host: Optional[int] = None,
+        storage_compression: bool | str = False,
+        storage_bytes_limit_device: int | None = None,
+        storage_bytes_limit_host: int | None = None,
         storage_chunk_steps: int = 0,
-        n_threads: Optional[int] = None,
+        n_threads: int | None = None,
     ):
         assert isinstance(self.epsilon, torch.Tensor)
         assert isinstance(self.sigma, torch.Tensor)
@@ -3351,51 +3319,51 @@ def maxwell3d(
     epsilon: torch.Tensor,
     sigma: torch.Tensor,
     mu: torch.Tensor,
-    grid_spacing: Union[float, Sequence[float]],
+    grid_spacing: float | Sequence[float],
     dt: float,
-    source_amplitude: Optional[torch.Tensor],
-    source_location: Optional[torch.Tensor],
-    receiver_location: Optional[torch.Tensor],
+    source_amplitude: torch.Tensor | None,
+    source_location: torch.Tensor | None,
+    receiver_location: torch.Tensor | None,
     stencil: int = 2,
-    pml_width: Union[int, Sequence[int]] = 20,
-    max_vel: Optional[float] = None,
-    Ex_0: Optional[torch.Tensor] = None,
-    Ey_0: Optional[torch.Tensor] = None,
-    Ez_0: Optional[torch.Tensor] = None,
-    Hx_0: Optional[torch.Tensor] = None,
-    Hy_0: Optional[torch.Tensor] = None,
-    Hz_0: Optional[torch.Tensor] = None,
-    m_hz_y: Optional[torch.Tensor] = None,
-    m_hy_z: Optional[torch.Tensor] = None,
-    m_hx_z: Optional[torch.Tensor] = None,
-    m_hz_x: Optional[torch.Tensor] = None,
-    m_hy_x: Optional[torch.Tensor] = None,
-    m_hx_y: Optional[torch.Tensor] = None,
-    m_ey_z: Optional[torch.Tensor] = None,
-    m_ez_y: Optional[torch.Tensor] = None,
-    m_ez_x: Optional[torch.Tensor] = None,
-    m_ex_z: Optional[torch.Tensor] = None,
-    m_ex_y: Optional[torch.Tensor] = None,
-    m_ey_x: Optional[torch.Tensor] = None,
-    nt: Optional[int] = None,
+    pml_width: int | Sequence[int] = 20,
+    max_vel: float | None = None,
+    Ex_0: torch.Tensor | None = None,
+    Ey_0: torch.Tensor | None = None,
+    Ez_0: torch.Tensor | None = None,
+    Hx_0: torch.Tensor | None = None,
+    Hy_0: torch.Tensor | None = None,
+    Hz_0: torch.Tensor | None = None,
+    m_hz_y: torch.Tensor | None = None,
+    m_hy_z: torch.Tensor | None = None,
+    m_hx_z: torch.Tensor | None = None,
+    m_hz_x: torch.Tensor | None = None,
+    m_hy_x: torch.Tensor | None = None,
+    m_hx_y: torch.Tensor | None = None,
+    m_ey_z: torch.Tensor | None = None,
+    m_ez_y: torch.Tensor | None = None,
+    m_ez_x: torch.Tensor | None = None,
+    m_ex_z: torch.Tensor | None = None,
+    m_ex_y: torch.Tensor | None = None,
+    m_ey_x: torch.Tensor | None = None,
+    nt: int | None = None,
     model_gradient_sampling_interval: int = 1,
     freq_taper_frac: float = 0.0,
     time_pad_frac: float = 0.0,
     time_taper: bool = False,
-    save_snapshots: Optional[bool] = None,
-    forward_callback: Optional[Callback] = None,
-    backward_callback: Optional[Callback] = None,
+    save_snapshots: bool | None = None,
+    forward_callback: Callback | None = None,
+    backward_callback: Callback | None = None,
     callback_frequency: int = 1,
     source_component: str = "ey",
     receiver_component: str = "ey",
-    python_backend: Union[bool, str] = False,
+    python_backend: bool | str = False,
     storage_mode: str = "device",
     storage_path: str = ".",
-    storage_compression: Union[bool, str] = False,
-    storage_bytes_limit_device: Optional[int] = None,
-    storage_bytes_limit_host: Optional[int] = None,
+    storage_compression: bool | str = False,
+    storage_bytes_limit_device: int | None = None,
+    storage_bytes_limit_host: int | None = None,
     storage_chunk_steps: int = 0,
-    n_threads: Optional[int] = None,
+    n_threads: int | None = None,
 ):
     """3D Maxwell equations solver.
 
@@ -3414,35 +3382,55 @@ def maxwell3d(
     if mu.shape != epsilon.shape:
         raise RuntimeError("mu must have same shape as epsilon")
 
-    source_component = _normalize_component_3d(source_component, name="source_component")
+    source_component = _normalize_component_3d(
+        source_component, name="source_component"
+    )
     receiver_component = _normalize_component_3d(
         receiver_component, name="receiver_component"
     )
 
     if source_location is not None and source_location.numel() > 0:
-        if source_location[..., 0].min() < 0 or source_location[..., 0].max() >= epsilon.shape[-3]:
+        if (
+            source_location[..., 0].min() < 0
+            or source_location[..., 0].max() >= epsilon.shape[-3]
+        ):
             raise RuntimeError(
                 f"Source location dim 0 must be in [0, {epsilon.shape[-3] - 1}]"
             )
-        if source_location[..., 1].min() < 0 or source_location[..., 1].max() >= epsilon.shape[-2]:
+        if (
+            source_location[..., 1].min() < 0
+            or source_location[..., 1].max() >= epsilon.shape[-2]
+        ):
             raise RuntimeError(
                 f"Source location dim 1 must be in [0, {epsilon.shape[-2] - 1}]"
             )
-        if source_location[..., 2].min() < 0 or source_location[..., 2].max() >= epsilon.shape[-1]:
+        if (
+            source_location[..., 2].min() < 0
+            or source_location[..., 2].max() >= epsilon.shape[-1]
+        ):
             raise RuntimeError(
                 f"Source location dim 2 must be in [0, {epsilon.shape[-1] - 1}]"
             )
 
     if receiver_location is not None and receiver_location.numel() > 0:
-        if receiver_location[..., 0].min() < 0 or receiver_location[..., 0].max() >= epsilon.shape[-3]:
+        if (
+            receiver_location[..., 0].min() < 0
+            or receiver_location[..., 0].max() >= epsilon.shape[-3]
+        ):
             raise RuntimeError(
                 f"Receiver location dim 0 must be in [0, {epsilon.shape[-3] - 1}]"
             )
-        if receiver_location[..., 1].min() < 0 or receiver_location[..., 1].max() >= epsilon.shape[-2]:
+        if (
+            receiver_location[..., 1].min() < 0
+            or receiver_location[..., 1].max() >= epsilon.shape[-2]
+        ):
             raise RuntimeError(
                 f"Receiver location dim 1 must be in [0, {epsilon.shape[-2] - 1}]"
             )
-        if receiver_location[..., 2].min() < 0 or receiver_location[..., 2].max() >= epsilon.shape[-1]:
+        if (
+            receiver_location[..., 2].min() < 0
+            or receiver_location[..., 2].max() >= epsilon.shape[-1]
+        ):
             raise RuntimeError(
                 f"Receiver location dim 2 must be in [0, {epsilon.shape[-1] - 1}]"
             )
@@ -3622,50 +3610,50 @@ def maxwell3d_python(
     epsilon: torch.Tensor,
     sigma: torch.Tensor,
     mu: torch.Tensor,
-    grid_spacing: Union[float, Sequence[float]],
+    grid_spacing: float | Sequence[float],
     dt: float,
-    source_amplitude: Optional[torch.Tensor],
-    source_location: Optional[torch.Tensor],
-    receiver_location: Optional[torch.Tensor],
+    source_amplitude: torch.Tensor | None,
+    source_location: torch.Tensor | None,
+    receiver_location: torch.Tensor | None,
     stencil: int,
-    pml_width: Union[int, Sequence[int]],
-    max_vel: Optional[float],
-    Ex_0: Optional[torch.Tensor],
-    Ey_0: Optional[torch.Tensor],
-    Ez_0: Optional[torch.Tensor],
-    Hx_0: Optional[torch.Tensor],
-    Hy_0: Optional[torch.Tensor],
-    Hz_0: Optional[torch.Tensor],
-    m_hz_y_0: Optional[torch.Tensor],
-    m_hy_z_0: Optional[torch.Tensor],
-    m_hx_z_0: Optional[torch.Tensor],
-    m_hz_x_0: Optional[torch.Tensor],
-    m_hy_x_0: Optional[torch.Tensor],
-    m_hx_y_0: Optional[torch.Tensor],
-    m_ey_z_0: Optional[torch.Tensor],
-    m_ez_y_0: Optional[torch.Tensor],
-    m_ez_x_0: Optional[torch.Tensor],
-    m_ex_z_0: Optional[torch.Tensor],
-    m_ex_y_0: Optional[torch.Tensor],
-    m_ey_x_0: Optional[torch.Tensor],
-    nt: Optional[int],
+    pml_width: int | Sequence[int],
+    max_vel: float | None,
+    Ex_0: torch.Tensor | None,
+    Ey_0: torch.Tensor | None,
+    Ez_0: torch.Tensor | None,
+    Hx_0: torch.Tensor | None,
+    Hy_0: torch.Tensor | None,
+    Hz_0: torch.Tensor | None,
+    m_hz_y_0: torch.Tensor | None,
+    m_hy_z_0: torch.Tensor | None,
+    m_hx_z_0: torch.Tensor | None,
+    m_hz_x_0: torch.Tensor | None,
+    m_hy_x_0: torch.Tensor | None,
+    m_hx_y_0: torch.Tensor | None,
+    m_ey_z_0: torch.Tensor | None,
+    m_ez_y_0: torch.Tensor | None,
+    m_ez_x_0: torch.Tensor | None,
+    m_ex_z_0: torch.Tensor | None,
+    m_ex_y_0: torch.Tensor | None,
+    m_ey_x_0: torch.Tensor | None,
+    nt: int | None,
     model_gradient_sampling_interval: int,
     freq_taper_frac: float,
     time_pad_frac: float,
     time_taper: bool,
-    save_snapshots: Optional[bool],
-    forward_callback: Optional[Callback],
-    backward_callback: Optional[Callback],
+    save_snapshots: bool | None,
+    forward_callback: Callback | None,
+    backward_callback: Callback | None,
     callback_frequency: int,
     source_component: str,
     receiver_component: str,
     storage_mode: str = "device",
     storage_path: str = ".",
-    storage_compression: Union[bool, str] = False,
-    storage_bytes_limit_device: Optional[int] = None,
-    storage_bytes_limit_host: Optional[int] = None,
+    storage_compression: bool | str = False,
+    storage_bytes_limit_device: int | None = None,
+    storage_bytes_limit_host: int | None = None,
     storage_chunk_steps: int = 0,
-    n_threads: Optional[int] = None,
+    n_threads: int | None = None,
 ):
     """3D Python backend propagation with autograd support."""
     del (
@@ -3754,7 +3742,7 @@ def maxwell3d_python(
 
     size_with_batch = (n_shots, padded_nz, padded_ny, padded_nx)
 
-    def init_wavefield(field_0: Optional[torch.Tensor]) -> torch.Tensor:
+    def init_wavefield(field_0: torch.Tensor | None) -> torch.Tensor:
         if field_0 is not None:
             if field_0.ndim == 3:
                 field_0 = field_0[None, :, :, :].expand(n_shots, -1, -1, -1)
@@ -4134,7 +4122,9 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         cb_requires_grad = bool(cb.requires_grad)
         requires_grad = ca_requires_grad or cb_requires_grad
         if not requires_grad:
-            raise RuntimeError("Maxwell3DForwardFunc should only be used when gradients are required.")
+            raise RuntimeError(
+                "Maxwell3DForwardFunc should only be used when gradients are required."
+            )
 
         if n_receivers > 0:
             receiver_amplitudes = torch.zeros(
@@ -4400,7 +4390,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
     @staticmethod
     def backward(  # type: ignore[override]
         ctx: Any, *grad_outputs: torch.Tensor
-    ) -> tuple[Optional[torch.Tensor], ...]:
+    ) -> tuple[torch.Tensor | None, ...]:
         from . import backend_utils
 
         saved = ctx.saved_tensors
@@ -4408,7 +4398,14 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         az, bz, az_h, bz_h = saved[3], saved[4], saved[5], saved[6]
         ay, by, ay_h, by_h = saved[7], saved[8], saved[9], saved[10]
         ax, bx, ax_h, bx_h = saved[11], saved[12], saved[13], saved[14]
-        kz, kz_h, ky, ky_h, kx, kx_h = saved[15], saved[16], saved[17], saved[18], saved[19], saved[20]
+        kz, kz_h, ky, ky_h, kx, kx_h = (
+            saved[15],
+            saved[16],
+            saved[17],
+            saved[18],
+            saved[19],
+            saved[20],
+        )
         sources_i, receivers_i = saved[21], saved[22]
         store_ex, store_ey, store_ez = saved[23], saved[24], saved[25]
         store_curl_x, store_curl_y, store_curl_z = saved[26], saved[27], saved[28]
@@ -4504,7 +4501,9 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         device_idx = (
             device.index if device.type == "cuda" and device.index is not None else 0
         )
-        effective_callback_freq = nt if backward_callback is None else callback_frequency
+        effective_callback_freq = (
+            nt if backward_callback is None else callback_frequency
+        )
         if effective_callback_freq <= 0:
             effective_callback_freq = nt if nt > 0 else 1
 
@@ -4663,50 +4662,50 @@ def maxwell3d_c_cuda(
     epsilon: torch.Tensor,
     sigma: torch.Tensor,
     mu: torch.Tensor,
-    grid_spacing: Union[float, Sequence[float]],
+    grid_spacing: float | Sequence[float],
     dt: float,
-    source_amplitude: Optional[torch.Tensor],
-    source_location: Optional[torch.Tensor],
-    receiver_location: Optional[torch.Tensor],
+    source_amplitude: torch.Tensor | None,
+    source_location: torch.Tensor | None,
+    receiver_location: torch.Tensor | None,
     stencil: int,
-    pml_width: Union[int, Sequence[int]],
-    max_vel: Optional[float],
-    Ex_0: Optional[torch.Tensor],
-    Ey_0: Optional[torch.Tensor],
-    Ez_0: Optional[torch.Tensor],
-    Hx_0: Optional[torch.Tensor],
-    Hy_0: Optional[torch.Tensor],
-    Hz_0: Optional[torch.Tensor],
-    m_hz_y_0: Optional[torch.Tensor],
-    m_hy_z_0: Optional[torch.Tensor],
-    m_hx_z_0: Optional[torch.Tensor],
-    m_hz_x_0: Optional[torch.Tensor],
-    m_hy_x_0: Optional[torch.Tensor],
-    m_hx_y_0: Optional[torch.Tensor],
-    m_ey_z_0: Optional[torch.Tensor],
-    m_ez_y_0: Optional[torch.Tensor],
-    m_ez_x_0: Optional[torch.Tensor],
-    m_ex_z_0: Optional[torch.Tensor],
-    m_ex_y_0: Optional[torch.Tensor],
-    m_ey_x_0: Optional[torch.Tensor],
-    nt: Optional[int],
+    pml_width: int | Sequence[int],
+    max_vel: float | None,
+    Ex_0: torch.Tensor | None,
+    Ey_0: torch.Tensor | None,
+    Ez_0: torch.Tensor | None,
+    Hx_0: torch.Tensor | None,
+    Hy_0: torch.Tensor | None,
+    Hz_0: torch.Tensor | None,
+    m_hz_y_0: torch.Tensor | None,
+    m_hy_z_0: torch.Tensor | None,
+    m_hx_z_0: torch.Tensor | None,
+    m_hz_x_0: torch.Tensor | None,
+    m_hy_x_0: torch.Tensor | None,
+    m_hx_y_0: torch.Tensor | None,
+    m_ey_z_0: torch.Tensor | None,
+    m_ez_y_0: torch.Tensor | None,
+    m_ez_x_0: torch.Tensor | None,
+    m_ex_z_0: torch.Tensor | None,
+    m_ex_y_0: torch.Tensor | None,
+    m_ey_x_0: torch.Tensor | None,
+    nt: int | None,
     model_gradient_sampling_interval: int,
     freq_taper_frac: float,
     time_pad_frac: float,
     time_taper: bool,
-    save_snapshots: Optional[bool],
-    forward_callback: Optional[Callback],
-    backward_callback: Optional[Callback],
+    save_snapshots: bool | None,
+    forward_callback: Callback | None,
+    backward_callback: Callback | None,
     callback_frequency: int,
     source_component: str,
     receiver_component: str,
     storage_mode: str = "device",
     storage_path: str = ".",
-    storage_compression: Union[bool, str] = False,
-    storage_bytes_limit_device: Optional[int] = None,
-    storage_bytes_limit_host: Optional[int] = None,
+    storage_compression: bool | str = False,
+    storage_bytes_limit_device: int | None = None,
+    storage_bytes_limit_host: int | None = None,
     storage_chunk_steps: int = 0,
-    n_threads: Optional[int] = None,
+    n_threads: int | None = None,
 ):
     """3D C/CUDA forward propagation path with Python fallback for gradients."""
     from . import backend_utils, staggered
@@ -4889,12 +4888,14 @@ def maxwell3d_c_cuda(
     sigma_padded = create_or_pad(
         sigma, total_pad, device, dtype, padded_size, mode="replicate"
     )
-    mu_padded = create_or_pad(mu, total_pad, device, dtype, padded_size, mode="replicate")
+    mu_padded = create_or_pad(
+        mu, total_pad, device, dtype, padded_size, mode="replicate"
+    )
 
     ca, cb, cq = prepare_parameters(epsilon_padded, sigma_padded, mu_padded, dt)
     size_with_batch = (n_shots, padded_nz, padded_ny, padded_nx)
 
-    def init_wavefield(field_0: Optional[torch.Tensor]) -> torch.Tensor:
+    def init_wavefield(field_0: torch.Tensor | None) -> torch.Tensor:
         if field_0 is not None:
             if field_0.ndim == 3:
                 field_0 = field_0[None, :, :, :].expand(n_shots, -1, -1, -1)
@@ -5185,7 +5186,9 @@ def maxwell3d_c_cuda(
         device_idx = (
             device.index if device.type == "cuda" and device.index is not None else 0
         )
-        effective_callback_freq = nt_steps if forward_callback is None else callback_frequency
+        effective_callback_freq = (
+            nt_steps if forward_callback is None else callback_frequency
+        )
         if effective_callback_freq <= 0:
             effective_callback_freq = nt_steps if nt_steps > 0 else 1
 

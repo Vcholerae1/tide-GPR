@@ -1,5 +1,3 @@
-from typing import Union
-
 import torch
 
 
@@ -24,7 +22,7 @@ def reverse_pad(pad: list[int]) -> list[int]:
 
 def create_or_pad(
     tensor: torch.Tensor,
-    pad: Union[int, list[int]],
+    pad: int | list[int],
     device: torch.device,
     dtype: torch.dtype,
     size: tuple[int, ...],
@@ -101,7 +99,7 @@ def create_or_pad(
 
 def zero_interior(
     tensor: torch.Tensor,
-    fd_pad: Union[int, list[int]],
+    fd_pad: int | list[int],
     pml_width: list[int],
     dim: int,
 ) -> torch.Tensor:
@@ -126,7 +124,9 @@ def zero_interior(
     shape = tensor.shape[1:]  # Spatial dimensions (without batch)
     ndim = len(shape)
     if ndim not in {2, 3}:
-        raise ValueError(f"zero_interior expects 2D or 3D spatial tensors, got ndim={ndim}")
+        raise ValueError(
+            f"zero_interior expects 2D or 3D spatial tensors, got ndim={ndim}"
+        )
 
     if isinstance(fd_pad, int):
         fd_pad = [fd_pad] * 2 * ndim

@@ -1,11 +1,10 @@
 """CFL condition helpers for stable time stepping."""
 
 import math
-from typing import Union
 
 
 def cfl_condition(
-    grid_spacing: Union[float, list[float]],
+    grid_spacing: float | list[float],
     dt: float,
     max_vel: float,
     c_max: float = 1,
