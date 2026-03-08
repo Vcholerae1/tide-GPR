@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from scipy.ndimage import gaussian_filter
+from scipy.stats import spearmanr
 
 import tide
 
@@ -43,6 +44,10 @@ sigma0 = 1.0 / 377.0
 beta_scale = 0.7
 gamma_sigma = 0.25
 sigma_scale = sigma0 * beta_scale
+
+# Sigma regularization (physical-domain Charbonnier TV on subsurface only).
+lambda_tv_sigma = 120
+tv_charb_eps = 1e-12
 
 model_path = "examples/data/OverThrust.npy"
 epsilon_true_raw = np.load(model_path)
@@ -115,6 +120,10 @@ print(
     f"Sigma parameterization: sigma_hat = sigma / (sigma0*beta), "
     f"sigma0={sigma0:.6e}, beta={beta_scale:.3f}, gamma={gamma_sigma:.3f}"
 )
+print(
+    f"Sigma TV regularization: lambda_tv_sigma={lambda_tv_sigma:.3e}, "
+    f"charb_eps={tv_charb_eps:.1e}"
+)
 
 lowpass_tag = "-".join(str(spec["lowpass_mhz"]) for spec in filter_specs.values())
 output_dir = Path("outputs") / (
@@ -158,6 +167,17 @@ def report_pde_delta(prefix: str, forward_start: float, adjoint_start: float) ->
 
 def sigma_scaled_to_physical(sigma_scaled: torch.Tensor) -> torch.Tensor:
     return sigma_scaled * sigma_scale
+
+
+def sigma_tv_regularization(sigma_physical: torch.Tensor) -> torch.Tensor:
+    sigma_sub = sigma_physical[air_layer:, :]
+    if sigma_sub.shape[0] < 2 or sigma_sub.shape[1] < 2:
+        return sigma_sub.new_zeros(())
+    dy = sigma_sub[1:, :] - sigma_sub[:-1, :]
+    dx = sigma_sub[:, 1:] - sigma_sub[:, :-1]
+    tv_y = torch.sqrt(dy * dy + tv_charb_eps).mean()
+    tv_x = torch.sqrt(dx * dx + tv_charb_eps).mean()
+    return tv_x + tv_y
 
 
 def make_shot_batches() -> list[torch.Tensor]:
@@ -447,7 +467,7 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
     )
     for epoch in range(n_epochs_adamw):
         optimizer_adamw.zero_grad()
-        epoch_loss = 0.0
+        epoch_data_loss = 0.0
 
         for shot_indices in make_shot_batches():
             syn = forward_shots(
@@ -465,7 +485,14 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
             loss = loss_fn(syn_filtered, obs_batch)
             loss.backward()
             add_pde_counts(int(shot_indices.numel()), adjoint=True)
-            epoch_loss += loss.item()
+            epoch_data_loss += loss.item()
+
+        epoch_tv_loss = 0.0
+        if optimize_sigma and lambda_tv_sigma > 0.0:
+            tv_sigma = sigma_tv_regularization(sigma_scaled_to_physical(sigma_current))
+            tv_term = lambda_tv_sigma * tv_sigma
+            tv_term.backward()
+            epoch_tv_loss = float(tv_term.item())
 
         if epsilon_inv.grad is not None:
             epsilon_inv.grad[air_mask] = 0.0
@@ -484,9 +511,14 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
         optimizer_adamw.step()
         project_model_parameters(optimize_sigma)
 
-        all_losses.append(epoch_loss)
+        epoch_total_loss = epoch_data_loss + epoch_tv_loss
+        all_losses.append(epoch_total_loss)
         if (epoch + 1) % 1 == 0 or epoch == 0:
-            print(f"  AdamW epoch {epoch + 1}/{n_epochs_adamw}  Loss={epoch_loss:.6e}")
+            print(
+                f"  AdamW epoch {epoch + 1}/{n_epochs_adamw}  "
+                f"Loss={epoch_total_loss:.6e}  "
+                f"Data={epoch_data_loss:.6e}  TV={epoch_tv_loss:.6e}"
+            )
 
     # Stage 2: L-BFGS
     lbfgs_params = [epsilon_inv, sigma_inv]
@@ -498,11 +530,12 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
         line_search_fn="strong_wolfe",
     )
     lbfgs_sigma_scale = gamma_sigma
+    closure_stats = {"data": 0.0, "tv": 0.0}
 
     def closure():
         project_model_parameters(optimize_sigma)
         optimizer_lbfgs.zero_grad()
-        total_loss = torch.zeros((), device=device)
+        total_data_loss = torch.zeros((), device=device)
         for shot_indices in make_shot_batches():
             syn = forward_shots(
                 epsilon_inv,
@@ -519,7 +552,13 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
             loss = loss_fn(syn_filtered, obs_batch)
             loss.backward()
             add_pde_counts(int(shot_indices.numel()), adjoint=True)
-            total_loss = total_loss + loss
+            total_data_loss = total_data_loss + loss
+
+        tv_term = torch.zeros((), device=device)
+        if optimize_sigma and lambda_tv_sigma > 0.0:
+            tv_sigma = sigma_tv_regularization(sigma_scaled_to_physical(sigma_current))
+            tv_term = lambda_tv_sigma * tv_sigma
+            tv_term.backward()
 
         if epsilon_inv.grad is not None:
             epsilon_inv.grad[air_mask] = 0.0
@@ -534,14 +573,20 @@ for stage_idx, cfg in enumerate(inversion_schedule, 1):
                 clip_val = torch.quantile(valid_sigma, 0.98)
                 torch.nn.utils.clip_grad_value_([sigma_inv], clip_val.item())
             sigma_inv.grad.mul_(lbfgs_sigma_scale)
-        return total_loss
+        closure_stats["data"] = float(total_data_loss.item())
+        closure_stats["tv"] = float(tv_term.item())
+        return total_data_loss + tv_term
 
     for epoch in range(n_epochs_lbfgs):
         loss = optimizer_lbfgs.step(closure)
         project_model_parameters(optimize_sigma)
         loss_value = loss.item()
         all_losses.append(loss_value)
-        print(f"  LBFGS epoch {epoch + 1}/{n_epochs_lbfgs}  Loss={loss_value:.6e}")
+        print(
+            f"  LBFGS epoch {epoch + 1}/{n_epochs_lbfgs}  "
+            f"Loss={loss_value:.6e}  "
+            f"Data={closure_stats['data']:.6e}  TV={closure_stats['tv']:.6e}"
+        )
 
     stage_breaks.append(len(all_losses) - 1)
     report_pde_delta(f"Stage {stage_idx} ", stage_forward_start, stage_adjoint_start)
@@ -659,6 +704,114 @@ print(f"ε Improvement: {(1 - rms_result_eps / rms_init_eps) * 100:.1f}%")
 print(f"RMS Error σ (Initial):  {rms_init_sigma:.4e}")
 print(f"RMS Error σ (Inverted): {rms_result_sigma:.4e}")
 print(f"σ Improvement: {(1 - rms_result_sigma / rms_init_sigma) * 100:.1f}%")
+
+
+def global_ssim_1d(x: np.ndarray, y: np.ndarray, data_range: float) -> float:
+    c1 = (0.01 * data_range) ** 2
+    c2 = (0.03 * data_range) ** 2
+    mean_x = float(np.mean(x))
+    mean_y = float(np.mean(y))
+    var_x = float(np.mean((x - mean_x) ** 2))
+    var_y = float(np.mean((y - mean_y) ** 2))
+    cov_xy = float(np.mean((x - mean_x) * (y - mean_y)))
+    denom = (mean_x**2 + mean_y**2 + c1) * (var_x + var_y + c2)
+    if denom <= 0.0:
+        return float("nan")
+    return float(((2.0 * mean_x * mean_y + c1) * (2.0 * cov_xy + c2)) / denom)
+
+
+def total_variation_np(arr: np.ndarray) -> float:
+    arr_sub = arr[air_layer:, :]
+    if arr_sub.shape[0] < 2 or arr_sub.shape[1] < 2:
+        return 0.0
+    dy = arr_sub[1:, :] - arr_sub[:-1, :]
+    dx = arr_sub[:, 1:] - arr_sub[:, :-1]
+    tv_y = float(np.mean(np.sqrt(dy * dy + tv_charb_eps)))
+    tv_x = float(np.mean(np.sqrt(dx * dx + tv_charb_eps)))
+    return tv_x + tv_y
+
+
+def safe_corrcoef(x: np.ndarray, y: np.ndarray) -> float:
+    std_x = float(np.std(x))
+    std_y = float(np.std(y))
+    if std_x == 0.0 or std_y == 0.0:
+        return float("nan")
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def compute_masked_metrics(
+    true_arr: np.ndarray, pred_arr: np.ndarray, mask_arr: np.ndarray
+) -> dict[str, float]:
+    true_vec = true_arr[mask_arr].astype(np.float64)
+    pred_vec = pred_arr[mask_arr].astype(np.float64)
+    diff = pred_vec - true_vec
+    data_range = max(float(np.max(true_vec) - np.min(true_vec)), 1e-12)
+    rmse = float(np.sqrt(np.mean(diff**2)))
+    mae = float(np.mean(np.abs(diff)))
+    rel_l2 = float(np.linalg.norm(diff) / (np.linalg.norm(true_vec) + 1e-12))
+    bias = float(np.mean(diff))
+    pearson_r = safe_corrcoef(true_vec, pred_vec)
+    spearman_res = spearmanr(true_vec, pred_vec)
+    spearman_rho = float(spearman_res.statistic)
+    ssim = global_ssim_1d(true_vec, pred_vec, data_range)
+    return {
+        "rmse": rmse,
+        "mae": mae,
+        "rel_l2": rel_l2,
+        "bias": bias,
+        "pearson_r": pearson_r,
+        "spearman_rho": spearman_rho,
+        "ssim": ssim,
+    }
+
+
+eps_metrics_init = compute_masked_metrics(eps_true, eps_init, mask)
+eps_metrics_inv = compute_masked_metrics(eps_true, eps_result, mask)
+sigma_metrics_init = compute_masked_metrics(sigma_true_arr, sigma_init_arr, mask)
+sigma_metrics_inv = compute_masked_metrics(sigma_true_arr, sigma_result, mask)
+
+tv_eps_true = total_variation_np(eps_true)
+tv_eps_init = total_variation_np(eps_init)
+tv_eps_inv = total_variation_np(eps_result)
+tv_sigma_true = total_variation_np(sigma_true_arr)
+tv_sigma_init = total_variation_np(sigma_init_arr)
+tv_sigma_inv = total_variation_np(sigma_result)
+
+print("\n=== Additional Metrics (Subsurface / Air Excluded) ===")
+print(
+    "ε MAE: "
+    f"{eps_metrics_init['mae']:.4e} -> {eps_metrics_inv['mae']:.4e} | "
+    "RelL2: "
+    f"{eps_metrics_init['rel_l2']:.4e} -> {eps_metrics_inv['rel_l2']:.4e}"
+)
+print(
+    "ε Pearson/Spearman: "
+    f"{eps_metrics_init['pearson_r']:.4f}/{eps_metrics_init['spearman_rho']:.4f} -> "
+    f"{eps_metrics_inv['pearson_r']:.4f}/{eps_metrics_inv['spearman_rho']:.4f}"
+)
+print(
+    f"ε SSIM: {eps_metrics_init['ssim']:.4f} -> {eps_metrics_inv['ssim']:.4f} | "
+    f"TV true/init/inv: {tv_eps_true:.4e}/{tv_eps_init:.4e}/{tv_eps_inv:.4e}"
+)
+print(
+    "σ MAE: "
+    f"{sigma_metrics_init['mae']:.4e} -> {sigma_metrics_inv['mae']:.4e} | "
+    "RelL2: "
+    f"{sigma_metrics_init['rel_l2']:.4e} -> {sigma_metrics_inv['rel_l2']:.4e}"
+)
+print(
+    "σ Pearson/Spearman: "
+    f"{sigma_metrics_init['pearson_r']:.4f}/{sigma_metrics_init['spearman_rho']:.4f} -> "
+    f"{sigma_metrics_inv['pearson_r']:.4f}/{sigma_metrics_inv['spearman_rho']:.4f}"
+)
+print(
+    f"σ SSIM: {sigma_metrics_init['ssim']:.4f} -> {sigma_metrics_inv['ssim']:.4f} | "
+    f"TV true/init/inv: {tv_sigma_true:.4e}/{tv_sigma_init:.4e}/{tv_sigma_inv:.4e}"
+)
+print(
+    "σ Bias (pred-true): "
+    f"{sigma_metrics_init['bias']:.4e} -> {sigma_metrics_inv['bias']:.4e}"
+)
 
 print("\n=== Timing Summary ===")
 print(f"Total inversion time: {time_all:.2f}s")

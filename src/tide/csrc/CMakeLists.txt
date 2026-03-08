@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(TIDE_ENABLE_CUDA "Enable CUDA backend" ON)
 option(TIDE_ENABLE_METAL "Enable Metal backend (Apple GPU)" ON)
 option(TIDE_ENABLE_NATIVE_ARCH "Enable native CPU tuning flags (-march=native)" OFF)
+option(TIDE_CUDA_PROFILE_BUILD "Enable CUDA line info and verbose ptxas output" OFF)
 
 # Detect and enable CUDA if present and enabled
 if(TIDE_ENABLE_CUDA)
@@ -257,6 +258,13 @@ if(CUDAToolkit_FOUND)
                     -Xptxas=-dlcm=ca
                 >)
         endif()
+        if(TIDE_CUDA_PROFILE_BUILD)
+            target_compile_options(${TARGET_NAME} PRIVATE
+                $<$<COMPILE_LANGUAGE:CUDA>:
+                    -lineinfo
+                    -Xptxas=-v
+                >)
+        endif()
     endmacro()
 endif()
 
@@ -359,6 +367,13 @@ if(CUDAToolkit_FOUND)
     target_compile_definitions(tide_C PRIVATE
         TIDE_CUDA_ARCHES_STR="${TIDE_CUDA_ARCHES_STR}"
     )
+    if(TIDE_CUDA_PROFILE_BUILD)
+        target_compile_options(tide_C PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:
+                -lineinfo
+                -Xptxas=-v
+            >)
+    endif()
 endif()
 
 # Set output directory to the tide package directory
@@ -376,6 +391,7 @@ message(STATUS "  AVX2: ${HAVE_AVX2}")
 if(CUDAToolkit_FOUND)
     message(STATUS "  CUDA: ON")
     message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
+    message(STATUS "  CUDA Profile Build: ${TIDE_CUDA_PROFILE_BUILD}")
 else()
     message(STATUS "  CUDA: OFF")
 endif()
