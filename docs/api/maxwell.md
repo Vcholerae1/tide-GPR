@@ -14,7 +14,11 @@ Behavior:
 - External parameter units are unchanged (SI-compatible inputs).
 - Internally, fp16 mode uses nondimensional scaling and returns fields in
   physical units.
-- CUDA backend provides native `half` symbols for `compute_dtype="fp16"`.
+- `mp_mode="throughput"` uses native `half` symbols when the CUDA extension is
+  built with half-kernel support.
+- `mp_mode="balanced"` currently routes TM2D through the Python backend so it
+  can keep fp32-sensitive workspaces in higher precision.
+- `mp_mode="robust"` keeps the TM2D solver in fp32.
 
 ## Advanced or Internal Functions
 - prepare_parameters

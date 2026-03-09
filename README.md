@@ -136,7 +136,9 @@ Notes:
 - `compute_dtype="fp16"` is currently CUDA-only.
 - External API remains SI-compatible (`epsilon_r`, `mu_r`, `sigma`, `dx/dy`, `dt`).
 - Internal updates use nondimensional scaling for better reduced-precision stability.
-- Current C/CUDA kernels execute in fp32 with fp16 mixed-precision I/O/scaling.
+- `mp_mode="throughput"` uses the native all-half TM2D kernels when available.
+- `mp_mode="balanced"` currently falls back to the Python TM2D backend so it can
+  keep fp32-sensitive workspaces in higher precision.
 
 ## Examples
 

@@ -6,12 +6,14 @@
 - `compute_dtype="fp32"`: default baseline.
 - `compute_dtype="fp16"`: CUDA-only mixed precision path with internal
   nondimensional scaling.
-- Current native kernels still execute fp32 math while using fp16 mixed
-  precision I/O/scaling.
+- `mp_mode="throughput"` uses the native all-half TM2D path when available.
+- `mp_mode="balanced"` currently routes TM2D through the Python backend so it
+  can keep the recurrent state, coefficient preparation, and receiver
+  accumulation in fp32.
 
 `mp_mode` controls numerical policy:
 - `throughput`: favors reduced precision.
-- `balanced`: intermediate behavior.
+- `balanced`: mixed precision with fp32-sensitive TM2D workspaces.
 - `robust`: keeps more operations in fp32.
 
 ## CPU vs CUDA

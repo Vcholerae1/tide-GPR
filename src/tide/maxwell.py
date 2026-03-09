@@ -1,6 +1,7 @@
 import itertools
 import warnings
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import torch
@@ -43,6 +44,53 @@ from .validation import (
 
 _CTX_HANDLE_COUNTER = itertools.count()
 _CTX_HANDLE_REGISTRY: dict[int, dict[str, Any]] = {}
+
+
+@dataclass(frozen=True)
+class TMFP16PrecisionPolicy:
+    """Internal dtype policy for TM2D reduced-precision execution."""
+
+    solver_dtype: torch.dtype
+    field_dtype: torch.dtype
+    coeff_dtype: torch.dtype
+    pml_profile_dtype: torch.dtype
+    receiver_dtype: torch.dtype
+    force_python_backend: bool = False
+
+
+def _tm_fp16_precision_policy(mp_mode: str) -> TMFP16PrecisionPolicy:
+    """Return the precision policy for TM2D fp16 modes."""
+
+    if mp_mode == "throughput":
+        return TMFP16PrecisionPolicy(
+            solver_dtype=torch.float16,
+            field_dtype=torch.float16,
+            coeff_dtype=torch.float16,
+            pml_profile_dtype=torch.float16,
+            receiver_dtype=torch.float16,
+            force_python_backend=False,
+        )
+    if mp_mode == "balanced":
+        # Keep the nondimensionalized formulation but move the recurrent state,
+        # coefficient preparation, and receiver accumulation back to fp32.
+        # The native TM2D ABI is currently single-dtype, so this policy must
+        # route through the Python backend until mixed workspaces exist there.
+        return TMFP16PrecisionPolicy(
+            solver_dtype=torch.float32,
+            field_dtype=torch.float32,
+            coeff_dtype=torch.float32,
+            pml_profile_dtype=torch.float16,
+            receiver_dtype=torch.float32,
+            force_python_backend=True,
+        )
+    return TMFP16PrecisionPolicy(
+        solver_dtype=torch.float32,
+        field_dtype=torch.float32,
+        coeff_dtype=torch.float32,
+        pml_profile_dtype=torch.float32,
+        receiver_dtype=torch.float32,
+        force_python_backend=False,
+    )
 
 
 def _register_ctx_handle(ctx_data: dict[str, Any]) -> torch.Tensor:
@@ -549,6 +597,7 @@ def maxwelltm(
 
     # Optional nondimensional scaling for mixed precision path
     nondim_ctx: NondimContext | None = None
+    fp16_policy: TMFP16PrecisionPolicy | None = None
     epsilon_internal = epsilon
     sigma_internal = sigma
     mu_internal = mu
@@ -566,6 +615,7 @@ def maxwelltm(
     pml_eps_scale = None
 
     if compute_dtype_norm == "fp16":
+        fp16_policy = _tm_fp16_precision_policy(mp_mode_norm)
         nondim_ctx = build_nondim_context(epsilon, mu, grid_spacing_list, inner_dt)
         epsilon_internal = epsilon / nondim_ctx.eps_ref_r
         mu_internal = mu / nondim_ctx.mu_ref_r
@@ -611,11 +661,7 @@ def maxwelltm(
         max_vel_solver = max_vel_computed / cmax
         pml_eps_scale = 1.0
 
-        solver_dtype: torch.dtype
-        if mp_mode_norm in {"throughput", "balanced"}:
-            solver_dtype = torch.float16
-        else:
-            solver_dtype = torch.float32
+        solver_dtype = fp16_policy.solver_dtype
 
         epsilon_internal = epsilon_internal.to(solver_dtype)
         sigma_internal = sigma_internal.to(solver_dtype)
@@ -784,8 +830,6 @@ def maxwell_func(
             from . import backend_utils
 
             if not backend_utils.is_backend_available():
-                import warnings
-
                 warnings.warn(
                     "C/CUDA backend not available, falling back to Python backend. "
                     "To use the C/CUDA backend, compile the library first.",
@@ -793,13 +837,23 @@ def maxwell_func(
                 )
                 use_python = True
         except ImportError:
-            import warnings
-
             warnings.warn(
                 "backend_utils not available, falling back to Python backend.",
                 RuntimeWarning,
             )
             use_python = True
+
+    if (
+        compute_dtype == "fp16"
+        and _tm_fp16_precision_policy(mp_mode).force_python_backend
+        and not use_python
+    ):
+        warnings.warn(
+            "mp_mode='balanced' currently falls back to the Python TM2D backend "
+            "because the native kernels only support uniform dtypes.",
+            RuntimeWarning,
+        )
+        use_python = True
 
     if use_python:
         if python_backend is True or python_backend is False:
@@ -939,6 +993,15 @@ def maxwell_python(
 
     device = epsilon.device
     dtype = epsilon.dtype
+    fp16_policy = (
+        _tm_fp16_precision_policy(mp_mode) if compute_dtype == "fp16" else None
+    )
+    coeff_dtype = fp16_policy.coeff_dtype if fp16_policy is not None else dtype
+    field_dtype = fp16_policy.field_dtype if fp16_policy is not None else dtype
+    pml_profile_dtype = (
+        fp16_policy.pml_profile_dtype if fp16_policy is not None else dtype
+    )
+    receiver_dtype = fp16_policy.receiver_dtype if fp16_policy is not None else dtype
     model_ny, model_nx = epsilon.shape  # Original model dimensions
 
     storage_mode_str = storage_mode.lower()
@@ -1012,13 +1075,13 @@ def maxwell_python(
     # Pad model tensors with replicate mode (extend boundary values)
     padded_size = (padded_ny, padded_nx)
     epsilon_padded = create_or_pad(
-        epsilon, total_pad, device, dtype, padded_size, mode="replicate"
+        epsilon, total_pad, device, coeff_dtype, padded_size, mode="replicate"
     )
     sigma_padded = create_or_pad(
-        sigma, total_pad, device, dtype, padded_size, mode="replicate"
+        sigma, total_pad, device, coeff_dtype, padded_size, mode="replicate"
     )
     mu_padded = create_or_pad(
-        mu, total_pad, device, dtype, padded_size, mode="replicate"
+        mu, total_pad, device, coeff_dtype, padded_size, mode="replicate"
     )
 
     # Prepare update coefficients using padded models
@@ -1048,7 +1111,7 @@ def maxwell_python(
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
         device=device,
-        dtype=dtype,
+        dtype=field_dtype,
     )
     Hx = _init_tm_wavefield(
         Hx_0,
@@ -1056,7 +1119,7 @@ def maxwell_python(
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
         device=device,
-        dtype=dtype,
+        dtype=field_dtype,
     )
     Hz = _init_tm_wavefield(
         Hz_0,
@@ -1064,7 +1127,7 @@ def maxwell_python(
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
         device=device,
-        dtype=dtype,
+        dtype=field_dtype,
     )
     m_Ey_x = _init_tm_wavefield(
         m_Ey_x_0,
@@ -1072,7 +1135,7 @@ def maxwell_python(
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
         device=device,
-        dtype=dtype,
+        dtype=field_dtype,
     )
     m_Ey_z = _init_tm_wavefield(
         m_Ey_z_0,
@@ -1080,7 +1143,7 @@ def maxwell_python(
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
         device=device,
-        dtype=dtype,
+        dtype=field_dtype,
     )
     m_Hx_z = _init_tm_wavefield(
         m_Hx_z_0,
@@ -1088,7 +1151,7 @@ def maxwell_python(
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
         device=device,
-        dtype=dtype,
+        dtype=field_dtype,
     )
     m_Hz_x = _init_tm_wavefield(
         m_Hz_x_0,
@@ -1096,7 +1159,7 @@ def maxwell_python(
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
         device=device,
-        dtype=dtype,
+        dtype=field_dtype,
     )
 
     # Zero out interior of PML auxiliary variables (optimization)
@@ -1122,7 +1185,7 @@ def maxwell_python(
         dt=dt,
         grid_spacing=grid_spacing,
         max_vel=max_vel,
-        dtype=dtype,
+        dtype=pml_profile_dtype,
         device=device,
         pml_freq=pml_freq,
         ny=padded_ny,
@@ -1164,9 +1227,9 @@ def maxwell_python(
             )
 
     # Reciprocal grid spacing
-    rdy = torch.tensor(1.0 / dy, device=device, dtype=dtype)
-    rdx = torch.tensor(1.0 / dx, device=device, dtype=dtype)
-    dt_tensor = torch.tensor(dt, device=device, dtype=dtype)
+    rdy = torch.tensor(1.0 / dy, device=device, dtype=field_dtype)
+    rdx = torch.tensor(1.0 / dx, device=device, dtype=field_dtype)
+    dt_tensor = torch.tensor(dt, device=device, dtype=field_dtype)
 
     # =========================================================================
     # Prepare source and receiver indices
@@ -1198,10 +1261,10 @@ def maxwell_python(
     # Initialize receiver amplitudes
     if n_receivers > 0:
         receiver_amplitudes = torch.zeros(
-            nt_steps, n_shots, n_receivers, device=device, dtype=dtype
+            nt_steps, n_shots, n_receivers, device=device, dtype=receiver_dtype
         )
     else:
-        receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
+        receiver_amplitudes = torch.empty(0, device=device, dtype=receiver_dtype)
 
     # Prepare callback data - models dict uses the padded models
     callback_models = {
@@ -1211,6 +1274,7 @@ def maxwell_python(
         "ca": ca,
         "cb": cb,
         "cq": cq,
+        "mp_mode": mp_mode,
     }
 
     # Callback fd_pad is the actual fd_pad used for wavefields
@@ -1600,7 +1664,10 @@ def maxwell_c_cuda(
     if device.type not in {"cpu", "cuda"}:
         raise NotImplementedError("C/CUDA backend supports only cpu and cuda devices.")
 
-    _ = mp_mode
+    if compute_dtype == "fp16" and mp_mode == "balanced":
+        raise NotImplementedError(
+            "mp_mode='balanced' is not yet implemented in the native TM2D backend."
+        )
 
     # Normalize grid_spacing to list
     grid_spacing = _normalize_grid_spacing_2d(grid_spacing)

@@ -73,6 +73,46 @@ def test_fp16_forward_relative_l2():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fp16_balanced_forward_relative_l2():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    case = _base_case(torch.device("cuda"))
+
+    ref = tide.maxwelltm(
+        case["epsilon"],  # type: ignore[arg-type]
+        case["sigma"],  # type: ignore[arg-type]
+        case["mu"],  # type: ignore[arg-type]
+        grid_spacing=0.02,
+        dt=case["dt"],  # type: ignore[arg-type]
+        source_amplitude=case["source_amplitude"],  # type: ignore[arg-type]
+        source_location=case["source_location"],  # type: ignore[arg-type]
+        receiver_location=case["receiver_location"],  # type: ignore[arg-type]
+        pml_width=4,
+        stencil=2,
+        compute_dtype="fp32",
+        python_backend=True,
+    )[-1]
+    out = tide.maxwelltm(
+        case["epsilon"],  # type: ignore[arg-type]
+        case["sigma"],  # type: ignore[arg-type]
+        case["mu"],  # type: ignore[arg-type]
+        grid_spacing=0.02,
+        dt=case["dt"],  # type: ignore[arg-type]
+        source_amplitude=case["source_amplitude"],  # type: ignore[arg-type]
+        source_location=case["source_location"],  # type: ignore[arg-type]
+        receiver_location=case["receiver_location"],  # type: ignore[arg-type]
+        pml_width=4,
+        stencil=2,
+        compute_dtype="fp16",
+        mp_mode="balanced",
+    )[-1]
+
+    assert out.dtype == torch.float32
+    rel_l2 = torch.linalg.norm(out - ref) / (torch.linalg.norm(ref) + 1e-12)
+    assert float(rel_l2.item()) <= 1e-3
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_fp16_backward_gradient_cosine():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
@@ -113,6 +153,60 @@ def test_fp16_backward_gradient_cosine():
         stencil=2,
         compute_dtype="fp16",
         mp_mode="throughput",
+    )[-1]
+    rec_mp.square().sum().backward()
+    assert eps_mp.grad is not None and sig_mp.grad is not None
+    g_eps_mp = eps_mp.grad.detach().reshape(-1)
+    g_sig_mp = sig_mp.grad.detach().reshape(-1)
+
+    eps_cos = torch.nn.functional.cosine_similarity(g_eps_ref, g_eps_mp, dim=0)
+    sig_cos = torch.nn.functional.cosine_similarity(g_sig_ref, g_sig_mp, dim=0)
+    assert float(eps_cos.item()) >= 0.999
+    assert float(sig_cos.item()) >= 0.999
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fp16_balanced_backward_gradient_cosine():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    case = _base_case(torch.device("cuda"))
+
+    eps_ref = case["epsilon"].clone().detach().requires_grad_(True)  # type: ignore[assignment]
+    sig_ref = case["sigma"].clone().detach().requires_grad_(True)  # type: ignore[assignment]
+    rec_ref = tide.maxwelltm(
+        eps_ref,
+        sig_ref,
+        case["mu"],  # type: ignore[arg-type]
+        grid_spacing=0.02,
+        dt=case["dt"],  # type: ignore[arg-type]
+        source_amplitude=case["source_amplitude"],  # type: ignore[arg-type]
+        source_location=case["source_location"],  # type: ignore[arg-type]
+        receiver_location=case["receiver_location"],  # type: ignore[arg-type]
+        pml_width=4,
+        stencil=2,
+        compute_dtype="fp32",
+        python_backend=True,
+    )[-1]
+    rec_ref.square().sum().backward()
+    assert eps_ref.grad is not None and sig_ref.grad is not None
+    g_eps_ref = eps_ref.grad.detach().reshape(-1)
+    g_sig_ref = sig_ref.grad.detach().reshape(-1)
+
+    eps_mp = case["epsilon"].clone().detach().requires_grad_(True)  # type: ignore[assignment]
+    sig_mp = case["sigma"].clone().detach().requires_grad_(True)  # type: ignore[assignment]
+    rec_mp = tide.maxwelltm(
+        eps_mp,
+        sig_mp,
+        case["mu"],  # type: ignore[arg-type]
+        grid_spacing=0.02,
+        dt=case["dt"],  # type: ignore[arg-type]
+        source_amplitude=case["source_amplitude"],  # type: ignore[arg-type]
+        source_location=case["source_location"],  # type: ignore[arg-type]
+        receiver_location=case["receiver_location"],  # type: ignore[arg-type]
+        pml_width=4,
+        stencil=2,
+        compute_dtype="fp16",
+        mp_mode="balanced",
     )[-1]
     rec_mp.square().sum().backward()
     assert eps_mp.grad is not None and sig_mp.grad is not None
