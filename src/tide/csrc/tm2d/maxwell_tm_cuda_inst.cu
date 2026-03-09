@@ -14,10 +14,8 @@
 
 namespace FUNC(Inst) {
 using tide_field_t = TIDE_DTYPE;
-using tide_scalar_t =
-    typename std::conditional<std::is_same<tide_field_t, half>::value, float,
-                              tide_field_t>::type;
-constexpr bool kFieldIsHalf = std::is_same<tide_field_t, half>::value;
+using tide_scalar_t = tide_field_t;
+constexpr bool kFieldIsHalf = false;
 constexpr int kFdPad = ::tide::StencilTraits<TIDE_STENCIL>::FD_PAD;
 #ifndef TIDE_TM_BLOCK_X
 #define TIDE_TM_BLOCK_X 32

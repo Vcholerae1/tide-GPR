@@ -16,7 +16,7 @@ TIDE is a PyTorch-based library for  high frequa electromagnetic wave propagatio
 - **Flexible Storage**: Multiple storage modes for gradient computation (memory/disk/optional BF16 compressed)
 - **Staggered Grid**: Industry-standard FDTD staggered grid implementation
 - **PML Boundaries**: Perfectly Matched Layer absorbing boundaries
-- **Mixed Precision (CUDA)**: `compute_dtype="fp16"` with internal nondimensional scaling
+- **Snapshot Compression**: optional `storage_compression="bf16"` for intermediate storage
 
 ## Installation
 
@@ -127,18 +127,13 @@ out = tide.maxwelltm(
     source_amplitude=src,
     source_location=src_loc,
     receiver_location=rec_loc,
-    compute_dtype="fp16",      # "fp32" (default) or "fp16"
-    mp_mode="throughput",      # "throughput" | "balanced" | "robust"
 )
 ```
 
 Notes:
-- `compute_dtype="fp16"` is currently CUDA-only.
 - External API remains SI-compatible (`epsilon_r`, `mu_r`, `sigma`, `dx/dy`, `dt`).
-- Internal updates use nondimensional scaling for better reduced-precision stability.
-- `mp_mode="throughput"` uses the native all-half TM2D kernels when available.
-- `mp_mode="balanced"` currently falls back to the Python TM2D backend so it can
-  keep fp32-sensitive workspaces in higher precision.
+- Intermediate snapshot storage still supports `storage_compression="bf16"` when
+  you want lower memory footprint during backpropagation.
 
 ## Examples
 

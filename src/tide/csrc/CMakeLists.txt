@@ -19,7 +19,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(TIDE_ENABLE_CUDA "Enable CUDA backend" ON)
 option(TIDE_ENABLE_NATIVE_ARCH "Enable native CPU tuning flags (-march=native)" OFF)
 option(TIDE_CUDA_PROFILE_BUILD "Enable CUDA line info and verbose ptxas output" OFF)
-option(TIDE_ENABLE_HALF_KERNELS "Enable CUDA half-precision kernel instantiations" ON)
 set(TIDE_TM_BLOCK_X "32" CACHE STRING "TM CUDA thread block size in X")
 set(TIDE_TM_BLOCK_Y "8" CACHE STRING "TM CUDA thread block size in Y")
 
@@ -215,12 +214,6 @@ macro(add_tide_cpu_object_library BASENAME SOURCE_REL_PATH)
 endmacro()
 
 if(CUDAToolkit_FOUND)
-    if(TIDE_ENABLE_HALF_KERNELS)
-        set(TIDE_ENABLE_HALF_KERNELS_DEF 1)
-    else()
-        set(TIDE_ENABLE_HALF_KERNELS_DEF 0)
-    endif()
-
     # Use explicit architectures. Some CMake defaults resolve to 75 even on
     # Ada GPUs. Prefer "all but sm_4x" (and only those supported by nvcc)
     # by default unless the user explicitly sets it.
@@ -264,7 +257,6 @@ if(CUDAToolkit_FOUND)
         add_library(${TARGET_NAME} OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_REL_PATH})
         target_compile_definitions(${TARGET_NAME} PRIVATE
             TIDE_DEVICE=cuda
-            TIDE_ENABLE_HALF_KERNELS=${TIDE_ENABLE_HALF_KERNELS_DEF}
             TIDE_TM_BLOCK_X=${TIDE_TM_BLOCK_X}
             TIDE_TM_BLOCK_Y=${TIDE_TM_BLOCK_Y}
         )

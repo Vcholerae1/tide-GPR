@@ -33,7 +33,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cuda_bf16.h>
-#include <cuda_fp16.h>
 #include <math.h>
 #include <stdio.h>
 #include <type_traits>

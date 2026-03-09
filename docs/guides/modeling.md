@@ -5,23 +5,13 @@
 - sigma: electrical conductivity (S/m).
 - mu: relative permeability (dimensionless).
 
-## Units and Scaling
+## Units
 
 The public API is SI-compatible:
 - `grid_spacing`: meters
 - `dt`: seconds
 - `sigma`: S/m
 - `epsilon`, `mu`: relative values
-
-When `compute_dtype="fp16"` is selected, the solver internally applies
-nondimensional scaling:
-- `L0 = min(dx, dy)`
-- `T0 = L0 / cmax`
-- `epsilon_hat = epsilon / min(epsilon)`
-- `mu_hat = mu / min(mu)`
-- `sigma_hat = sigma * T0 / eps_ref_abs`
-
-Outputs are mapped back to physical units before returning.
 
 ## Grid and Shapes
 
@@ -34,4 +24,3 @@ Outputs are mapped back to physical units before returning.
 
 - `epsilon > 0`, `mu > 0` are required.
 - Source/receiver coordinates must remain in model bounds.
-- For fp16 mode, prefer moderate parameter contrast for best stability.

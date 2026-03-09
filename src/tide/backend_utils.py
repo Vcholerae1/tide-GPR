@@ -17,17 +17,15 @@ if SO_EXT is None:
 # Supported configurations for backend function variants.
 _SUPPORTED_ACCURACIES = (2, 4, 6, 8)
 _SUPPORTED_DEVICES = ("cpu", "cuda")
-_SUPPORTED_BACKEND_DTYPES = ("half", "float", "double")
+_SUPPORTED_BACKEND_DTYPES = ("float", "double")
 
 # Mapping from torch dtypes to backend dtype strings and from backend dtype strings to C types.
 _TORCH_DTYPE_TO_BACKEND_DTYPE: dict[torch.dtype, str] = {
-    torch.float16: "half",
     torch.float32: "float",
     torch.float64: "double",
 }
 
 _BACKEND_DTYPE_TO_CTYPE: dict[str, type] = {
-    "half": c_float,
     "float": c_float,
     "double": c_double,
 }
@@ -408,8 +406,7 @@ def get_backend_function(
 
     Raises:
         AttributeError: If the function is not found in the shared library.
-        TypeError: If the dtype is not torch.float16, torch.float32, or
-            torch.float64.
+        TypeError: If the dtype is not torch.float32 or torch.float64.
         RuntimeError: If the backend is not available.
 
     """
