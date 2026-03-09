@@ -19,7 +19,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(TIDE_ENABLE_CUDA "Enable CUDA backend" ON)
 option(TIDE_ENABLE_NATIVE_ARCH "Enable native CPU tuning flags (-march=native)" OFF)
 option(TIDE_CUDA_PROFILE_BUILD "Enable CUDA line info and verbose ptxas output" OFF)
-option(TIDE_ENABLE_HALF_KERNELS "Enable CUDA half-precision kernel instantiations" OFF)
+option(TIDE_ENABLE_HALF_KERNELS "Enable CUDA half-precision kernel instantiations" ON)
 set(TIDE_TM_BLOCK_X "32" CACHE STRING "TM CUDA thread block size in X")
 set(TIDE_TM_BLOCK_Y "8" CACHE STRING "TM CUDA thread block size in Y")
 

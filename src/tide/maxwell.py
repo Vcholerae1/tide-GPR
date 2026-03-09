@@ -1909,8 +1909,6 @@ def maxwell_c_cuda(
 
     # If save_snapshots is False but requires_grad is True, warn user
     if requires_grad and save_snapshots is False:
-        import warnings
-
         warnings.warn(
             "save_snapshots=False but model parameters require gradients. "
             "Backward pass will fail.",
@@ -1957,8 +1955,6 @@ def maxwell_c_cuda(
                 if storage_bytes_limit_host is not None
                 else float("inf")
             )
-            import warnings
-
             if device.type == "cuda" and total_bytes <= limit_device:
                 effective_storage_mode_str = "device"
             elif total_bytes <= limit_host:
