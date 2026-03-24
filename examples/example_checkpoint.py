@@ -237,8 +237,7 @@ def main():
             m_Ey_x=m_Ey_x,
             m_Ey_z=m_Ey_z,
             m_Hx_z=m_Hx_z,
-            m_Hz_x=m_Hz_x,
-            python_backend=True
+            m_Hz_x=m_Hz_x
         )
     
     # =========================================================================

@@ -357,6 +357,149 @@ __global__ void forward_kernel_e(
 #undef HZ_L
 }
 
+__global__ void forward_kernel_e_debye(
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const debye_cp,
+    TIDE_DTYPE *__restrict const ex,
+    TIDE_DTYPE *__restrict const ey,
+    TIDE_DTYPE *__restrict const ez,
+    TIDE_DTYPE const *__restrict const hx,
+    TIDE_DTYPE const *__restrict const hy,
+    TIDE_DTYPE const *__restrict const hz,
+    TIDE_DTYPE *__restrict const m_hy_z,
+    TIDE_DTYPE *__restrict const m_hz_y,
+    TIDE_DTYPE *__restrict const m_hz_x,
+    TIDE_DTYPE *__restrict const m_hx_z,
+    TIDE_DTYPE *__restrict const m_hx_y,
+    TIDE_DTYPE *__restrict const m_hy_x,
+    TIDE_DTYPE const *__restrict const pol_ex,
+    TIDE_DTYPE const *__restrict const pol_ey,
+    TIDE_DTYPE const *__restrict const pol_ez,
+    TIDE_DTYPE *__restrict const ex_prev,
+    TIDE_DTYPE *__restrict const ey_prev,
+    TIDE_DTYPE *__restrict const ez_prev,
+    TIDE_DTYPE const *__restrict const az,
+    TIDE_DTYPE const *__restrict const bz,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const kz,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kx,
+    int64_t const n_poles) {
+  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t total = n_shots * shot_numel;
+  if (i >= total) {
+    return;
+  }
+
+  int64_t const shot_idx = i / shot_numel;
+  int64_t const j = i - shot_idx * shot_numel;
+
+  int64_t const yz_stride = ny * nx;
+  int64_t const z = j / yz_stride;
+  int64_t const rem = j - z * yz_stride;
+  int64_t const y = rem / nx;
+  int64_t const x = rem - y * nx;
+
+  if (z < FD_PAD || z >= nz - FD_PAD + 1 || y < FD_PAD || y >= ny - FD_PAD + 1 ||
+      x < FD_PAD || x >= nx - FD_PAD + 1) {
+    return;
+  }
+
+#define HX_L(dz, dy, dx) HX(dz, dy, dx)
+#define HY_L(dz, dy, dx) HY(dz, dy, dx)
+#define HZ_L(dz, dy, dx) HZ(dz, dy, dx)
+
+  TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
+  TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];
+
+  bool const pml_z_v = (z < pml_z0) || (z >= pml_z1);
+  bool const pml_y_v = (y < pml_y0) || (y >= pml_y1);
+  bool const pml_x_v = (x < pml_x0) || (x >= pml_x1);
+
+  TIDE_DTYPE dHy_dz = DIFFZ1(HY_L);
+  TIDE_DTYPE dHz_dy = DIFFY1(HZ_L);
+  TIDE_DTYPE dHz_dx = DIFFX1(HZ_L);
+  TIDE_DTYPE dHx_dz = DIFFZ1(HX_L);
+  TIDE_DTYPE dHx_dy = DIFFY1(HX_L);
+  TIDE_DTYPE dHy_dx = DIFFX1(HY_L);
+
+  if (pml_z_v) {
+    m_hy_z[i] = bz[z] * m_hy_z[i] + az[z] * dHy_dz;
+    dHy_dz = dHy_dz / kz[z] + m_hy_z[i];
+
+    m_hx_z[i] = bz[z] * m_hx_z[i] + az[z] * dHx_dz;
+    dHx_dz = dHx_dz / kz[z] + m_hx_z[i];
+  }
+
+  if (pml_y_v) {
+    m_hz_y[i] = by[y] * m_hz_y[i] + ay[y] * dHz_dy;
+    dHz_dy = dHz_dy / ky[y] + m_hz_y[i];
+
+    m_hx_y[i] = by[y] * m_hx_y[i] + ay[y] * dHx_dy;
+    dHx_dy = dHx_dy / ky[y] + m_hx_y[i];
+  }
+
+  if (pml_x_v) {
+    m_hz_x[i] = bx[x] * m_hz_x[i] + ax[x] * dHz_dx;
+    dHz_dx = dHz_dx / kx[x] + m_hz_x[i];
+
+    m_hy_x[i] = bx[x] * m_hy_x[i] + ax[x] * dHy_dx;
+    dHy_dx = dHy_dx / kx[x] + m_hy_x[i];
+  }
+
+  TIDE_DTYPE ex_next = ca_val * ex[i] + cb_val * (dHy_dz - dHz_dy);
+  TIDE_DTYPE ey_next = ca_val * ey[i] + cb_val * (dHz_dx - dHx_dz);
+  TIDE_DTYPE ez_next = ca_val * ez[i] + cb_val * (dHx_dy - dHy_dx);
+
+  TIDE_DTYPE pol_term_x = 0;
+  TIDE_DTYPE pol_term_y = 0;
+  TIDE_DTYPE pol_term_z = 0;
+  for (int64_t pole = 0; pole < n_poles; ++pole) {
+    int64_t const coeff_idx = pole * shot_numel + j;
+    int64_t const pol_idx = ((int64_t)shot_idx * n_poles + pole) * shot_numel + j;
+    TIDE_DTYPE const cp = debye_cp[coeff_idx];
+    pol_term_x += cp * pol_ex[pol_idx];
+    pol_term_y += cp * pol_ey[pol_idx];
+    pol_term_z += cp * pol_ez[pol_idx];
+  }
+
+  ex[i] = ex_next + pol_term_x;
+  ey[i] = ey_next + pol_term_y;
+  ez[i] = ez_next + pol_term_z;
+
+#undef HX_L
+#undef HY_L
+#undef HZ_L
+}
+
+__global__ void update_polarization_debye_3d(
+    TIDE_DTYPE const *__restrict const prev_field,
+    TIDE_DTYPE const *__restrict const field,
+    TIDE_DTYPE const *__restrict const debye_a,
+    TIDE_DTYPE const *__restrict const debye_b,
+    TIDE_DTYPE *__restrict const polarization,
+    int64_t const n_poles) {
+  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t total = n_shots * n_poles * shot_numel;
+  if (i >= total) {
+    return;
+  }
+
+  int64_t const shot_pole = i / shot_numel;
+  int64_t const j = i - shot_pole * shot_numel;
+  int64_t const shot_idx = shot_pole / n_poles;
+  int64_t const pole = shot_pole - shot_idx * n_poles;
+  int64_t const coeff_idx = pole * shot_numel + j;
+  int64_t const field_idx = shot_idx * shot_numel + j;
+
+  polarization[i] = debye_a[coeff_idx] * polarization[i] +
+                    debye_b[coeff_idx] * (field[field_idx] + prev_field[field_idx]);
+}
+
 __global__ void forward_kernel_e_with_storage(
     TIDE_DTYPE const *__restrict const ca,
     TIDE_DTYPE const *__restrict const cb,
@@ -986,7 +1129,17 @@ extern "C" void FUNC(forward)(
     TIDE_DTYPE *const m_ex_z,
     TIDE_DTYPE *const m_ex_y,
     TIDE_DTYPE *const m_ey_x,
+    TIDE_DTYPE const *const debye_a,
+    TIDE_DTYPE const *const debye_b,
+    TIDE_DTYPE const *const debye_cp,
+    TIDE_DTYPE *const pol_ex,
+    TIDE_DTYPE *const pol_ey,
+    TIDE_DTYPE *const pol_ez,
+    TIDE_DTYPE *const ex_prev,
+    TIDE_DTYPE *const ey_prev,
+    TIDE_DTYPE *const ez_prev,
     TIDE_DTYPE *const r,
+    int64_t const n_poles,
     TIDE_DTYPE const *const az,
     TIDE_DTYPE const *const bz,
     TIDE_DTYPE const *const azh,
@@ -1019,6 +1172,7 @@ extern "C" void FUNC(forward)(
     int64_t const n_sources_per_shot_h,
     int64_t const n_receivers_per_shot_h,
     int64_t const step_ratio_h,
+    bool const has_dispersion,
     bool const ca_batched_h,
     bool const cb_batched_h,
     bool const cq_batched_h,
@@ -1104,31 +1258,78 @@ extern "C" void FUNC(forward)(
         kyh,
         kxh);
 
-    forward_kernel_e<<<(unsigned)launch_cfg.blocks_cells,
-                       launch_cfg.threads_cells>>>(
-        ca,
-        cb,
-        ex,
-        ey,
-        ez,
-        hx,
-        hy,
-        hz,
-        m_hy_z,
-        m_hz_y,
-        m_hz_x,
-        m_hx_z,
-        m_hx_y,
-        m_hy_x,
-        az,
-        bz,
-        ay,
-        by,
-        ax,
-        bx,
-        kz,
-        ky,
-        kx);
+    if (has_dispersion) {
+      size_t const field_bytes =
+          (size_t)(n_shots_h * shot_numel_h) * sizeof(TIDE_DTYPE);
+      tide::cuda_check_or_abort(
+          cudaMemcpy(ex_prev, ex, field_bytes, cudaMemcpyDeviceToDevice), __FILE__,
+          __LINE__);
+      tide::cuda_check_or_abort(
+          cudaMemcpy(ey_prev, ey, field_bytes, cudaMemcpyDeviceToDevice), __FILE__,
+          __LINE__);
+      tide::cuda_check_or_abort(
+          cudaMemcpy(ez_prev, ez, field_bytes, cudaMemcpyDeviceToDevice), __FILE__,
+          __LINE__);
+      forward_kernel_e_debye<<<(unsigned)launch_cfg.blocks_cells,
+                               launch_cfg.threads_cells>>>(
+          ca,
+          cb,
+          debye_cp,
+          ex,
+          ey,
+          ez,
+          hx,
+          hy,
+          hz,
+          m_hy_z,
+          m_hz_y,
+          m_hz_x,
+          m_hx_z,
+          m_hx_y,
+          m_hy_x,
+          pol_ex,
+          pol_ey,
+          pol_ez,
+          ex_prev,
+          ey_prev,
+          ez_prev,
+          az,
+          bz,
+          ay,
+          by,
+          ax,
+          bx,
+          kz,
+          ky,
+          kx,
+          n_poles);
+    } else {
+      forward_kernel_e<<<(unsigned)launch_cfg.blocks_cells,
+                         launch_cfg.threads_cells>>>(
+          ca,
+          cb,
+          ex,
+          ey,
+          ez,
+          hx,
+          hy,
+          hz,
+          m_hy_z,
+          m_hz_y,
+          m_hz_x,
+          m_hx_z,
+          m_hx_y,
+          m_hy_x,
+          az,
+          bz,
+          ay,
+          by,
+          ax,
+          bx,
+          kz,
+          ky,
+          kx);
+    }
 
     if (n_sources_per_shot_h > 0 && f != nullptr && sources_i != nullptr) {
       add_sources_component<<<(unsigned)launch_cfg.blocks_sources,
@@ -1136,6 +1337,20 @@ extern "C" void FUNC(forward)(
           source_field,
           f + t * n_shots_h * n_sources_per_shot_h,
           sources_i);
+    }
+
+    if (has_dispersion) {
+      int64_t const total_pol = n_shots_h * n_poles * shot_numel_h;
+      int64_t const blocks_pol =
+          total_pol > 0 ? (total_pol + launch_cfg.threads_cells - 1) /
+                              launch_cfg.threads_cells
+                        : 1;
+      update_polarization_debye_3d<<<(unsigned)blocks_pol, launch_cfg.threads_cells>>>(
+          ex_prev, ex, debye_a, debye_b, pol_ex, n_poles);
+      update_polarization_debye_3d<<<(unsigned)blocks_pol, launch_cfg.threads_cells>>>(
+          ey_prev, ey, debye_a, debye_b, pol_ey, n_poles);
+      update_polarization_debye_3d<<<(unsigned)blocks_pol, launch_cfg.threads_cells>>>(
+          ez_prev, ez, debye_a, debye_b, pol_ez, n_poles);
     }
 
     if (n_receivers_per_shot_h > 0 && r != nullptr && receivers_i != nullptr) {

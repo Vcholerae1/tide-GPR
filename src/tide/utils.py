@@ -1,5 +1,6 @@
 import math
 from collections.abc import Sequence
+from typing import Any
 
 import torch
 
@@ -38,6 +39,120 @@ def prepare_parameters(
     cq = dt / mu
 
     return ca, cb, cq
+
+
+def _broadcast_debye_parameter(
+    value: torch.Tensor | float,
+    *,
+    reference: torch.Tensor,
+    name: str,
+) -> torch.Tensor:
+    tensor = torch.as_tensor(value, device=reference.device, dtype=reference.dtype)
+    model_shape = tuple(reference.shape)
+    model_ndim = len(model_shape)
+
+    if tensor.ndim <= model_ndim:
+        try:
+            torch.broadcast_shapes(tuple(tensor.shape), model_shape)
+        except RuntimeError as exc:
+            raise ValueError(
+                f"{name} with shape {tuple(tensor.shape)} is not broadcastable "
+                f"to model shape {model_shape}."
+            ) from exc
+        tensor = tensor.reshape((1,) + tuple(tensor.shape))
+    elif tensor.ndim == model_ndim + 1:
+        try:
+            torch.broadcast_shapes(tuple(tensor.shape[1:]), model_shape)
+        except RuntimeError as exc:
+            raise ValueError(
+                f"{name} with shape {tuple(tensor.shape)} is not broadcastable "
+                f"to model shape {model_shape} on trailing dimensions."
+            ) from exc
+    else:
+        raise ValueError(
+            f"{name} must be a scalar, model-shaped tensor, or "
+            f"[n_poles, *model_shape], but got shape {tuple(tensor.shape)}."
+        )
+
+    return torch.broadcast_to(tensor, (tensor.shape[0], *model_shape))
+
+
+def compile_material_coefficients(
+    epsilon_r: torch.Tensor,
+    sigma: torch.Tensor,
+    mu_r: torch.Tensor,
+    dt: float,
+    *,
+    dispersion: Any | None = None,
+) -> dict[str, Any]:
+    """Compile material tensors into solver coefficients.
+
+    When `dispersion` is None, this reduces to the existing `(ca, cb, cq)`
+    coefficients. For Debye dispersion, it returns additional coefficients for
+    the polarization-memory update.
+    """
+    if torch.any(epsilon_r <= 0):
+        raise ValueError("epsilon must be strictly positive.")
+
+    ca, cb, cq = prepare_parameters(epsilon_r, sigma, mu_r, dt)
+    result: dict[str, Any] = {
+        "ca": ca,
+        "cb": cb,
+        "cq": cq,
+        "dispersion": dispersion,
+        "has_dispersion": False,
+    }
+    if dispersion is None:
+        return result
+
+    delta_epsilon = _broadcast_debye_parameter(
+        dispersion.delta_epsilon,
+        reference=epsilon_r,
+        name="delta_epsilon",
+    )
+    tau = _broadcast_debye_parameter(
+        dispersion.tau,
+        reference=epsilon_r,
+        name="tau",
+    )
+
+    if torch.any(delta_epsilon < 0):
+        raise ValueError("delta_epsilon must be non-negative.")
+    if torch.any(tau <= 0):
+        raise ValueError("tau must be strictly positive.")
+
+    min_tau = float(tau.detach().amin().item())
+    if dt >= min_tau:
+        raise ValueError(
+            f"Debye dispersion requires dt < min(tau), but got dt={dt} and min(tau)={min_tau}."
+        )
+
+    epsilon_inf = epsilon_r * EP0
+    mu = mu_r * MU0
+    tau_term = 2.0 * tau + dt
+    a = (2.0 * tau - dt) / tau_term
+    b = (EP0 * delta_epsilon * dt) / tau_term
+    b_sum = b.sum(dim=0)
+    den = epsilon_inf + sigma * dt / 2.0 + b_sum
+    ca_d = (epsilon_inf - sigma * dt / 2.0 - b_sum) / den
+    cb_d = dt / den
+    cp = (1.0 - a) / den.unsqueeze(0)
+
+    result.update(
+        {
+            "ca": ca_d,
+            "cb": cb_d,
+            "cq": dt / mu,
+            "has_dispersion": True,
+            "debye": {
+                "a": a,
+                "b": b,
+                "cp": cp,
+                "n_poles": int(a.shape[0]),
+            },
+        }
+    )
+    return result
 
 
 def setup_pml(

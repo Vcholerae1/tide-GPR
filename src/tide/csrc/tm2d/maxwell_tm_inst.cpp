@@ -211,6 +211,95 @@ static inline void forward_kernel_e_with_storage_dispatch(
       ey_store, curl_store);
 }
 
+static void forward_kernel_e_debye(
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const hx,
+    TIDE_DTYPE const *__restrict const hz, TIDE_DTYPE *__restrict const ey,
+    TIDE_DTYPE *__restrict const m_hx_z, TIDE_DTYPE *__restrict const m_hz_x,
+    TIDE_DTYPE *__restrict const ey_prev,
+    TIDE_DTYPE const *__restrict const debye_cp,
+    TIDE_DTYPE *__restrict const polarization,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh, TIDE_DTYPE const rdy,
+    TIDE_DTYPE const rdx, int64_t const n_shots, int64_t const ny,
+    int64_t const nx, int64_t const shot_numel, int64_t const pml_y0,
+    int64_t const pml_y1, int64_t const pml_x0, int64_t const pml_x1,
+    bool const ca_batched, bool const cb_batched, int64_t const n_poles) {
+
+  ::tide::GridParams<TIDE_DTYPE> params = {
+      ay,      ayh,        ax,         axh,        by,     byh,    bx,
+      bxh,     ky,         kyh,        kx,         kxh,    rdy,    rdx,
+      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
+      pml_x1,  ca_batched, cb_batched, false};
+
+  TIDE_OMP_INDEX shot_idx;
+  TIDE_OMP_INDEX y;
+  TIDE_OMP_INDEX x;
+  int const FD_PAD = ::tide::StencilTraits<TIDE_STENCIL>::FD_PAD;
+
+  TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
+  for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    for (y = 0; y < ny - FD_PAD + 1; ++y) {
+      for (x = 0; x < nx - FD_PAD + 1; ++x) {
+        if (y >= FD_PAD && x >= FD_PAD) {
+          int64_t const j = (int64_t)y * nx + (int64_t)x;
+          int64_t const i = (int64_t)shot_idx * shot_numel + j;
+          ey_prev[i] = ey[i];
+          ::tide::forward_kernel_e_core<TIDE_DTYPE, TIDE_STENCIL>(
+              params, ca, cb, hx, hz, ey, m_hx_z, m_hz_x, y, x, shot_idx);
+          TIDE_DTYPE pol_term = (TIDE_DTYPE)0;
+          for (int64_t pole = 0; pole < n_poles; ++pole) {
+            int64_t const coeff_idx = pole * shot_numel + j;
+            int64_t const pol_idx =
+                ((int64_t)shot_idx * n_poles + pole) * shot_numel + j;
+            pol_term += debye_cp[coeff_idx] * polarization[pol_idx];
+          }
+          ey[i] += pol_term;
+        }
+      }
+    }
+  }
+}
+
+static void update_polarization_debye(
+    TIDE_DTYPE const *__restrict const ey_prev,
+    TIDE_DTYPE const *__restrict const ey,
+    TIDE_DTYPE const *__restrict const debye_a,
+    TIDE_DTYPE const *__restrict const debye_b,
+    TIDE_DTYPE *__restrict const polarization, int64_t const n_shots,
+    int64_t const ny, int64_t const nx, int64_t const shot_numel,
+    int64_t const n_poles) {
+  TIDE_OMP_INDEX shot_idx;
+  TIDE_OMP_INDEX pole;
+  TIDE_OMP_INDEX j;
+  TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
+  for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    for (pole = 0; pole < n_poles; ++pole) {
+      for (j = 0; j < shot_numel; ++j) {
+        int64_t const field_idx = (int64_t)shot_idx * shot_numel + (int64_t)j;
+        int64_t const coeff_idx = (int64_t)pole * shot_numel + (int64_t)j;
+        int64_t const pol_idx =
+            ((int64_t)shot_idx * n_poles + (int64_t)pole) * shot_numel +
+            (int64_t)j;
+        polarization[pol_idx] =
+            debye_a[coeff_idx] * polarization[pol_idx] +
+            debye_b[coeff_idx] * (ey[field_idx] + ey_prev[field_idx]);
+      }
+    }
+  }
+}
+
 static inline void forward_kernel_e_with_storage_dispatch(
     TIDE_DTYPE const *__restrict const ca,
     TIDE_DTYPE const *__restrict const cb,
@@ -310,7 +399,11 @@ extern "C"
         TIDE_DTYPE const *const cq, TIDE_DTYPE const *const f,
         TIDE_DTYPE *const ey, TIDE_DTYPE *const hx, TIDE_DTYPE *const hz,
         TIDE_DTYPE *const m_ey_x, TIDE_DTYPE *const m_ey_z,
-        TIDE_DTYPE *const m_hx_z, TIDE_DTYPE *const m_hz_x, TIDE_DTYPE *const r,
+        TIDE_DTYPE *const m_hx_z, TIDE_DTYPE *const m_hz_x,
+        TIDE_DTYPE const *const debye_a, TIDE_DTYPE const *const debye_b,
+        TIDE_DTYPE const *const debye_cp, TIDE_DTYPE *const polarization,
+        TIDE_DTYPE *const ey_prev, TIDE_DTYPE *const r,
+        int64_t const n_poles,
         TIDE_DTYPE const *const ay, TIDE_DTYPE const *const by,
         TIDE_DTYPE const *const ayh, TIDE_DTYPE const *const byh,
         TIDE_DTYPE const *const ax, TIDE_DTYPE const *const bx,
@@ -322,6 +415,7 @@ extern "C"
         int64_t const nt, int64_t const n_shots, int64_t const ny,
         int64_t const nx, int64_t const n_sources_per_shot,
         int64_t const n_receivers_per_shot, int64_t const step_ratio,
+        bool const has_dispersion,
         bool const ca_batched, bool const cb_batched, bool const cq_batched,
         int64_t const start_t, int64_t const pml_y0, int64_t const pml_x0,
         int64_t const pml_y1, int64_t const pml_x1, int64_t const n_threads,
@@ -346,16 +440,29 @@ extern "C"
                      bx, bxh, ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx,
                      shot_numel, pml_y0, pml_y1, pml_x0, pml_x1, cq_batched);
 
-    forward_kernel_e_with_storage(
-        ca, cb, hx, hz, ey, m_hx_z, m_hz_x, ay, ayh, ax, axh, by, byh, bx, bxh,
-        ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0, pml_y1,
-        pml_x0, pml_x1, ca_batched, cb_batched, false,
-        false, // No storage for standard forward
-        NULL, NULL);
+    if (has_dispersion) {
+      forward_kernel_e_debye(
+          ca, cb, hx, hz, ey, m_hx_z, m_hz_x, ey_prev, debye_cp, polarization,
+          ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx,
+          n_shots, ny, nx, shot_numel, pml_y0, pml_y1, pml_x0, pml_x1,
+          ca_batched, cb_batched, n_poles);
+    } else {
+      forward_kernel_e_with_storage(
+          ca, cb, hx, hz, ey, m_hx_z, m_hz_x, ay, ayh, ax, axh, by, byh, bx,
+          bxh, ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0,
+          pml_y1, pml_x0, pml_x1, ca_batched, cb_batched, false,
+          false, // No storage for standard forward
+          NULL, NULL);
+    }
 
     if (n_sources_per_shot > 0) {
       add_sources_ey(ey, f + t * n_shots * n_sources_per_shot, sources_i,
                      n_shots, shot_numel, n_sources_per_shot);
+    }
+
+    if (has_dispersion) {
+      update_polarization_debye(ey_prev, ey, debye_a, debye_b, polarization,
+                                n_shots, ny, nx, shot_numel, n_poles);
     }
 
     if (n_receivers_per_shot > 0) {
@@ -404,7 +511,8 @@ extern "C"
         int64_t const nt, int64_t const n_shots, int64_t const ny,
         int64_t const nx, int64_t const n_sources_per_shot,
         int64_t const n_receivers_per_shot, int64_t const step_ratio,
-        int64_t const storage_mode, int64_t const shot_bytes_uncomp,
+        int64_t const storage_mode, int64_t const storage_format,
+        int64_t const shot_bytes_uncomp,
         bool const ca_requires_grad, bool const cb_requires_grad,
         bool const ca_batched, bool const cb_batched, bool const cq_batched,
         int64_t const start_t, int64_t const pml_y0, int64_t const pml_x0,
@@ -424,7 +532,7 @@ extern "C"
 
   int64_t const shot_numel = ny * nx;
   int64_t const store_size = n_shots * shot_numel;
-  bool const storage_bf16 = (shot_bytes_uncomp == shot_numel * 2);
+  bool const storage_bf16 = (storage_format == STORAGE_FORMAT_BF16);
 
   FILE **fp_ey = NULL;
   FILE **fp_curl = NULL;
@@ -827,7 +935,8 @@ extern "C"
         int64_t const nt, int64_t const n_shots, int64_t const ny,
         int64_t const nx, int64_t const n_sources_per_shot,
         int64_t const n_receivers_per_shot, int64_t const step_ratio,
-        int64_t const storage_mode, int64_t const shot_bytes_uncomp,
+        int64_t const storage_mode, int64_t const storage_format,
+        int64_t const shot_bytes_uncomp,
         bool const ca_requires_grad, bool const cb_requires_grad,
         bool const ca_batched, bool const cb_batched, bool const cq_batched,
         int64_t const start_t, int64_t const pml_y0, int64_t const pml_x0,
@@ -848,7 +957,7 @@ extern "C"
 
   int64_t const shot_numel = ny * nx;
   int64_t const store_size = n_shots * shot_numel;
-  bool const storage_bf16 = (shot_bytes_uncomp == shot_numel * 2);
+  bool const storage_bf16 = (storage_format == STORAGE_FORMAT_BF16);
   bool const reduce_grad_ca = ca_requires_grad && !ca_batched;
   bool const reduce_grad_cb = cb_requires_grad && !cb_batched;
   TIDE_DTYPE *grad_ca_accum = grad_ca;

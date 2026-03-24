@@ -11,6 +11,10 @@
 #define STORAGE_DISK 2
 #define STORAGE_NONE 3
 
+#define STORAGE_FORMAT_FULL 0
+#define STORAGE_FORMAT_BF16 1
+#define STORAGE_FORMAT_FP16 2
+
 #ifdef __cplusplus
 extern "C" {
 #endif

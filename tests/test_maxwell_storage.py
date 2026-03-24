@@ -146,3 +146,28 @@ def test_storage_mode_none_rejects_gradients():
             pml_width=4,
             storage_mode="none",
         )
+
+
+def test_storage_device_ebisu_nonstore_matches_baseline(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for this test.")
+
+    with tempfile.TemporaryDirectory() as storage_path:
+        monkeypatch.setenv("TIDE_TM_EBISU_STEPS", "0")
+        monkeypatch.setenv("TIDE_TM_FUSED_STEPS", "0")
+        eps_base, sig_base, rec_base = _run_grad(
+            "device", storage_path, storage_compression=False
+        )
+
+        monkeypatch.setenv("TIDE_TM_EBISU_STEPS", "3")
+        monkeypatch.setenv("TIDE_TM_EBISU_TILE_X", "40")
+        monkeypatch.setenv("TIDE_TM_EBISU_TILE_Y", "16")
+        monkeypatch.setenv("TIDE_TM_EBISU_ILP", "1")
+        monkeypatch.setenv("TIDE_TM_FUSED_STEPS", "0")
+        eps_ebisu, sig_ebisu, rec_ebisu = _run_grad(
+            "device", storage_path, storage_compression=False
+        )
+
+    torch.testing.assert_close(rec_ebisu, rec_base, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(eps_ebisu, eps_base, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(sig_ebisu, sig_base, rtol=1e-4, atol=1e-5)

@@ -152,7 +152,7 @@ _TM_BATCHED_FLAGS: _Spec = [
 ]
 
 _TM_STORAGE_TAIL: _Spec = [
-    (_I, 2, "storage_mode, shot_bytes_uncomp"),
+    (_I, 3, "storage_mode, storage_format, shot_bytes_uncomp"),
     (_B, 2, "ca_requires_grad, cb_requires_grad"),
 ]
 
@@ -167,9 +167,12 @@ _TM_FORWARD_SPEC: _Spec = [
     (_P, 1, "f"),
     (_P, 3, "ey, hx, hz"),
     (_P, 4, "m_ey_x, m_ey_z, m_hx_z, m_hz_x"),
+    (_P, 5, "debye_a, debye_b, debye_cp, polarization, ey_prev"),
     (_P, 1, "r"),
+    (_I, 1, "n_poles"),
     *_TM_PML_PROFILES,
     *_TM_COMMON_TAIL,
+    (_B, 1, "has_dispersion"),
     *_TM_BATCHED_FLAGS,
 ]
 
@@ -257,9 +260,16 @@ _3D_FORWARD_SPEC: _Spec = [
     (_P, 3, "ca, cb, cq"),
     (_P, 1, "f"),
     *_3D_FIELDS,
+    (
+        _P,
+        9,
+        "debye_a, debye_b, debye_cp, pol_ex, pol_ey, pol_ez, ex_prev, ey_prev, ez_prev",
+    ),
     (_P, 1, "r"),
+    (_I, 1, "n_poles"),
     *_3D_PML_PROFILES,
     *_3D_COMMON_TAIL,
+    (_B, 1, "has_dispersion"),
     *_3D_BATCHED_FLAGS,
 ]
 
@@ -391,6 +401,8 @@ def get_backend_function(
     accuracy: int,
     dtype: torch.dtype,
     device: torch.device,
+    *,
+    variant: str = "",
 ) -> CFunctionPointer:
     """Selects and returns the appropriate backend C/CUDA function.
 
@@ -418,12 +430,16 @@ def get_backend_function(
 
     device_str = device.type
 
-    func_name = f"{propagator}_{accuracy}_{dtype_str}_{pass_name}_{device_str}"
+    suffix = f"_{variant}" if variant else ""
+    func_name = f"{propagator}_{accuracy}_{dtype_str}_{pass_name}{suffix}_{device_str}"
 
     try:
-        return getattr(dll, func_name)
+        func = getattr(dll, func_name)
     except AttributeError as e:
         raise AttributeError(f"Backend function {func_name} not found.") from e
+    func.argtypes = _template_argtypes(f"{propagator}_{pass_name}", dtype_str)
+    func.restype = None
+    return func
 
 
 def tensor_to_ptr(tensor: torch.Tensor | None) -> int:

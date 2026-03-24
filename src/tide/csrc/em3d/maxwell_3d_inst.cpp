@@ -172,6 +172,32 @@ TIDE_OMP_SIMD
   }
 }
 
+static void update_polarization_debye_3d(
+    TIDE_DTYPE const *__restrict const prev_field,
+    TIDE_DTYPE const *__restrict const field,
+    TIDE_DTYPE const *__restrict const debye_a,
+    TIDE_DTYPE const *__restrict const debye_b,
+    TIDE_DTYPE *__restrict const polarization,
+    int64_t const n_shots,
+    int64_t const shot_numel,
+    int64_t const n_poles) {
+  TIDE_OMP_INDEX shot_idx;
+TIDE_OMP_PARALLEL_FOR
+  for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+    int64_t const shot_off = (int64_t)shot_idx * shot_numel;
+    for (int64_t pole = 0; pole < n_poles; ++pole) {
+      int64_t const coeff_off = pole * shot_numel;
+      int64_t const pol_off = ((int64_t)shot_idx * n_poles + pole) * shot_numel;
+      for (int64_t idx = 0; idx < shot_numel; ++idx) {
+        polarization[pol_off + idx] =
+            debye_a[coeff_off + idx] * polarization[pol_off + idx] +
+            debye_b[coeff_off + idx] *
+                (field[shot_off + idx] + prev_field[shot_off + idx]);
+      }
+    }
+  }
+}
+
 static void convert_grad_ca_cb_to_eps_sigma_3d(
     TIDE_DTYPE const *__restrict const ca,
     TIDE_DTYPE const *__restrict const cb,
@@ -265,7 +291,17 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(forward)(
     TIDE_DTYPE *__restrict const m_ex_z,
     TIDE_DTYPE *__restrict const m_ex_y,
     TIDE_DTYPE *__restrict const m_ey_x,
+    TIDE_DTYPE const *__restrict const debye_a,
+    TIDE_DTYPE const *__restrict const debye_b,
+    TIDE_DTYPE const *__restrict const debye_cp,
+    TIDE_DTYPE *__restrict const pol_ex,
+    TIDE_DTYPE *__restrict const pol_ey,
+    TIDE_DTYPE *__restrict const pol_ez,
+    TIDE_DTYPE *__restrict const ex_prev,
+    TIDE_DTYPE *__restrict const ey_prev,
+    TIDE_DTYPE *__restrict const ez_prev,
     TIDE_DTYPE *__restrict const r,
+    int64_t const n_poles,
     TIDE_DTYPE const *__restrict const az,
     TIDE_DTYPE const *__restrict const bz,
     TIDE_DTYPE const *__restrict const azh,
@@ -298,6 +334,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(forward)(
     int64_t const n_sources_per_shot,
     int64_t const n_receivers_per_shot,
     int64_t const step_ratio,
+    bool const has_dispersion,
     bool const ca_batched,
     bool const cb_batched,
     bool const cq_batched,
@@ -418,6 +455,16 @@ TIDE_OMP_PARALLEL_FOR
       }
     }
 
+    if (has_dispersion) {
+      int64_t const total_cells = n_shots * shot_numel;
+TIDE_OMP_PARALLEL_FOR
+      for (shot_idx = 0; shot_idx < total_cells; ++shot_idx) {
+        ex_prev[shot_idx] = ex[shot_idx];
+        ey_prev[shot_idx] = ey[shot_idx];
+        ez_prev[shot_idx] = ez[shot_idx];
+      }
+    }
+
     /* E update (uses integer-grid derivatives of H). */
 TIDE_OMP_PARALLEL_FOR
     for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
@@ -465,6 +512,25 @@ TIDE_OMP_PARALLEL_FOR
             EX(0, 0, 0) = ca_val * EX(0, 0, 0) + cb_val * (dHy_dz - dHz_dy);
             EY(0, 0, 0) = ca_val * EY(0, 0, 0) + cb_val * (dHz_dx - dHx_dz);
             EZ(0, 0, 0) = ca_val * EZ(0, 0, 0) + cb_val * (dHx_dy - dHy_dx);
+
+            if (has_dispersion) {
+              int64_t const idx = IDX(0, 0, 0);
+              TIDE_DTYPE pol_term_x = 0;
+              TIDE_DTYPE pol_term_y = 0;
+              TIDE_DTYPE pol_term_z = 0;
+              for (int64_t pole = 0; pole < n_poles; ++pole) {
+                int64_t const coeff_idx = pole * shot_numel + idx;
+                int64_t const pol_idx =
+                    ((int64_t)shot_idx * n_poles + pole) * shot_numel + idx;
+                TIDE_DTYPE const cp = debye_cp[coeff_idx];
+                pol_term_x += cp * pol_ex[pol_idx];
+                pol_term_y += cp * pol_ey[pol_idx];
+                pol_term_z += cp * pol_ez[pol_idx];
+              }
+              EX(0, 0, 0) += pol_term_x;
+              EY(0, 0, 0) += pol_term_y;
+              EZ(0, 0, 0) += pol_term_z;
+            }
           }
         }
       }
@@ -482,6 +548,15 @@ TIDE_OMP_PARALLEL_FOR
         add_sources_component(ey, f, sources_i, source_time_offset, n_shots, shot_numel,
                               n_sources_per_shot);
       }
+    }
+
+    if (has_dispersion) {
+      update_polarization_debye_3d(
+          ex_prev, ex, debye_a, debye_b, pol_ex, n_shots, shot_numel, n_poles);
+      update_polarization_debye_3d(
+          ey_prev, ey, debye_a, debye_b, pol_ey, n_shots, shot_numel, n_poles);
+      update_polarization_debye_3d(
+          ez_prev, ez, debye_a, debye_b, pol_ez, n_shots, shot_numel, n_poles);
     }
 
     int64_t const recv_time_offset = t * n_shots * n_receivers_per_shot;

@@ -7,9 +7,6 @@ __pycache__/
 .venv/
 .uv-cache/
 
-# Claude Code local settings (contains API keys)
-.claude/settings.local.json
-
 # Build artifacts
 build/
 dist/
@@ -43,4 +40,3 @@ test.md
 *.png
 *.html
 !README.md
-

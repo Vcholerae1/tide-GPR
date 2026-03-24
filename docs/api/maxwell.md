@@ -6,13 +6,17 @@
 
 ### `maxwelltm(...)` precision arguments
 
-- Compute uses the input tensor dtype (`float32` or `float64`).
+- Default compute uses the input tensor dtype (`float32` or `float64`).
+- `compute_precision="fp16_scaled"` enables a CUDA-only TM2D mixed-precision
+  path with float32 public tensors and internal fp16 field/snapshot storage.
 - Snapshot storage compression remains configurable via `storage_compression`,
-  including `"bf16"`.
+  including `"bf16"` on the default path.
 
 Behavior:
 - External parameter units are unchanged (SI-compatible inputs).
 - Returned fields remain in physical units.
+- `compute_precision="fp16_scaled"` rejects `python_backend=True`,
+  float64 public tensors, and `storage_compression="bf16"`.
 
 ## Advanced or Internal Functions
 - prepare_parameters

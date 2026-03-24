@@ -8,6 +8,7 @@ import torch
 from . import staggered
 from .callbacks import Callback, CallbackState
 from .cfl import cfl_condition
+from .dispersion import DebyeDispersion
 from .grid_utils import (
     _normalize_grid_spacing_2d,
     _normalize_grid_spacing_3d,
@@ -21,6 +22,9 @@ from .storage import (
     STORAGE_CPU,
     STORAGE_DEVICE,
     STORAGE_DISK,
+    STORAGE_FORMAT_BF16,
+    STORAGE_FORMAT_FP16,
+    STORAGE_FORMAT_FULL,
     STORAGE_NONE,
     TemporaryStorage,
     _normalize_storage_compression,
@@ -30,6 +34,8 @@ from .storage import (
 from .utils import (
     C0,
     EP0,
+    MU0,
+    compile_material_coefficients,
     prepare_parameters,
 )
 from .validation import (
@@ -40,6 +46,9 @@ from .validation import (
 
 _CTX_HANDLE_COUNTER = itertools.count()
 _CTX_HANDLE_REGISTRY: dict[int, dict[str, Any]] = {}
+_COMPUTE_PRECISION_DEFAULT = "default"
+_COMPUTE_PRECISION_FP16_SCALED = "fp16_scaled"
+_TM2D_FP16S_VARIANT = "fp16s"
 
 
 def _register_ctx_handle(ctx_data: dict[str, Any]) -> torch.Tensor:
@@ -86,6 +95,361 @@ def _init_tm_wavefield(
     else:
         wavefield = torch.zeros(size_with_batch, device=device, dtype=dtype)
     return wavefield.contiguous() if contiguous else wavefield
+
+
+def _init_tm_scaled_wavefield(
+    field_0: torch.Tensor | None,
+    *,
+    n_shots: int,
+    size_with_batch: tuple[int, int, int],
+    fd_pad_list: list[int],
+    device: torch.device,
+    target_dtype: torch.dtype,
+    scale: torch.Tensor,
+    contiguous: bool = False,
+) -> torch.Tensor:
+    """Initialize padded TM wavefields directly in scaled working units."""
+    if field_0 is None:
+        wavefield = torch.zeros(size_with_batch, device=device, dtype=target_dtype)
+        return wavefield.contiguous() if contiguous else wavefield
+
+    padded = _init_tm_wavefield(
+        field_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=torch.float32,
+        contiguous=False,
+    )
+    padded = padded / _expand_shotwise_scale(scale.to(device=device), ndim=3)
+    if target_dtype != torch.float32:
+        padded = padded.to(target_dtype)
+    return padded.contiguous() if contiguous else padded
+
+
+def _init_polarization_state(
+    *,
+    n_shots: int,
+    n_poles: int,
+    spatial_shape: tuple[int, ...],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.zeros((n_shots, n_poles, *spatial_shape), device=device, dtype=dtype)
+
+
+def _debye_polarization_term(cp: torch.Tensor, polarization: torch.Tensor) -> torch.Tensor:
+    cp_view = cp.unsqueeze(0)
+    return (cp_view * polarization).sum(dim=1)
+
+
+def _validate_dispersion_time_step(
+    dispersion: DebyeDispersion | None,
+    *,
+    dt: float,
+) -> None:
+    if dispersion is None:
+        return
+    tau = torch.as_tensor(dispersion.tau)
+    min_tau = float(tau.detach().amin().item())
+    if dt >= min_tau:
+        raise ValueError(
+            f"Debye dispersion requires dt < min(tau), but got dt={dt} and min(tau)={min_tau}."
+        )
+
+
+def _pad_dispersion_for_model(
+    dispersion: DebyeDispersion | None,
+    *,
+    model_shape: tuple[int, ...],
+    total_pad: list[int],
+    padded_size: tuple[int, ...],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> DebyeDispersion | None:
+    if dispersion is None:
+        return None
+
+    def _pad_param(value: torch.Tensor | float) -> torch.Tensor | float:
+        tensor = torch.as_tensor(value, device=device, dtype=dtype)
+        model_ndim = len(model_shape)
+        if tensor.ndim == 0:
+            return tensor
+        if tensor.ndim <= model_ndim:
+            expanded = torch.broadcast_to(tensor, model_shape)
+            return create_or_pad(
+                expanded, total_pad, device, dtype, padded_size, mode="replicate"
+            )
+        if tensor.ndim == model_ndim + 1:
+            padded = [
+                create_or_pad(
+                    torch.broadcast_to(tensor[pole], model_shape),
+                    total_pad,
+                    device,
+                    dtype,
+                    padded_size,
+                    mode="replicate",
+                )
+                for pole in range(tensor.shape[0])
+            ]
+            return torch.stack(padded, dim=0)
+        raise ValueError(
+            "Debye dispersion parameters must be scalar, model-shaped, or "
+            f"[n_poles, *model_shape], but got shape {tuple(tensor.shape)}."
+        )
+
+    return DebyeDispersion(
+        delta_epsilon=_pad_param(dispersion.delta_epsilon),
+        tau=_pad_param(dispersion.tau),
+    )
+
+
+def _normalize_compute_precision(compute_precision: str | None) -> str:
+    if compute_precision is None:
+        return _COMPUTE_PRECISION_DEFAULT
+    if not isinstance(compute_precision, str):
+        raise TypeError(
+            f"compute_precision must be a string, got {type(compute_precision).__name__}."
+        )
+    value = compute_precision.strip().lower()
+    if value in {"default", "native", "input"}:
+        return _COMPUTE_PRECISION_DEFAULT
+    if value == _COMPUTE_PRECISION_FP16_SCALED:
+        return _COMPUTE_PRECISION_FP16_SCALED
+    raise ValueError(
+        "compute_precision must be 'default' or 'fp16_scaled', "
+        f"but got {compute_precision!r}."
+    )
+
+
+def _expand_shotwise_scale(scale: torch.Tensor, *, ndim: int) -> torch.Tensor:
+    view_shape = [scale.shape[0]] + [1] * (ndim - 1)
+    return scale.reshape(view_shape)
+
+
+def _max_abs_per_shot(
+    tensor: torch.Tensor | None,
+    *,
+    n_shots: int,
+    device: torch.device,
+) -> torch.Tensor:
+    if tensor is None or tensor.numel() == 0:
+        return torch.zeros(n_shots, device=device, dtype=torch.float32)
+    work = tensor.detach()
+    if work.ndim == 2:
+        work = work.unsqueeze(0).expand(n_shots, -1, -1)
+    elif work.ndim >= 3 and work.shape[0] == 1 and n_shots > 1:
+        work = work.expand(n_shots, *work.shape[1:])
+    elif work.ndim >= 3 and work.shape[1] == n_shots:
+        work = work.movedim(1, 0)
+    if work.shape[0] != n_shots:
+        raise ValueError(
+            f"Expected leading shot dimension {n_shots}, got {tuple(work.shape)}."
+        )
+    return work.abs().reshape(n_shots, -1).amax(dim=1).to(torch.float32)
+
+
+def _resolve_tm2d_storage_spec(
+    *,
+    compute_precision: str,
+    storage_compression: bool | str | None,
+    dtype: torch.dtype,
+    device: torch.device,
+    context: str,
+) -> tuple[str, torch.dtype, int, int]:
+    storage_kind, store_dtype, itemsize, storage_format = _resolve_storage_compression(
+        storage_compression,
+        dtype,
+        device,
+        context=context,
+        compute_precision=compute_precision,
+    )
+    return storage_kind, store_dtype, itemsize, storage_format
+
+
+def _build_tm2d_fp16_scale_context(
+    *,
+    epsilon_padded: torch.Tensor,
+    mu_padded: torch.Tensor,
+    f_shot: torch.Tensor,
+    Ey_0: torch.Tensor | None,
+    Hx_0: torch.Tensor | None,
+    Hz_0: torch.Tensor | None,
+    n_shots: int,
+) -> dict[str, Any]:
+    device = epsilon_padded.device
+    stat_dtype = torch.float32
+    z0 = float((MU0 / EP0) ** 0.5)
+    eps_stat = epsilon_padded.detach().to(stat_dtype).reshape(-1).median()
+    mu_stat = mu_padded.detach().to(stat_dtype).reshape(-1).median()
+    eps_stat = torch.clamp(eps_stat, min=torch.finfo(stat_dtype).tiny)
+    z_ref = torch.tensor(z0, device=device, dtype=stat_dtype) * torch.sqrt(
+        mu_stat / eps_stat
+    )
+
+    f_shot = f_shot.to(device=device, dtype=stat_dtype)
+    ey_shot = _max_abs_per_shot(Ey_0, n_shots=n_shots, device=device)
+    hx_shot = _max_abs_per_shot(Hx_0, n_shots=n_shots, device=device) * z_ref
+    hz_shot = _max_abs_per_shot(Hz_0, n_shots=n_shots, device=device) * z_ref
+    e_signal = torch.stack((f_shot, ey_shot, hx_shot, hz_shot), dim=0).amax(dim=0)
+    e_ref = torch.where(e_signal > 0, e_signal, torch.ones_like(e_signal))
+    h_ref = e_ref / z_ref
+    return {
+        "enabled": True,
+        "compute_precision": _COMPUTE_PRECISION_FP16_SCALED,
+        "variant": _TM2D_FP16S_VARIANT,
+        "z_ref": z_ref,
+        "e_ref": e_ref,
+        "h_ref": h_ref,
+        "field_dtype": torch.float16,
+        "adjoint_field_dtype": torch.float32,
+        "memory_dtype": torch.float32,
+        "receiver_dtype": torch.float32,
+        "grad_dtype": torch.float32,
+    }
+
+
+def _prepare_tm2d_source_injection(
+    *,
+    source_amplitude: torch.Tensor | None,
+    cb_at_src: torch.Tensor | None,
+    source_coeff: float,
+    dtype: torch.dtype,
+    scale_ctx: dict[str, Any] | None,
+    n_shots: int,
+    n_sources: int,
+    nt_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    device = (
+        source_amplitude.device
+        if source_amplitude is not None
+        else cb_at_src.device if cb_at_src is not None else torch.device("cpu")
+    )
+    if (
+        source_amplitude is None
+        or source_amplitude.numel() == 0
+        or cb_at_src is None
+        or cb_at_src.numel() == 0
+        or n_sources == 0
+    ):
+        target_dtype = torch.float32 if scale_ctx is not None else dtype
+        empty = torch.empty(0, device=device, dtype=target_dtype)
+        return empty, torch.zeros(n_shots, device=device, dtype=torch.float32)
+
+    source_abs_max = source_amplitude.detach().abs().amax(dim=2).to(torch.float32)
+    cb_abs = cb_at_src.detach().abs().to(torch.float32)
+    f_shot = (source_abs_max * cb_abs * abs(source_coeff)).amax(dim=1)
+
+    target_dtype = torch.float32 if scale_ctx is not None else dtype
+    source = source_amplitude.permute(2, 0, 1).contiguous().to(target_dtype)
+    source = source * cb_at_src.to(target_dtype).unsqueeze(0)
+    source.mul_(source_coeff)
+    if scale_ctx is not None:
+        source.div_(scale_ctx["e_ref"].reshape(1, n_shots, 1))
+    return source.reshape(nt_steps * n_shots * n_sources).contiguous(), f_shot
+
+
+def _unscale_tm2d_outputs(
+    *,
+    scale_ctx: dict[str, Any] | None,
+    Ey: torch.Tensor,
+    Hx: torch.Tensor,
+    Hz: torch.Tensor,
+    m_Ey_x: torch.Tensor,
+    m_Ey_z: torch.Tensor,
+    m_Hx_z: torch.Tensor,
+    m_Hz_x: torch.Tensor,
+    receiver_amplitudes: torch.Tensor,
+    inplace_float_outputs: bool = False,
+) -> tuple[torch.Tensor, ...]:
+    if not scale_ctx:
+        return Ey, Hx, Hz, m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x, receiver_amplitudes
+
+    e_ref = scale_ctx["e_ref"]
+    h_ref = scale_ctx["h_ref"]
+    e_field = _expand_shotwise_scale(e_ref, ndim=3)
+    h_field = _expand_shotwise_scale(h_ref, ndim=3)
+    e_recv = e_ref.reshape(1, e_ref.shape[0], 1)
+    if inplace_float_outputs:
+        if m_Ey_x.dtype == torch.float32:
+            m_Ey_x.mul_(e_field)
+        else:
+            m_Ey_x = m_Ey_x.float() * e_field
+        if m_Ey_z.dtype == torch.float32:
+            m_Ey_z.mul_(e_field)
+        else:
+            m_Ey_z = m_Ey_z.float() * e_field
+        if m_Hx_z.dtype == torch.float32:
+            m_Hx_z.mul_(h_field)
+        else:
+            m_Hx_z = m_Hx_z.float() * h_field
+        if m_Hz_x.dtype == torch.float32:
+            m_Hz_x.mul_(h_field)
+        else:
+            m_Hz_x = m_Hz_x.float() * h_field
+        if receiver_amplitudes.dtype == torch.float32:
+            receiver_amplitudes.mul_(e_recv)
+        else:
+            receiver_amplitudes = receiver_amplitudes.float() * e_recv
+    return (
+        Ey.float() * e_field,
+        Hx.float() * h_field,
+        Hz.float() * h_field,
+        m_Ey_x if inplace_float_outputs else m_Ey_x.float() * e_field,
+        m_Ey_z if inplace_float_outputs else m_Ey_z.float() * e_field,
+        m_Hx_z if inplace_float_outputs else m_Hx_z.float() * h_field,
+        m_Hz_x if inplace_float_outputs else m_Hz_x.float() * h_field,
+        (
+            receiver_amplitudes
+            if inplace_float_outputs
+            else receiver_amplitudes.float() * e_recv
+        ),
+    )
+
+
+def _physical_tm2d_callback_wavefields(
+    wavefields: dict[str, torch.Tensor],
+    *,
+    scale_ctx: dict[str, Any] | None,
+) -> dict[str, torch.Tensor]:
+    if not scale_ctx:
+        return wavefields
+    e_ref = scale_ctx["e_ref"]
+    h_ref = scale_ctx["h_ref"]
+    e_field = _expand_shotwise_scale(e_ref, ndim=3)
+    h_field = _expand_shotwise_scale(h_ref, ndim=3)
+    scaled: dict[str, torch.Tensor] = {}
+    for name, tensor in wavefields.items():
+        if name.endswith(("Ey", "Ey_x", "Ey_z")):
+            scaled[name] = tensor.float() * e_field
+        elif name.endswith(("Hx", "Hz", "Hx_z", "Hz_x")):
+            scaled[name] = tensor.float() * h_field
+        else:
+            scaled[name] = tensor.float()
+    return scaled
+
+
+def _physical_tm2d_adjoint_callback_wavefields(
+    wavefields: dict[str, torch.Tensor],
+    *,
+    scale_ctx: dict[str, Any] | None,
+) -> dict[str, torch.Tensor]:
+    if not scale_ctx:
+        return {name: tensor.float() for name, tensor in wavefields.items()}
+    e_ref = scale_ctx["e_ref"]
+    h_ref = scale_ctx["h_ref"]
+    e_field = _expand_shotwise_scale(e_ref, ndim=3)
+    h_field = _expand_shotwise_scale(h_ref, ndim=3)
+    scaled: dict[str, torch.Tensor] = {}
+    for name, tensor in wavefields.items():
+        if name.endswith(("Ey", "Ey_x", "Ey_z")):
+            scaled[name] = tensor.float() / e_field
+        elif name.endswith(("Hx", "Hz", "Hx_z", "Hz_x")):
+            scaled[name] = tensor.float() / h_field
+        else:
+            scaled[name] = tensor.float()
+    return scaled
 
 
 class MaxwellTM(torch.nn.Module):
@@ -190,6 +554,7 @@ class MaxwellTM(torch.nn.Module):
         forward_callback: Callback | None = None,
         backward_callback: Callback | None = None,
         callback_frequency: int = 1,
+        compute_precision: str = _COMPUTE_PRECISION_DEFAULT,
         python_backend: bool | str = False,
         storage_mode: str = "device",
         storage_path: str = ".",
@@ -197,6 +562,7 @@ class MaxwellTM(torch.nn.Module):
         storage_bytes_limit_device: int | None = None,
         storage_bytes_limit_host: int | None = None,
         storage_chunk_steps: int = 0,
+        dispersion: DebyeDispersion | None = None,
     ):
         # Type assertions for buffer and parameter tensors
         assert isinstance(self.epsilon, torch.Tensor)
@@ -230,6 +596,7 @@ class MaxwellTM(torch.nn.Module):
             forward_callback,
             backward_callback,
             callback_frequency,
+            compute_precision,
             python_backend,
             storage_mode,
             storage_path,
@@ -237,6 +604,7 @@ class MaxwellTM(torch.nn.Module):
             storage_bytes_limit_device,
             storage_bytes_limit_host,
             storage_chunk_steps,
+            dispersion=dispersion,
         )
 
 
@@ -268,6 +636,7 @@ def maxwelltm(
     forward_callback: Callback | None = None,
     backward_callback: Callback | None = None,
     callback_frequency: int = 1,
+    compute_precision: str = _COMPUTE_PRECISION_DEFAULT,
     python_backend: bool | str = False,
     storage_mode: str = "device",
     storage_path: str = ".",
@@ -276,6 +645,7 @@ def maxwelltm(
     storage_bytes_limit_host: int | None = None,
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
+    dispersion: DebyeDispersion | None = None,
 ):
     """2D TM mode Maxwell equations solver.
 
@@ -331,6 +701,8 @@ def maxwelltm(
         storage_chunk_steps: Optional chunk size (in stored steps) for
             CPU/disk modes. Currently unused.
         n_threads: OpenMP thread count for CPU backend. None uses the OpenMP default.
+        dispersion: Optional Debye dispersion model. When provided, `epsilon`
+            is interpreted as `epsilon_inf`.
 
     Returns:
         Tuple of (Ey, Hx, Hz, m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x, receiver_amplitudes).
@@ -367,6 +739,8 @@ def maxwelltm(
         raise TypeError("callback_frequency must be an int.")
     if callback_frequency <= 0:
         raise ValueError("callback_frequency must be positive.")
+
+    _validate_dispersion_time_step(dispersion, dt=dt)
 
     # Normalize grid_spacing to list
     grid_spacing_list = _normalize_grid_spacing_2d(grid_spacing)
@@ -444,6 +818,7 @@ def maxwelltm(
         forward_callback,
         backward_callback,
         callback_frequency,
+        compute_precision,
         storage_mode,
         storage_path,
         storage_compression,
@@ -451,6 +826,7 @@ def maxwelltm(
         storage_bytes_limit_host,
         storage_chunk_steps,
         n_threads,
+        dispersion,
     )
 
     # Unpack result
@@ -616,6 +992,7 @@ def maxwell_python(
     forward_callback: Callback | None,
     backward_callback: Callback | None,
     callback_frequency: int,
+    compute_precision: str = _COMPUTE_PRECISION_DEFAULT,
     storage_mode: str = "device",
     storage_path: str = ".",
     storage_compression: bool | str = False,
@@ -623,6 +1000,7 @@ def maxwell_python(
     storage_bytes_limit_host: int | None = None,
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
+    dispersion: DebyeDispersion | None = None,
 ):
     """Performs the forward propagation of the 2D TM Maxwell equations.
 
@@ -678,6 +1056,20 @@ def maxwell_python(
     device = epsilon.device
     dtype = epsilon.dtype
     model_ny, model_nx = epsilon.shape  # Original model dimensions
+
+    if compute_precision != _COMPUTE_PRECISION_DEFAULT:
+        raise NotImplementedError(
+            "python_backend only supports compute_precision='default'."
+        )
+    if dispersion is not None and any(
+        state is not None
+        for state in (Ey_0, Hx_0, Hz_0, m_Ey_x_0, m_Ey_z_0, m_Hx_z_0, m_Hz_x_0)
+    ):
+        warnings.warn(
+            "Debye v1 does not support persisting polarization state across calls; "
+            "field initial conditions are applied, but polarization restarts from zero.",
+            RuntimeWarning,
+        )
 
     storage_mode_str = storage_mode.lower()
     if storage_mode_str in {"cpu", "disk"}:
@@ -758,9 +1150,27 @@ def maxwell_python(
     mu_padded = create_or_pad(
         mu, total_pad, device, dtype, padded_size, mode="replicate"
     )
+    dispersion_padded = _pad_dispersion_for_model(
+        dispersion,
+        model_shape=tuple(epsilon.shape),
+        total_pad=total_pad,
+        padded_size=padded_size,
+        device=device,
+        dtype=dtype,
+    )
 
-    # Prepare update coefficients using padded models
-    ca, cb, cq = prepare_parameters(epsilon_padded, sigma_padded, mu_padded, dt)
+    material = compile_material_coefficients(
+        epsilon_padded,
+        sigma_padded,
+        mu_padded,
+        dt,
+        dispersion=dispersion_padded,
+    )
+    ca = material["ca"]
+    cb = material["cb"]
+    cq = material["cq"]
+    has_dispersion = bool(material["has_dispersion"])
+    debye = material.get("debye")
 
     # Expand coefficients for batch dimension
     ca = ca[None, :, :]  # [1, padded_ny, padded_nx]
@@ -831,6 +1241,15 @@ def maxwell_python(
         device=device,
         dtype=dtype,
     )
+    polarization = None
+    if has_dispersion and debye is not None:
+        polarization = _init_polarization_state(
+            n_shots=n_shots,
+            n_poles=debye["n_poles"],
+            spatial_shape=(padded_ny, padded_nx),
+            device=device,
+            dtype=dtype,
+        )
 
     # Zero out interior of PML auxiliary variables (optimization)
     # PML memory variables should only be non-zero in PML regions.
@@ -927,6 +1346,8 @@ def maxwell_python(
         "cb": cb,
         "cq": cq,
     }
+    if dispersion is not None:
+        callback_models["dispersion"] = dispersion
 
     # Callback fd_pad is the actual fd_pad used for wavefields
     callback_fd_pad = fd_pad_list
@@ -949,6 +1370,8 @@ def maxwell_python(
                 "m_Hx_z": m_Hx_z,
                 "m_Hz_x": m_Hz_x,
             }
+            if polarization is not None:
+                callback_wavefields["polarization"] = polarization.sum(dim=1)
             # Create CallbackState for standardized interface
             callback_state = CallbackState(
                 dt=dt,
@@ -991,6 +1414,7 @@ def maxwell_python(
         )
 
         # Update E field: E^{n+1} = E^n + ...
+        ey_prev = Ey
         Ey, m_Hx_z, m_Hz_x = _update_E_opt(
             ca,
             cb,
@@ -1016,6 +1440,8 @@ def maxwell_python(
             dt_tensor,
             stencil,
         )
+        if polarization is not None and debye is not None:
+            Ey = Ey + _debye_polarization_term(debye["cp"], polarization)
 
         # Inject source into Ey field (after E update, following reference implementation)
         # Source term: Ey += -cb * f * dt / (dx * dz) = -cb * f / (dx * dz) since cb contains dt
@@ -1035,6 +1461,11 @@ def maxwell_python(
                 Ey.reshape(n_shots, flat_model_shape)
                 .scatter_add(1, sources_i, scaled_src)
                 .reshape(size_with_batch)
+            )
+        if polarization is not None and debye is not None:
+            polarization = (
+                debye["a"].unsqueeze(0) * polarization
+                + debye["b"].unsqueeze(0) * (Ey + ey_prev).unsqueeze(1)
             )
 
         # Record at receivers (after source injection)
@@ -1268,6 +1699,7 @@ def maxwell_c_cuda(
     forward_callback: Callback | None,
     backward_callback: Callback | None,
     callback_frequency: int,
+    compute_precision: str,
     storage_mode: str = "device",
     storage_path: str = ".",
     storage_compression: bool | str = False,
@@ -1275,6 +1707,7 @@ def maxwell_c_cuda(
     storage_bytes_limit_host: int | None = None,
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
+    dispersion: DebyeDispersion | None = None,
 ):
     """Performs Maxwell propagation using C/CUDA backend.
 
@@ -1311,6 +1744,17 @@ def maxwell_c_cuda(
     _backend_device = device
     if device.type not in {"cpu", "cuda"}:
         raise NotImplementedError("C/CUDA backend supports only cpu and cuda devices.")
+    compute_precision = _normalize_compute_precision(compute_precision)
+    use_fp16_scaled = compute_precision == _COMPUTE_PRECISION_FP16_SCALED
+    if use_fp16_scaled:
+        if device.type != "cuda":
+            raise NotImplementedError(
+                "compute_precision='fp16_scaled' requires a CUDA device."
+            )
+        if dtype != torch.float32:
+            raise NotImplementedError(
+                "compute_precision='fp16_scaled' requires float32 public tensors."
+            )
 
     # Normalize grid_spacing to list
     grid_spacing = _normalize_grid_spacing_2d(grid_spacing)
@@ -1389,74 +1833,230 @@ def maxwell_c_cuda(
         mu, total_pad, device, dtype, padded_size, mode="replicate"
     )
 
-    # Prepare update coefficients using padded models
-    ca, cb, cq = prepare_parameters(epsilon_padded, sigma_padded, mu_padded, dt)
+    dispersion_padded = _pad_dispersion_for_model(
+        dispersion,
+        model_shape=tuple(epsilon.shape),
+        total_pad=total_pad,
+        padded_size=padded_size,
+        device=device,
+        dtype=dtype,
+    )
+    material = compile_material_coefficients(
+        epsilon_padded,
+        sigma_padded,
+        mu_padded,
+        dt,
+        dispersion=dispersion_padded,
+    )
+    ca = material["ca"]
+    cb = material["cb"]
+    cq = material["cq"]
+    has_dispersion = bool(material["has_dispersion"])
+    debye = material.get("debye")
+
+    # Flatten coefficients (add batch dimension for consistency)
+    ca = ca[None, :, :].contiguous()
+    cb = cb[None, :, :].contiguous()
+    cq = cq[None, :, :].contiguous()
+    ca_phys = ca
+    cb_phys = cb
+    cq_phys = cq
+
+    # =========================================================================
+    # Prepare source and receiver indices
+    # Original positions are in the un-padded model coordinate system.
+    # We need to offset by total_pad (fd_pad + pml_width) to get padded coords.
+    # =========================================================================
+    flat_model_shape = padded_ny * padded_nx
+
+    if source_location is not None and source_location.numel() > 0:
+        # Adjust source positions by total padding offset
+        source_y = source_location[..., 0] + total_pad[0]
+        source_x = source_location[..., 1] + total_pad[2]
+        sources_i = (source_y * padded_nx + source_x).long().contiguous()
+        n_sources = source_location.shape[1]
+    else:
+        sources_i = torch.empty(0, device=device, dtype=torch.long)
+        n_sources = 0
+
+    if receiver_location is not None and receiver_location.numel() > 0:
+        # Adjust receiver positions by total padding offset
+        receiver_y = receiver_location[..., 0] + total_pad[0]
+        receiver_x = receiver_location[..., 1] + total_pad[2]
+        receivers_i = (receiver_y * padded_nx + receiver_x).long().contiguous()
+        n_receivers = receiver_location.shape[1]
+    else:
+        receivers_i = torch.empty(0, device=device, dtype=torch.long)
+        n_receivers = 0
+
+    source_coeff = -1.0 / (dx * dy)
+    cb_at_src: torch.Tensor | None = None
+    if n_sources > 0:
+        cb_flat = cb_phys.expand(n_shots, -1, -1).reshape(n_shots, flat_model_shape)
+        cb_at_src = cb_flat.gather(1, sources_i)
+
+    source_injection, f_shot = _prepare_tm2d_source_injection(
+        source_amplitude=source_amplitude,
+        cb_at_src=cb_at_src,
+        source_coeff=source_coeff,
+        dtype=dtype,
+        scale_ctx=None,
+        n_shots=n_shots,
+        n_sources=n_sources,
+        nt_steps=nt_steps,
+    )
+
+    scale_ctx: dict[str, Any] | None = None
+    if use_fp16_scaled:
+        scale_ctx = _build_tm2d_fp16_scale_context(
+            epsilon_padded=epsilon_padded,
+            mu_padded=mu_padded,
+            f_shot=f_shot,
+            Ey_0=Ey_0,
+            Hx_0=Hx_0,
+            Hz_0=Hz_0,
+            n_shots=n_shots,
+        )
 
     # Initialize fields with padded dimensions
     size_with_batch = (n_shots, padded_ny, padded_nx)
-    Ey = _init_tm_wavefield(
-        Ey_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        contiguous=True,
-    )
-    Hx = _init_tm_wavefield(
-        Hx_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        contiguous=True,
-    )
-    Hz = _init_tm_wavefield(
-        Hz_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        contiguous=True,
-    )
-    m_Ey_x = _init_tm_wavefield(
-        m_Ey_x_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        contiguous=True,
-    )
-    m_Ey_z = _init_tm_wavefield(
-        m_Ey_z_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        contiguous=True,
-    )
-    m_Hx_z = _init_tm_wavefield(
-        m_Hx_z_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        contiguous=True,
-    )
-    m_Hz_x = _init_tm_wavefield(
-        m_Hz_x_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        contiguous=True,
-    )
+    if scale_ctx is None:
+        Ey = _init_tm_wavefield(
+            Ey_0,
+            n_shots=n_shots,
+            size_with_batch=size_with_batch,
+            fd_pad_list=fd_pad_list,
+            device=device,
+            dtype=dtype,
+            contiguous=True,
+        )
+        Hx = _init_tm_wavefield(
+            Hx_0,
+            n_shots=n_shots,
+            size_with_batch=size_with_batch,
+            fd_pad_list=fd_pad_list,
+            device=device,
+            dtype=dtype,
+            contiguous=True,
+        )
+        Hz = _init_tm_wavefield(
+            Hz_0,
+            n_shots=n_shots,
+            size_with_batch=size_with_batch,
+            fd_pad_list=fd_pad_list,
+            device=device,
+            dtype=dtype,
+            contiguous=True,
+        )
+        m_Ey_x = _init_tm_wavefield(
+            m_Ey_x_0,
+            n_shots=n_shots,
+            size_with_batch=size_with_batch,
+            fd_pad_list=fd_pad_list,
+            device=device,
+            dtype=dtype,
+            contiguous=True,
+        )
+        m_Ey_z = _init_tm_wavefield(
+            m_Ey_z_0,
+            n_shots=n_shots,
+            size_with_batch=size_with_batch,
+            fd_pad_list=fd_pad_list,
+            device=device,
+            dtype=dtype,
+            contiguous=True,
+        )
+        m_Hx_z = _init_tm_wavefield(
+            m_Hx_z_0,
+            n_shots=n_shots,
+            size_with_batch=size_with_batch,
+            fd_pad_list=fd_pad_list,
+            device=device,
+            dtype=dtype,
+            contiguous=True,
+        )
+        m_Hz_x = _init_tm_wavefield(
+            m_Hz_x_0,
+            n_shots=n_shots,
+            size_with_batch=size_with_batch,
+            fd_pad_list=fd_pad_list,
+            device=device,
+            dtype=dtype,
+            contiguous=True,
+        )
+    else:
+        e_ref = scale_ctx["e_ref"]
+        h_ref = scale_ctx["h_ref"]
+        Ey = _init_tm_scaled_wavefield(
+            Ey_0,
+            n_shots=n_shots,
+            size_with_batch=size_with_batch,
+            fd_pad_list=fd_pad_list,
+            device=device,
+            target_dtype=scale_ctx["field_dtype"],
+            scale=e_ref,
+            contiguous=True,
+        )
+        Hx = _init_tm_scaled_wavefield(
+            Hx_0,
+            n_shots=n_shots,
+            size_with_batch=size_with_batch,
+            fd_pad_list=fd_pad_list,
+            device=device,
+            target_dtype=scale_ctx["field_dtype"],
+            scale=h_ref,
+            contiguous=True,
+        )
+        Hz = _init_tm_scaled_wavefield(
+            Hz_0,
+            n_shots=n_shots,
+            size_with_batch=size_with_batch,
+            fd_pad_list=fd_pad_list,
+            device=device,
+            target_dtype=scale_ctx["field_dtype"],
+            scale=h_ref,
+            contiguous=True,
+        )
+        m_Ey_x = _init_tm_scaled_wavefield(
+            m_Ey_x_0,
+            n_shots=n_shots,
+            size_with_batch=size_with_batch,
+            fd_pad_list=fd_pad_list,
+            device=device,
+            target_dtype=scale_ctx["memory_dtype"],
+            scale=e_ref,
+            contiguous=True,
+        )
+        m_Ey_z = _init_tm_scaled_wavefield(
+            m_Ey_z_0,
+            n_shots=n_shots,
+            size_with_batch=size_with_batch,
+            fd_pad_list=fd_pad_list,
+            device=device,
+            target_dtype=scale_ctx["memory_dtype"],
+            scale=e_ref,
+            contiguous=True,
+        )
+        m_Hx_z = _init_tm_scaled_wavefield(
+            m_Hx_z_0,
+            n_shots=n_shots,
+            size_with_batch=size_with_batch,
+            fd_pad_list=fd_pad_list,
+            device=device,
+            target_dtype=scale_ctx["memory_dtype"],
+            scale=h_ref,
+            contiguous=True,
+        )
+        m_Hz_x = _init_tm_scaled_wavefield(
+            m_Hz_x_0,
+            n_shots=n_shots,
+            size_with_batch=size_with_batch,
+            fd_pad_list=fd_pad_list,
+            device=device,
+            target_dtype=scale_ctx["memory_dtype"],
+            scale=h_ref,
+            contiguous=True,
+        )
 
     # Zero out interior of PML auxiliary variables (optimization)
     # This works correctly with user-provided states (see forward pass comments)
@@ -1509,62 +2109,25 @@ def maxwell_c_cuda(
     ky_h_flat = ky_h.squeeze().contiguous()
     kx_flat = kx.squeeze().contiguous()
     kx_h_flat = kx_h.squeeze().contiguous()
-
-    # =========================================================================
-    # Prepare source and receiver indices
-    # Original positions are in the un-padded model coordinate system.
-    # We need to offset by total_pad (fd_pad + pml_width) to get padded coords.
-    # =========================================================================
-    flat_model_shape = padded_ny * padded_nx
-
-    if source_location is not None and source_location.numel() > 0:
-        # Adjust source positions by total padding offset
-        source_y = source_location[..., 0] + total_pad[0]
-        source_x = source_location[..., 1] + total_pad[2]
-        sources_i = (source_y * padded_nx + source_x).long().contiguous()
-        n_sources = source_location.shape[1]
+    if scale_ctx is not None:
+        ca = ca_phys
+        cb = (cb_phys / scale_ctx["z_ref"]).contiguous()
+        cq = (cq_phys * scale_ctx["z_ref"]).contiguous()
+        f, _ = _prepare_tm2d_source_injection(
+            source_amplitude=source_amplitude,
+            cb_at_src=cb_at_src,
+            source_coeff=source_coeff,
+            dtype=dtype,
+            scale_ctx=scale_ctx,
+            n_shots=n_shots,
+            n_sources=n_sources,
+            nt_steps=nt_steps,
+        )
     else:
-        sources_i = torch.empty(0, device=device, dtype=torch.long)
-        n_sources = 0
-
-    if receiver_location is not None and receiver_location.numel() > 0:
-        # Adjust receiver positions by total padding offset
-        receiver_y = receiver_location[..., 0] + total_pad[0]
-        receiver_x = receiver_location[..., 1] + total_pad[2]
-        receivers_i = (receiver_y * padded_nx + receiver_x).long().contiguous()
-        n_receivers = receiver_location.shape[1]
-    else:
-        receivers_i = torch.empty(0, device=device, dtype=torch.long)
-        n_receivers = 0
-
-    # Prepare source amplitudes with proper scaling
-    if source_amplitude is not None and source_amplitude.numel() > 0:
-        source_coeff = -1.0 / (dx * dy)
-        # Expand cb to batch dimension for gather
-        cb_expanded = cb[None, :, :].expand(n_shots, -1, -1)
-        cb_flat = cb_expanded.reshape(n_shots, flat_model_shape)
-        cb_at_src = cb_flat.gather(1, sources_i)
-        # Reshape source amplitude: [shot, source, time] -> [time, shot, source]
-        f = source_amplitude.permute(2, 0, 1).contiguous()
-        # Scale by cb and source coefficient
-        f = f * cb_at_src[None, :, :] * source_coeff
-        f = f.reshape(nt_steps * n_shots * n_sources)
-    else:
-        f = torch.empty(0, device=device, dtype=dtype)
-
-    # Flatten fields for C backend
-    Ey = Ey.contiguous()
-    Hx = Hx.contiguous()
-    Hz = Hz.contiguous()
-    m_Ey_x = m_Ey_x.contiguous()
-    m_Ey_z = m_Ey_z.contiguous()
-    m_Hx_z = m_Hx_z.contiguous()
-    m_Hz_x = m_Hz_x.contiguous()
-
-    # Flatten coefficients (add batch dimension for consistency)
-    ca = ca[None, :, :].contiguous()
-    cb = cb[None, :, :].contiguous()
-    cq = cq[None, :, :].contiguous()
+        ca = ca_phys
+        cb = cb_phys
+        cq = cq_phys
+        f = source_injection.contiguous()
 
     # PML boundaries (where PML starts in the padded domain)
     pml_y0 = fd_pad_list[0] + pml_width_list[0]
@@ -1575,16 +2138,65 @@ def maxwell_c_cuda(
     # Determine if any input requires gradients
     requires_grad = epsilon.requires_grad or sigma.requires_grad
 
+    if has_dispersion and (
+        requires_grad or (save_snapshots is True) or scale_ctx is not None
+    ):
+        warnings.warn(
+            "Debye native backend currently supports forward inference only; "
+            "falling back to the Python backend for gradients, snapshot storage, "
+            "or fp16_scaled mode.",
+            RuntimeWarning,
+        )
+        return maxwell_python(
+            epsilon,
+            sigma,
+            mu,
+            grid_spacing,
+            dt,
+            source_amplitude,
+            source_location,
+            receiver_location,
+            stencil,
+            pml_width,
+            max_vel,
+            Ey_0,
+            Hx_0,
+            Hz_0,
+            m_Ey_x_0,
+            m_Ey_z_0,
+            m_Hx_z_0,
+            m_Hz_x_0,
+            nt,
+            model_gradient_sampling_interval,
+            freq_taper_frac,
+            time_pad_frac,
+            time_taper,
+            save_snapshots,
+            forward_callback,
+            backward_callback,
+            callback_frequency,
+            _COMPUTE_PRECISION_DEFAULT,
+            storage_mode,
+            storage_path,
+            storage_compression,
+            storage_bytes_limit_device,
+            storage_bytes_limit_host,
+            storage_chunk_steps,
+            n_threads,
+            dispersion,
+        )
+
     functorch_active = torch._C._are_functorch_transforms_active()
     if functorch_active:
         raise NotImplementedError(
             "torch.func transforms are not supported for the C/CUDA backend."
         )
 
-    storage_kind, _, storage_bytes_per_elem = _resolve_storage_compression(
-        storage_compression,
-        dtype,
-        device,
+    storage_kind, _, storage_bytes_per_elem, storage_format = _resolve_tm2d_storage_spec(
+        compute_precision=compute_precision,
+        storage_compression=storage_compression,
+        dtype=dtype,
+        device=device,
         context="storage_compression",
     )
 
@@ -1663,10 +2275,12 @@ def maxwell_c_cuda(
         "epsilon": epsilon_padded,
         "sigma": sigma_padded,
         "mu": mu_padded,
-        "ca": ca,
-        "cb": cb,
-        "cq": cq,
+        "ca": ca_phys,
+        "cb": cb_phys,
+        "cq": cq_phys,
     }
+    if dispersion is not None:
+        callback_models["dispersion"] = dispersion
 
     use_autograd_fn = (requires_grad and do_save_snapshots) or functorch_active
     if use_autograd_fn:
@@ -1714,7 +2328,10 @@ def maxwell_c_cuda(
             forward_callback,
             backward_callback,
             callback_frequency,
+            compute_precision,
+            scale_ctx,
             effective_storage_mode_str,
+            storage_format,
             storage_path,
             storage_compression,
             Ey,
@@ -1751,6 +2368,26 @@ def maxwell_c_cuda(
                 m_Hz_x_out,
                 receiver_amplitudes,
             ) = result
+        (
+            Ey_out,
+            Hx_out,
+            Hz_out,
+            m_Ey_x_out,
+            m_Ey_z_out,
+            m_Hx_z_out,
+            m_Hz_x_out,
+            receiver_amplitudes,
+        ) = _unscale_tm2d_outputs(
+            scale_ctx=scale_ctx,
+            Ey=Ey_out,
+            Hx=Hx_out,
+            Hz=Hz_out,
+            m_Ey_x=m_Ey_x_out,
+            m_Ey_z=m_Ey_z_out,
+            m_Hx_z=m_Hx_z_out,
+            m_Hz_x=m_Hz_x_out,
+            receiver_amplitudes=receiver_amplitudes,
+        )
         # Output cropping: only remove fd_pad, keep PML region
         s = (
             slice(None),  # batch dimension
@@ -1787,7 +2424,12 @@ def maxwell_c_cuda(
         # Get the backend function
         try:
             forward_func = backend_utils.get_backend_function(
-                "maxwell_tm", "forward", stencil, dtype, _backend_device
+                "maxwell_tm",
+                "forward",
+                stencil,
+                dtype,
+                _backend_device,
+                variant=scale_ctx["variant"] if scale_ctx else "",
             )
         except AttributeError as e:
             raise RuntimeError(
@@ -1803,10 +2445,45 @@ def maxwell_c_cuda(
         # Initialize receiver amplitudes
         if n_receivers > 0:
             receiver_amplitudes = torch.zeros(
-                nt_steps, n_shots, n_receivers, device=device, dtype=dtype
+                nt_steps,
+                n_shots,
+                n_receivers,
+                device=device,
+                dtype=(
+                    scale_ctx["receiver_dtype"]
+                    if scale_ctx
+                    else dtype
+                ),
             )
         else:
-            receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
+            receiver_amplitudes = torch.empty(
+                0,
+                device=device,
+                dtype=(
+                    scale_ctx["receiver_dtype"]
+                    if scale_ctx
+                    else dtype
+                ),
+            )
+        polarization = torch.empty(0, device=device, dtype=dtype)
+        ey_prev = torch.empty(0, device=device, dtype=dtype)
+        debye_a = torch.empty(0, device=device, dtype=dtype)
+        debye_b = torch.empty(0, device=device, dtype=dtype)
+        debye_cp = torch.empty(0, device=device, dtype=dtype)
+        n_poles = 0
+        if has_dispersion and debye is not None:
+            n_poles = int(debye["n_poles"])
+            polarization = _init_polarization_state(
+                n_shots=n_shots,
+                n_poles=n_poles,
+                spatial_shape=(padded_ny, padded_nx),
+                device=device,
+                dtype=dtype,
+            ).contiguous()
+            ey_prev = torch.empty_like(Ey, dtype=dtype)
+            debye_a = debye["a"].contiguous()
+            debye_b = debye["b"].contiguous()
+            debye_cp = debye["cp"].contiguous()
 
         # If no callback is provided, run entire propagation in single call
         # Otherwise, chunk into callback_frequency steps
@@ -1817,31 +2494,6 @@ def maxwell_c_cuda(
 
         # Main time-stepping loop with chunked calls for callback support
         for step in range(0, nt_steps, effective_callback_freq):
-            # Call callback at the start of each chunk
-            if forward_callback is not None:
-                callback_wavefields = {
-                    "Ey": Ey,
-                    "Hx": Hx,
-                    "Hz": Hz,
-                    "m_Ey_x": m_Ey_x,
-                    "m_Ey_z": m_Ey_z,
-                    "m_Hx_z": m_Hx_z,
-                    "m_Hz_x": m_Hz_x,
-                }
-                callback_state = CallbackState(
-                    dt=dt,
-                    step=step,
-                    nt=nt_steps,
-                    wavefields=callback_wavefields,
-                    models=callback_models,
-                    gradients=None,
-                    fd_pad=callback_fd_pad,
-                    pml_width=pml_width_list,
-                    is_backward=False,
-                    grid_spacing=[dy, dx],
-                )
-                forward_callback(callback_state)
-
             # Number of steps to propagate in this chunk
             step_nt = min(nt_steps - step, effective_callback_freq)
 
@@ -1858,7 +2510,13 @@ def maxwell_c_cuda(
                 backend_utils.tensor_to_ptr(m_Ey_z),
                 backend_utils.tensor_to_ptr(m_Hx_z),
                 backend_utils.tensor_to_ptr(m_Hz_x),
+                backend_utils.tensor_to_ptr(debye_a),
+                backend_utils.tensor_to_ptr(debye_b),
+                backend_utils.tensor_to_ptr(debye_cp),
+                backend_utils.tensor_to_ptr(polarization),
+                backend_utils.tensor_to_ptr(ey_prev),
                 backend_utils.tensor_to_ptr(receiver_amplitudes),
+                n_poles,
                 backend_utils.tensor_to_ptr(ay_flat),
                 backend_utils.tensor_to_ptr(by_flat),
                 backend_utils.tensor_to_ptr(ay_h_flat),
@@ -1883,6 +2541,7 @@ def maxwell_c_cuda(
                 n_sources,
                 n_receivers,
                 gradient_sampling_interval,  # step_ratio
+                has_dispersion,
                 False,  # ca_batched
                 False,  # cb_batched
                 False,  # cq_batched
@@ -1894,6 +2553,57 @@ def maxwell_c_cuda(
                 n_threads_val,
                 device_idx,
             )
+
+            if forward_callback is not None:
+                callback_wavefields = _physical_tm2d_callback_wavefields(
+                    {
+                        "Ey": Ey,
+                        "Hx": Hx,
+                        "Hz": Hz,
+                        "m_Ey_x": m_Ey_x,
+                        "m_Ey_z": m_Ey_z,
+                        "m_Hx_z": m_Hx_z,
+                        "m_Hz_x": m_Hz_x,
+                    },
+                    scale_ctx=scale_ctx,
+                )
+                if has_dispersion:
+                    callback_wavefields["polarization"] = polarization.sum(dim=1)
+                callback_state = CallbackState(
+                    dt=dt,
+                    step=step + step_nt,
+                    nt=nt_steps,
+                    wavefields=callback_wavefields,
+                    models=callback_models,
+                    gradients=None,
+                    fd_pad=callback_fd_pad,
+                    pml_width=pml_width_list,
+                    is_backward=False,
+                    grid_spacing=[dy, dx],
+                )
+                forward_callback(callback_state)
+
+        (
+            Ey,
+            Hx,
+            Hz,
+            m_Ey_x,
+            m_Ey_z,
+            m_Hx_z,
+            m_Hz_x,
+            receiver_amplitudes,
+        ) = _unscale_tm2d_outputs(
+            scale_ctx=scale_ctx,
+            Ey=Ey,
+            Hx=Hx,
+            Hz=Hz,
+            m_Ey_x=m_Ey_x,
+            m_Ey_z=m_Ey_z,
+            m_Hx_z=m_Hx_z,
+            m_Hz_x=m_Hz_x,
+            receiver_amplitudes=receiver_amplitudes,
+            inplace_float_outputs=True,
+        )
 
         # Output cropping: only remove fd_pad, keep PML region
         s = (
@@ -1984,7 +2694,10 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         forward_callback: Callback | None,
         backward_callback: Callback | None,
         callback_frequency: int,
+        compute_precision: str,
+        scale_ctx: dict[str, Any] | None,
         storage_mode_str: str,
+        storage_format: int,
         storage_path: str,
         storage_compression: bool | str,
         Ey: torch.Tensor,
@@ -2001,8 +2714,14 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         from . import backend_utils
 
         device = Ey.device
-        dtype = Ey.dtype
+        coeff_dtype = ca.dtype
+        receiver_dtype = (
+            scale_ctx["receiver_dtype"]
+            if scale_ctx is not None
+            else coeff_dtype
+        )
         _backend_device = backend_device
+        variant = scale_ctx["variant"] if scale_ctx is not None else ""
 
         ca_requires_grad = ca.requires_grad
         cb_requires_grad = cb.requires_grad
@@ -2011,10 +2730,10 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         # Initialize receiver amplitudes
         if n_receivers > 0:
             receiver_amplitudes = torch.zeros(
-                nt, n_shots, n_receivers, device=device, dtype=dtype
+                nt, n_shots, n_receivers, device=device, dtype=receiver_dtype
             )
         else:
-            receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
+            receiver_amplitudes = torch.empty(0, device=device, dtype=receiver_dtype)
 
         # Get device index for CUDA
         device_idx = (
@@ -2036,12 +2755,15 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             storage_mode = storage_mode_to_int(storage_mode_str)
 
             num_elements_per_shot = ny * nx
-            _, store_dtype, _ = _resolve_storage_compression(
-                storage_compression,
-                dtype,
-                device,
+            _, store_dtype, _, resolved_storage_format = _resolve_tm2d_storage_spec(
+                compute_precision=compute_precision,
+                storage_compression=storage_compression,
+                dtype=coeff_dtype,
+                device=device,
                 context="storage_compression",
             )
+            if resolved_storage_format != storage_format:
+                raise RuntimeError("Mismatched TM2D storage format resolution.")
 
             shot_bytes_uncomp = num_elements_per_shot * store_dtype.itemsize
 
@@ -2128,7 +2850,12 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
 
             # Get the backend function with storage
             forward_func = backend_utils.get_backend_function(
-                "maxwell_tm", "forward_with_storage", accuracy, dtype, _backend_device
+                "maxwell_tm",
+                "forward_with_storage",
+                accuracy,
+                coeff_dtype,
+                _backend_device,
+                variant=variant,
             )
 
             # Determine effective callback frequency
@@ -2189,6 +2916,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                     n_receivers,
                     step_ratio,
                     storage_mode,
+                    storage_format,
                     shot_bytes_uncomp,
                     ca_requires_grad,
                     cb_requires_grad,
@@ -2215,6 +2943,10 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                         "m_Hx_z": m_Hx_z,
                         "m_Hz_x": m_Hz_x,
                     }
+                    callback_wavefields = _physical_tm2d_callback_wavefields(
+                        callback_wavefields,
+                        scale_ctx=scale_ctx,
+                    )
                     forward_callback(
                         CallbackState(
                             dt=dt,
@@ -2231,68 +2963,113 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         else:
             # Use regular forward without storage
             forward_func = backend_utils.get_backend_function(
-                "maxwell_tm", "forward", accuracy, dtype, _backend_device
+                "maxwell_tm",
+                "forward",
+                accuracy,
+                coeff_dtype,
+                _backend_device,
+                variant=variant,
             )
 
-            # Call the C/CUDA function
-            forward_func(
-                backend_utils.tensor_to_ptr(ca),
-                backend_utils.tensor_to_ptr(cb),
-                backend_utils.tensor_to_ptr(cq),
-                backend_utils.tensor_to_ptr(source_amplitudes_scaled),
-                backend_utils.tensor_to_ptr(Ey),
-                backend_utils.tensor_to_ptr(Hx),
-                backend_utils.tensor_to_ptr(Hz),
-                backend_utils.tensor_to_ptr(m_Ey_x),
-                backend_utils.tensor_to_ptr(m_Ey_z),
-                backend_utils.tensor_to_ptr(m_Hx_z),
-                backend_utils.tensor_to_ptr(m_Hz_x),
-                backend_utils.tensor_to_ptr(receiver_amplitudes),
-                backend_utils.tensor_to_ptr(ay),
-                backend_utils.tensor_to_ptr(by),
-                backend_utils.tensor_to_ptr(ay_h),
-                backend_utils.tensor_to_ptr(by_h),
-                backend_utils.tensor_to_ptr(ax),
-                backend_utils.tensor_to_ptr(bx),
-                backend_utils.tensor_to_ptr(ax_h),
-                backend_utils.tensor_to_ptr(bx_h),
-                backend_utils.tensor_to_ptr(ky),
-                backend_utils.tensor_to_ptr(ky_h),
-                backend_utils.tensor_to_ptr(kx),
-                backend_utils.tensor_to_ptr(kx_h),
-                backend_utils.tensor_to_ptr(sources_i),
-                backend_utils.tensor_to_ptr(receivers_i),
-                rdy,
-                rdx,
-                dt,
-                nt,
-                n_shots,
-                ny,
-                nx,
-                n_sources,
-                n_receivers,
-                step_ratio,
-                ca_batched,
-                cb_batched,
-                cq_batched,
-                0,  # start_t
-                pml_y0,
-                pml_x0,
-                pml_y1,
-                pml_x1,
-                n_threads,
-                device_idx,
-            )
+            if forward_callback is None:
+                effective_callback_freq = nt // step_ratio
+            else:
+                effective_callback_freq = callback_frequency
+
+            for step in range(0, nt // step_ratio, effective_callback_freq):
+                step_nt = (
+                    min(effective_callback_freq, nt // step_ratio - step) * step_ratio
+                )
+                start_t = step * step_ratio
+
+                forward_func(
+                    backend_utils.tensor_to_ptr(ca),
+                    backend_utils.tensor_to_ptr(cb),
+                    backend_utils.tensor_to_ptr(cq),
+                    backend_utils.tensor_to_ptr(source_amplitudes_scaled),
+                    backend_utils.tensor_to_ptr(Ey),
+                    backend_utils.tensor_to_ptr(Hx),
+                    backend_utils.tensor_to_ptr(Hz),
+                    backend_utils.tensor_to_ptr(m_Ey_x),
+                    backend_utils.tensor_to_ptr(m_Ey_z),
+                    backend_utils.tensor_to_ptr(m_Hx_z),
+                    backend_utils.tensor_to_ptr(m_Hz_x),
+                    backend_utils.tensor_to_ptr(receiver_amplitudes),
+                    backend_utils.tensor_to_ptr(ay),
+                    backend_utils.tensor_to_ptr(by),
+                    backend_utils.tensor_to_ptr(ay_h),
+                    backend_utils.tensor_to_ptr(by_h),
+                    backend_utils.tensor_to_ptr(ax),
+                    backend_utils.tensor_to_ptr(bx),
+                    backend_utils.tensor_to_ptr(ax_h),
+                    backend_utils.tensor_to_ptr(bx_h),
+                    backend_utils.tensor_to_ptr(ky),
+                    backend_utils.tensor_to_ptr(ky_h),
+                    backend_utils.tensor_to_ptr(kx),
+                    backend_utils.tensor_to_ptr(kx_h),
+                    backend_utils.tensor_to_ptr(sources_i),
+                    backend_utils.tensor_to_ptr(receivers_i),
+                    rdy,
+                    rdx,
+                    dt,
+                    step_nt,
+                    n_shots,
+                    ny,
+                    nx,
+                    n_sources,
+                    n_receivers,
+                    step_ratio,
+                    ca_batched,
+                    cb_batched,
+                    cq_batched,
+                    start_t,
+                    pml_y0,
+                    pml_x0,
+                    pml_y1,
+                    pml_x1,
+                    n_threads,
+                    device_idx,
+                )
+
+                if forward_callback is not None:
+                    callback_wavefields = _physical_tm2d_callback_wavefields(
+                        {
+                            "Ey": Ey,
+                            "Hx": Hx,
+                            "Hz": Hz,
+                            "m_Ey_x": m_Ey_x,
+                            "m_Ey_z": m_Ey_z,
+                            "m_Hx_z": m_Hx_z,
+                            "m_Hz_x": m_Hz_x,
+                        },
+                        scale_ctx=scale_ctx,
+                    )
+                    forward_callback(
+                        CallbackState(
+                            dt=dt,
+                            step=step + step_nt // step_ratio,
+                            nt=nt // step_ratio,
+                            wavefields=callback_wavefields,
+                            models=models,
+                            gradients={},
+                            fd_pad=list(fd_pad),
+                            pml_width=list(pml_width),
+                            is_backward=False,
+                        )
+                    )
 
         ctx_data = {
             "backward_storage_tensors": backward_storage_tensors,
             "backward_storage_objects": backward_storage_objects,
             "backward_storage_filename_arrays": backward_storage_filename_arrays,
             "storage_mode": storage_mode,
+            "storage_format": storage_format,
             "shot_bytes_uncomp": shot_bytes_uncomp,
             "source_amplitudes_scaled": source_amplitudes_scaled,
             "ca_requires_grad": ca_requires_grad,
             "cb_requires_grad": cb_requires_grad,
+            "compute_precision": compute_precision,
+            "scale_ctx": scale_ctx,
         }
         ctx_handle = _register_ctx_handle(ctx_data)
 
@@ -2353,7 +3130,10 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             _forward_callback,
             backward_callback,
             callback_frequency,
+            compute_precision,
+            scale_ctx,
             _storage_mode_str,
+            _storage_format,
             _storage_path,
             _storage_compression,
             _Ey,
@@ -2445,6 +3225,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         ctx.ca_requires_grad = ctx_data["ca_requires_grad"]
         ctx.cb_requires_grad = ctx_data["cb_requires_grad"]
         ctx.storage_mode = ctx_data["storage_mode"]
+        ctx.storage_format = ctx_data["storage_format"]
         ctx.shot_bytes_uncomp = ctx_data["shot_bytes_uncomp"]
         ctx.fd_pad = fd_pad
         ctx.pml_width = pml_width
@@ -2454,6 +3235,8 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         ctx.source_amplitudes_scaled = ctx_data["source_amplitudes_scaled"]
         ctx.n_threads = n_threads
         ctx._backend_device = _backend_device
+        ctx.compute_precision = compute_precision
+        ctx.scale_ctx = ctx_data["scale_ctx"]
 
     @staticmethod
     def backward(
@@ -2501,8 +3284,11 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         curl_store_1, curl_store_3 = saved[19], saved[20]
 
         device = ca.device
-        dtype = ca.dtype
+        coeff_dtype = ca.dtype
         _backend_device = ctx._backend_device
+        scale_ctx = ctx.scale_ctx
+        variant = scale_ctx["variant"] if scale_ctx is not None else ""
+        compute_precision = ctx.compute_precision
 
         rdy = ctx.rdy
         rdx = ctx.rdx
@@ -2526,6 +3312,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         cb_requires_grad = ctx.cb_requires_grad
         pml_width = ctx.pml_width
         storage_mode = ctx.storage_mode
+        storage_format = ctx.storage_format
         shot_bytes_uncomp = ctx.shot_bytes_uncomp
 
         import ctypes
@@ -2543,48 +3330,60 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
 
         # Ensure grad_r is contiguous
         if grad_r is None or grad_r.numel() == 0:
-            grad_r = torch.zeros(nt, n_shots, n_receivers, device=device, dtype=dtype)
+            grad_r = torch.zeros(
+                nt,
+                n_shots,
+                n_receivers,
+                device=device,
+                dtype=scale_ctx["receiver_dtype"] if scale_ctx is not None else coeff_dtype,
+            )
         else:
             grad_r = grad_r.contiguous()
 
+        field_dtype = (
+            scale_ctx["adjoint_field_dtype"] if scale_ctx is not None else coeff_dtype
+        )
+        memory_dtype = scale_ctx["memory_dtype"] if scale_ctx is not None else coeff_dtype
+        grad_dtype = scale_ctx["grad_dtype"] if scale_ctx is not None else coeff_dtype
+
         # Initialize adjoint fields (lambda fields)
-        lambda_ey = torch.zeros(n_shots, ny, nx, device=device, dtype=dtype)
-        lambda_hx = torch.zeros(n_shots, ny, nx, device=device, dtype=dtype)
-        lambda_hz = torch.zeros(n_shots, ny, nx, device=device, dtype=dtype)
+        lambda_ey = torch.zeros(n_shots, ny, nx, device=device, dtype=field_dtype)
+        lambda_hx = torch.zeros(n_shots, ny, nx, device=device, dtype=field_dtype)
+        lambda_hz = torch.zeros(n_shots, ny, nx, device=device, dtype=field_dtype)
 
         # Initialize adjoint PML memory variables
-        m_lambda_ey_x = torch.zeros(n_shots, ny, nx, device=device, dtype=dtype)
-        m_lambda_ey_z = torch.zeros(n_shots, ny, nx, device=device, dtype=dtype)
-        m_lambda_hx_z = torch.zeros(n_shots, ny, nx, device=device, dtype=dtype)
-        m_lambda_hz_x = torch.zeros(n_shots, ny, nx, device=device, dtype=dtype)
+        m_lambda_ey_x = torch.zeros(n_shots, ny, nx, device=device, dtype=memory_dtype)
+        m_lambda_ey_z = torch.zeros(n_shots, ny, nx, device=device, dtype=memory_dtype)
+        m_lambda_hx_z = torch.zeros(n_shots, ny, nx, device=device, dtype=memory_dtype)
+        m_lambda_hz_x = torch.zeros(n_shots, ny, nx, device=device, dtype=memory_dtype)
 
         # Allocate gradient outputs
         if n_sources > 0:
-            grad_f = torch.zeros(nt, n_shots, n_sources, device=device, dtype=dtype)
+            grad_f = torch.zeros(nt, n_shots, n_sources, device=device, dtype=grad_dtype)
         else:
-            grad_f = torch.empty(0, device=device, dtype=dtype)
+            grad_f = torch.empty(0, device=device, dtype=grad_dtype)
 
         if ca_requires_grad:
             if ca_batched:
-                grad_ca = torch.zeros(n_shots, ny, nx, device=device, dtype=dtype)
+                grad_ca = torch.zeros(n_shots, ny, nx, device=device, dtype=grad_dtype)
             else:
-                grad_ca = torch.zeros(ny, nx, device=device, dtype=dtype)
+                grad_ca = torch.zeros(ny, nx, device=device, dtype=grad_dtype)
             # Per-shot workspace for gradient accumulation (needed for CUDA)
-            grad_ca_shot = torch.zeros(n_shots, ny, nx, device=device, dtype=dtype)
+            grad_ca_shot = torch.zeros(n_shots, ny, nx, device=device, dtype=grad_dtype)
         else:
-            grad_ca = torch.empty(0, device=device, dtype=dtype)
-            grad_ca_shot = torch.empty(0, device=device, dtype=dtype)
+            grad_ca = torch.empty(0, device=device, dtype=grad_dtype)
+            grad_ca_shot = torch.empty(0, device=device, dtype=grad_dtype)
 
         if cb_requires_grad:
             if cb_batched:
-                grad_cb = torch.zeros(n_shots, ny, nx, device=device, dtype=dtype)
+                grad_cb = torch.zeros(n_shots, ny, nx, device=device, dtype=grad_dtype)
             else:
-                grad_cb = torch.zeros(ny, nx, device=device, dtype=dtype)
+                grad_cb = torch.zeros(ny, nx, device=device, dtype=grad_dtype)
             # Per-shot workspace for gradient accumulation (needed for CUDA)
-            grad_cb_shot = torch.zeros(n_shots, ny, nx, device=device, dtype=dtype)
+            grad_cb_shot = torch.zeros(n_shots, ny, nx, device=device, dtype=grad_dtype)
         else:
-            grad_cb = torch.empty(0, device=device, dtype=dtype)
-            grad_cb_shot = torch.empty(0, device=device, dtype=dtype)
+            grad_cb = torch.empty(0, device=device, dtype=grad_dtype)
+            grad_cb_shot = torch.empty(0, device=device, dtype=grad_dtype)
 
         # Get device index for CUDA
         device_idx = (
@@ -2603,7 +3402,12 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
 
         # Get the backend function
         backward_func = backend_utils.get_backend_function(
-            "maxwell_tm", "backward", accuracy, dtype, _backend_device
+            "maxwell_tm",
+            "backward",
+            accuracy,
+            coeff_dtype,
+            _backend_device,
+            variant=variant,
         )
 
         # Determine effective callback frequency
@@ -2667,6 +3471,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 n_receivers,
                 step_ratio,
                 storage_mode,
+                storage_format,
                 shot_bytes_uncomp,
                 ca_requires_grad,
                 cb_requires_grad,
@@ -2696,11 +3501,18 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                     "m_lambda_Hx_z": m_lambda_hx_z,
                     "m_lambda_Hz_x": m_lambda_hz_x,
                 }
+                callback_wavefields = _physical_tm2d_adjoint_callback_wavefields(
+                    callback_wavefields,
+                    scale_ctx=scale_ctx,
+                )
                 callback_gradients = {}
                 if ca_requires_grad:
                     callback_gradients["ca"] = grad_ca
                 if cb_requires_grad:
-                    callback_gradients["cb"] = grad_cb
+                    if scale_ctx is not None:
+                        callback_gradients["cb"] = grad_cb / scale_ctx["z_ref"]
+                    else:
+                        callback_gradients["cb"] = grad_cb
                 if ca_requires_grad or cb_requires_grad:
                     # Calculate physical gradients (epsilon and sigma) using VJP
                     with torch.enable_grad():
@@ -2719,7 +3531,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                             vjp_grads.append(grad_ca)
                         if cb_requires_grad:
                             vjp_tensors.append(cb_v)
-                            vjp_grads.append(grad_cb)
+                            vjp_grads.append(callback_gradients["cb"])
 
                         torch.autograd.backward(vjp_tensors, vjp_grads)
 
@@ -2750,6 +3562,8 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         #        pml_y0, pml_x0, pml_y1, pml_x1,
         #        fd_pad, pml_width, models,
         #        forward_callback, backward_callback, callback_frequency,
+        #        compute_precision, scale_ctx,
+        #        storage_mode_str, storage_format, storage_path, storage_compression,
         #        Ey, Hx, Hz, m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x,
         #        n_threads, _backend_device
 
@@ -2812,7 +3626,12 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             None,  # forward_callback, backward_callback, callback_frequency
             None,
             None,
-            None,  # storage_mode_str, storage_path, storage_compression
+            None,
+            None,  # compute_precision, scale_ctx
+            None,
+            None,
+            None,
+            None,  # storage_mode_str, storage_format, storage_path, storage_compression
             None,
             None,
             None,  # Ey, Hx, Hz
@@ -2936,6 +3755,7 @@ class Maxwell3D(torch.nn.Module):
         storage_bytes_limit_host: int | None = None,
         storage_chunk_steps: int = 0,
         n_threads: int | None = None,
+        dispersion: DebyeDispersion | None = None,
     ):
         assert isinstance(self.epsilon, torch.Tensor)
         assert isinstance(self.sigma, torch.Tensor)
@@ -2989,6 +3809,7 @@ class Maxwell3D(torch.nn.Module):
             storage_bytes_limit_host,
             storage_chunk_steps,
             n_threads,
+            dispersion,
         )
 
 
@@ -3041,6 +3862,7 @@ def maxwell3d(
     storage_bytes_limit_host: int | None = None,
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
+    dispersion: DebyeDispersion | None = None,
 ):
     """3D Maxwell equations solver.
 
@@ -3116,6 +3938,8 @@ def maxwell3d(
         raise TypeError("callback_frequency must be an int.")
     if callback_frequency <= 0:
         raise ValueError("callback_frequency must be positive.")
+
+    _validate_dispersion_time_step(dispersion, dt=dt)
 
     grid_spacing_list = _normalize_grid_spacing_3d(grid_spacing)
 
@@ -3199,6 +4023,7 @@ def maxwell3d(
         storage_bytes_limit_host,
         storage_chunk_steps,
         n_threads,
+        dispersion,
     )
 
     (
@@ -3331,6 +4156,7 @@ def maxwell3d_python(
     storage_bytes_limit_host: int | None = None,
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
+    dispersion: DebyeDispersion | None = None,
 ):
     """3D Python backend propagation with autograd support."""
     del (
@@ -3365,6 +4191,34 @@ def maxwell3d_python(
     if storage_kind != "none":
         raise NotImplementedError(
             "storage_compression is not implemented yet; set storage_compression=False."
+        )
+    if dispersion is not None and any(
+        state is not None
+        for state in (
+            Ex_0,
+            Ey_0,
+            Ez_0,
+            Hx_0,
+            Hy_0,
+            Hz_0,
+            m_hz_y_0,
+            m_hy_z_0,
+            m_hx_z_0,
+            m_hz_x_0,
+            m_hy_x_0,
+            m_hx_y_0,
+            m_ey_z_0,
+            m_ez_y_0,
+            m_ez_x_0,
+            m_ex_z_0,
+            m_ex_y_0,
+            m_ey_x_0,
+        )
+    ):
+        warnings.warn(
+            "Debye v1 does not support persisting polarization state across calls; "
+            "field initial conditions are applied, but polarization restarts from zero.",
+            RuntimeWarning,
         )
 
     device = epsilon.device
@@ -3412,7 +4266,26 @@ def maxwell3d_python(
     mu_padded = create_or_pad(
         mu, total_pad, device, dtype, padded_size, mode="replicate"
     )
-    ca, cb, cq = prepare_parameters(epsilon_padded, sigma_padded, mu_padded, dt)
+    dispersion_padded = _pad_dispersion_for_model(
+        dispersion,
+        model_shape=tuple(epsilon.shape),
+        total_pad=total_pad,
+        padded_size=padded_size,
+        device=device,
+        dtype=dtype,
+    )
+    material = compile_material_coefficients(
+        epsilon_padded,
+        sigma_padded,
+        mu_padded,
+        dt,
+        dispersion=dispersion_padded,
+    )
+    ca = material["ca"]
+    cb = material["cb"]
+    cq = material["cq"]
+    has_dispersion = bool(material["has_dispersion"])
+    debye = material.get("debye")
     ca = ca[None, :, :, :]
     cb = cb[None, :, :, :]
     cq = cq[None, :, :, :]
@@ -3452,6 +4325,17 @@ def maxwell3d_python(
     m_ex_z = init_wavefield(m_ex_z_0)
     m_ex_y = init_wavefield(m_ex_y_0)
     m_ey_x = init_wavefield(m_ey_x_0)
+    pol_ex = pol_ey = pol_ez = None
+    if has_dispersion and debye is not None:
+        pol_ex = _init_polarization_state(
+            n_shots=n_shots,
+            n_poles=debye["n_poles"],
+            spatial_shape=(padded_nz, padded_ny, padded_nx),
+            device=device,
+            dtype=dtype,
+        )
+        pol_ey = torch.zeros_like(pol_ex)
+        pol_ez = torch.zeros_like(pol_ex)
 
     pml_aux = [
         (m_hz_y, 1),
@@ -3555,6 +4439,8 @@ def maxwell3d_python(
         "cb": cb,
         "cq": cq,
     }
+    if dispersion is not None:
+        callback_models["dispersion"] = dispersion
 
     for step in range(nt_steps):
         if forward_callback is not None and step % callback_frequency == 0:
@@ -3578,6 +4464,11 @@ def maxwell3d_python(
                 "m_ex_y": m_ex_y,
                 "m_ey_x": m_ey_x,
             }
+            if pol_ex is not None and pol_ey is not None and pol_ez is not None:
+                callback_wavefields["polarization"] = torch.stack(
+                    (pol_ex.sum(dim=1), pol_ey.sum(dim=1), pol_ez.sum(dim=1)),
+                    dim=1,
+                )
             forward_callback(
                 CallbackState(
                     dt=dt,
@@ -3641,9 +4532,16 @@ def maxwell3d_python(
         dHx_dy_pml = dHx_dy / ky + m_hx_y
         dHy_dx_pml = dHy_dx / kx + m_hy_x
 
+        ex_prev = Ex
+        ey_prev = Ey
+        ez_prev = Ez
         Ex = ca * Ex + cb * (dHy_dz_pml - dHz_dy_pml)
         Ey = ca * Ey + cb * (dHz_dx_pml - dHx_dz_pml)
         Ez = ca * Ez + cb * (dHx_dy_pml - dHy_dx_pml)
+        if pol_ex is not None and pol_ey is not None and pol_ez is not None and debye is not None:
+            Ex = Ex + _debye_polarization_term(debye["cp"], pol_ex)
+            Ey = Ey + _debye_polarization_term(debye["cp"], pol_ey)
+            Ez = Ez + _debye_polarization_term(debye["cp"], pol_ez)
 
         if (
             source_amplitude is not None
@@ -3664,6 +4562,12 @@ def maxwell3d_python(
                 Ez = _inject_component(
                     Ez, flat_model_shape, sources_i, scaled_src, size_with_batch
                 )
+        if pol_ex is not None and pol_ey is not None and pol_ez is not None and debye is not None:
+            a = debye["a"].unsqueeze(0)
+            b = debye["b"].unsqueeze(0)
+            pol_ex = a * pol_ex + b * (Ex + ex_prev).unsqueeze(1)
+            pol_ey = a * pol_ey + b * (Ey + ey_prev).unsqueeze(1)
+            pol_ez = a * pol_ez + b * (Ez + ez_prev).unsqueeze(1)
 
         if n_receivers > 0:
             rec_field = _select_e_component(receiver_component, Ex, Ey, Ez)
@@ -3977,6 +4881,33 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 n_threads,
                 device_idx,
             )
+            if forward_callback is not None:
+                callback_wavefields = {
+                    "Ey": Ey,
+                    "Hx": Hx,
+                    "Hz": Hz,
+                    "m_Ey_x": m_Ey_x,
+                    "m_Ey_z": m_Ey_z,
+                    "m_Hx_z": m_Hx_z,
+                    "m_Hz_x": m_Hz_x,
+                }
+                callback_wavefields = _physical_tm2d_callback_wavefields(
+                    callback_wavefields,
+                    scale_ctx=scale_ctx,
+                )
+                forward_callback(
+                    CallbackState(
+                        dt=dt,
+                        step=nt // step_ratio,
+                        nt=nt // step_ratio,
+                        wavefields=callback_wavefields,
+                        models=models,
+                        gradients={},
+                        fd_pad=list(fd_pad),
+                        pml_width=list(pml_width),
+                        is_backward=False,
+                    )
+                )
 
         ctx.save_for_backward(
             ca,
@@ -4383,6 +5314,7 @@ def maxwell3d_c_cuda(
     storage_bytes_limit_host: int | None = None,
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
+    dispersion: DebyeDispersion | None = None,
 ):
     """3D C/CUDA forward propagation path with Python fallback for gradients."""
     from . import backend_utils, staggered
@@ -4475,6 +5407,7 @@ def maxwell3d_c_cuda(
             storage_mode=fallback_storage_mode,
             storage_compression=storage_compression,
             n_threads=n_threads,
+            dispersion=dispersion,
         )
 
     if not backend_utils.is_backend_available():
@@ -4569,7 +5502,26 @@ def maxwell3d_c_cuda(
         mu, total_pad, device, dtype, padded_size, mode="replicate"
     )
 
-    ca, cb, cq = prepare_parameters(epsilon_padded, sigma_padded, mu_padded, dt)
+    dispersion_padded = _pad_dispersion_for_model(
+        dispersion,
+        model_shape=tuple(epsilon.shape),
+        total_pad=total_pad,
+        padded_size=padded_size,
+        device=device,
+        dtype=dtype,
+    )
+    material = compile_material_coefficients(
+        epsilon_padded,
+        sigma_padded,
+        mu_padded,
+        dt,
+        dispersion=dispersion_padded,
+    )
+    ca = material["ca"]
+    cb = material["cb"]
+    cq = material["cq"]
+    has_dispersion = bool(material["has_dispersion"])
+    debye = material.get("debye")
     size_with_batch = (n_shots, padded_nz, padded_ny, padded_nx)
 
     def init_wavefield(field_0: torch.Tensor | None) -> torch.Tensor:
@@ -4730,6 +5682,8 @@ def maxwell3d_c_cuda(
         "cb": cb,
         "cq": cq,
     }
+    if dispersion is not None:
+        callback_models["dispersion"] = dispersion
 
     pml_z0 = fd_pad_list[0] + pml_width_list[0]
     pml_z1 = padded_nz - fd_pad_list[1] - pml_width_list[1]
@@ -4740,6 +5694,14 @@ def maxwell3d_c_cuda(
 
     source_component_idx = _COMPONENT_TO_INDEX_3D[source_component]
     receiver_component_idx = _COMPONENT_TO_INDEX_3D[receiver_component]
+    if has_dispersion and requires_grad:
+        return _fallback_reason(
+            "3D Debye C/CUDA path currently supports forward inference only"
+        )
+    if has_dispersion and device.type == "cpu":
+        return _fallback_reason(
+            "3D Debye CPU backend is not enabled yet"
+        )
     if requires_grad:
         try:
             _ = backend_utils.get_backend_function(
@@ -4869,6 +5831,34 @@ def maxwell3d_c_cuda(
         if effective_callback_freq <= 0:
             effective_callback_freq = nt_steps if nt_steps > 0 else 1
 
+        debye_a = torch.empty(0, device=device, dtype=dtype)
+        debye_b = torch.empty(0, device=device, dtype=dtype)
+        debye_cp = torch.empty(0, device=device, dtype=dtype)
+        pol_ex = torch.empty(0, device=device, dtype=dtype)
+        pol_ey = torch.empty(0, device=device, dtype=dtype)
+        pol_ez = torch.empty(0, device=device, dtype=dtype)
+        ex_prev = torch.empty(0, device=device, dtype=dtype)
+        ey_prev = torch.empty(0, device=device, dtype=dtype)
+        ez_prev = torch.empty(0, device=device, dtype=dtype)
+        n_poles = 0
+        if has_dispersion and debye is not None:
+            n_poles = int(debye["n_poles"])
+            debye_a = debye["a"].contiguous()
+            debye_b = debye["b"].contiguous()
+            debye_cp = debye["cp"].contiguous()
+            pol_ex = _init_polarization_state(
+                n_shots=n_shots,
+                n_poles=n_poles,
+                spatial_shape=(padded_nz, padded_ny, padded_nx),
+                device=device,
+                dtype=dtype,
+            ).contiguous()
+            pol_ey = torch.zeros_like(pol_ex)
+            pol_ez = torch.zeros_like(pol_ex)
+            ex_prev = torch.empty_like(Ex)
+            ey_prev = torch.empty_like(Ey)
+            ez_prev = torch.empty_like(Ez)
+
         for step in range(0, nt_steps, effective_callback_freq):
             if forward_callback is not None:
                 callback_wavefields = {
@@ -4891,6 +5881,11 @@ def maxwell3d_c_cuda(
                     "m_ex_y": m_ex_y,
                     "m_ey_x": m_ey_x,
                 }
+                if has_dispersion:
+                    callback_wavefields["polarization"] = torch.stack(
+                        (pol_ex.sum(dim=1), pol_ey.sum(dim=1), pol_ez.sum(dim=1)),
+                        dim=1,
+                    )
                 forward_callback(
                     CallbackState(
                         dt=dt,
@@ -4930,7 +5925,17 @@ def maxwell3d_c_cuda(
                 backend_utils.tensor_to_ptr(m_ex_z),
                 backend_utils.tensor_to_ptr(m_ex_y),
                 backend_utils.tensor_to_ptr(m_ey_x),
+                backend_utils.tensor_to_ptr(debye_a),
+                backend_utils.tensor_to_ptr(debye_b),
+                backend_utils.tensor_to_ptr(debye_cp),
+                backend_utils.tensor_to_ptr(pol_ex),
+                backend_utils.tensor_to_ptr(pol_ey),
+                backend_utils.tensor_to_ptr(pol_ez),
+                backend_utils.tensor_to_ptr(ex_prev),
+                backend_utils.tensor_to_ptr(ey_prev),
+                backend_utils.tensor_to_ptr(ez_prev),
                 backend_utils.tensor_to_ptr(receiver_amplitudes),
+                n_poles,
                 backend_utils.tensor_to_ptr(az_flat),
                 backend_utils.tensor_to_ptr(bz_flat),
                 backend_utils.tensor_to_ptr(az_h_flat),
@@ -4963,6 +5968,7 @@ def maxwell3d_c_cuda(
                 n_sources,
                 n_receivers,
                 gradient_sampling_interval,
+                has_dispersion,
                 False,
                 False,
                 False,

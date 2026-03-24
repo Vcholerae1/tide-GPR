@@ -51,7 +51,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["scikit-build-core>=0.10"]
+requires = ["scikit-build-core>=0.10", "cmake>=3.18", "ninja"]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
@@ -62,6 +62,17 @@ wheel.install-dir = "tide"
 wheel.py-api = "py3"
 build-dir = "build/{wheel_tag}"
 ninja.make-fallback = true
+sdist.exclude = [
+    "examples/data/**",
+    "outputs/**",
+    "build/**",
+    "dist/**",
+    "*.h5",
+    "*.vtk",
+]
+
+[tool.scikit-build.cmake.define]
+CMAKE_CUDA_ARCHITECTURES = "89"
 
 [tool.cibuildwheel]
 # Build for Python 3.12 only (python-independent wheel)

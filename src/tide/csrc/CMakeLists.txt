@@ -321,6 +321,7 @@ if(CUDAToolkit_FOUND)
     endif()
 
     add_tide_cuda_object_library(maxwell tm2d/maxwell.cu)
+    add_tide_cuda_object_library(maxwell_fp16s tm2d/maxwell_fp16s.cu)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/em3d/maxwell_3d.cu)
         add_tide_cuda_object_library(maxwell_3d em3d/maxwell_3d.cu)
     endif()

@@ -115,7 +115,7 @@ print(f"Recorded data shape: {receiver_data.shape}")
 
 ## Mixed Precision
 
-`tide.maxwelltm` provides a mixed-precision interface:
+`tide.maxwelltm` exposes an explicit TM2D mixed-precision mode:
 
 ```python
 out = tide.maxwelltm(
@@ -127,13 +127,18 @@ out = tide.maxwelltm(
     source_amplitude=src,
     source_location=src_loc,
     receiver_location=rec_loc,
+    compute_precision="fp16_scaled",
 )
 ```
 
 Notes:
 - External API remains SI-compatible (`epsilon_r`, `mu_r`, `sigma`, `dx/dy`, `dt`).
-- Intermediate snapshot storage still supports `storage_compression="bf16"` when
-  you want lower memory footprint during backpropagation.
+- `compute_precision="fp16_scaled"` is CUDA-only and keeps public tensors in
+  float32 while using fp16 field/snapshot storage internally.
+- `storage_compression="bf16"` remains available on the default path. It is not
+  supported together with `compute_precision="fp16_scaled"`.
+- The v1 `fp16_scaled` path primarily reduces memory footprint; it does not
+  promise faster kernels by itself.
 
 ## Examples
 

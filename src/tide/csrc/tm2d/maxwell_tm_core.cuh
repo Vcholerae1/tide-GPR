@@ -4,6 +4,10 @@
 #include <cstdint>
 
 #if defined(__CUDACC__)
+#include <cuda_fp16.h>
+#endif
+
+#if defined(__CUDACC__)
 #define TIDE_HOST_DEVICE __host__ __device__ __forceinline__
 #else
 #define TIDE_HOST_DEVICE inline
@@ -421,6 +425,18 @@ template <> struct SnapshotCodec<uint16_t> {
 };
 
 #if defined(__CUDACC__)
+template <> struct SnapshotCodec<__half> {
+  template <typename T>
+  static TIDE_HOST_DEVICE __half encode(T const value) {
+    return __float2half(static_cast<float>(value));
+  }
+
+  template <typename T>
+  static TIDE_HOST_DEVICE T decode(__half const value) {
+    return static_cast<T>(__half2float(value));
+  }
+};
+
 template <> struct SnapshotCodec<__nv_bfloat16> {
   template <typename T>
   static TIDE_HOST_DEVICE __nv_bfloat16 encode(T const value) {

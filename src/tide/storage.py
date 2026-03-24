@@ -20,6 +20,13 @@ STORAGE_CPU = 1  # Stage snapshots in host memory (slower, avoids GPU OOM)
 STORAGE_DISK = 2  # Spill snapshots to disk (slowest, preserves host/GPU memory)
 STORAGE_NONE = 3  # Do not store snapshots
 
+# Snapshot payload formats. These are passed to the native TM2D storage path so
+# it can distinguish full-precision, bf16-compressed, and fp16 payloads without
+# guessing from element size alone.
+STORAGE_FORMAT_FULL = 0
+STORAGE_FORMAT_BF16 = 1
+STORAGE_FORMAT_FP16 = 2
+
 # Number of ring buffers for CPU-stage ping-pong: allows overlapping reads/writes
 # (write to one, read from another, keep one ready). MUST match csrc NUM_BUFFERS.
 _CPU_STORAGE_BUFFERS = 3
@@ -61,16 +68,26 @@ def _resolve_storage_compression(
     device: torch.device,
     *,
     context: str,
-) -> tuple[str, torch.dtype, int]:
+    compute_precision: str = "default",
+) -> tuple[str, torch.dtype, int, int]:
+    if compute_precision == "fp16_scaled":
+        storage_kind = _normalize_storage_compression(storage_compression)
+        if storage_kind != "none":
+            raise ValueError(
+                f"{context} does not support storage_compression with "
+                "compute_precision='fp16_scaled'; fp16 snapshots are implicit."
+            )
+        return "fp16", torch.float16, 2, STORAGE_FORMAT_FP16
+
     storage_kind = _normalize_storage_compression(storage_compression)
     if storage_kind == "none":
-        return storage_kind, dtype, dtype.itemsize
+        return storage_kind, dtype, dtype.itemsize, STORAGE_FORMAT_FULL
     if storage_kind == "bf16":
         if dtype != torch.float32:
             raise NotImplementedError(
                 f"{context} (BF16 storage) is only supported for float32."
             )
-        return storage_kind, torch.bfloat16, 2
+        return storage_kind, torch.bfloat16, 2, STORAGE_FORMAT_BF16
     raise RuntimeError(f"Unsupported storage compression mode: {storage_kind}")
 
 

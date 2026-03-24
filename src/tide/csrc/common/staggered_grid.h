@@ -1,3 +1,4 @@
+
 #ifndef STAGGERED_GRID_H
 #define STAGGERED_GRID_H
 

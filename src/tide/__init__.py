@@ -21,6 +21,7 @@ from . import (
 )
 from .callbacks import Callback, CallbackState, create_callback_state
 from .cfl import cfl_condition
+from .dispersion import DebyeDispersion
 from .maxwell import Maxwell3D, MaxwellTM, maxwell3d, maxwelltm
 from .padding import create_or_pad, reverse_pad, zero_interior
 from .resampling import downsample, downsample_and_movedim, upsample
@@ -46,6 +47,7 @@ __all__ = [
     "MaxwellTM",
     "Maxwell3D",
     "CallbackState",
+    "DebyeDispersion",
     # Type aliases
     "Callback",
     # Functions

@@ -94,7 +94,13 @@ class CallbackState:
         elif pml_width is not None and len(pml_width) in {4, 6}:
             self._ndim = len(pml_width) // 2
         elif models:
-            first_model = next(iter(models.values()))
+            first_model = next(
+                (value for value in models.values() if isinstance(value, torch.Tensor)),
+                None,
+            )
+            if first_model is None:
+                self._ndim = 2
+                return
             # Heuristic:
             # - 2D unbatched: [ny, nx] -> 2
             # - 2D batched:   [n_shots, ny, nx] -> 2
@@ -189,7 +195,10 @@ class CallbackState:
         if name not in self._models:
             available = ", ".join(self._models.keys())
             raise KeyError(f"Model '{name}' not found. Available: {available}")
-        return self._get_view(self._models[name], view)
+        model = self._models[name]
+        if not isinstance(model, torch.Tensor):
+            return model
+        return self._get_view(model, view)
 
     def get_gradient(self, name: str, view: str = "inner") -> torch.Tensor:
         """Get a gradient tensor (only available during backward pass).
@@ -231,6 +240,9 @@ class CallbackState:
         Returns:
             A view of the tensor corresponding to the specified region.
         """
+        if not isinstance(x, torch.Tensor):
+            return x
+
         if view == "full":
             return x
 
