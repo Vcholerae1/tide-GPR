@@ -40,3 +40,5 @@ test.md
 *.png
 *.html
 !README.md
+
+examples/data/Petrophysical_Models.h5
