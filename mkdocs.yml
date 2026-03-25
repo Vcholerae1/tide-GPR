@@ -29,21 +29,21 @@ markdown_extensions:
       alternate_style: true
 
 nav:
-  - 首页: index.md
-  - 总览: overview.md
-  - 快速开始: getting-started.md
-  - 指南:
-      - 建模: guides/modeling.md
-      - 震源与接收器: guides/sources-receivers.md
-      - 边界与 PML: guides/boundaries.md
-      - 存储与检查点: guides/storage.md
-      - 回调: guides/callbacks.md
-      - 反演流程: guides/inversion.md
-      - 性能建议: guides/performance.md
-      - 稳定性与校验: guides/validation.md
+  - Home: index.md
+  - Overview: overview.md
+  - Getting Started: getting-started.md
+  - Guides:
+      - Modeling: guides/modeling.md
+      - Sources and Receivers: guides/sources-receivers.md
+      - Boundaries and PML: guides/boundaries.md
+      - Storage and Checkpointing: guides/storage.md
+      - Callbacks: guides/callbacks.md
+      - Inversion Workflow: guides/inversion.md
+      - Performance Tips: guides/performance.md
+      - Stability and Validation: guides/validation.md
   - API:
-      - 索引: api/index.md
-      - 顶层模块: api/tide.md
+      - Index: api/index.md
+      - Top-level Module: api/tide.md
       - Maxwell: api/maxwell.md
       - Wavelets: api/wavelets.md
       - Callbacks: api/callbacks.md
@@ -56,11 +56,11 @@ nav:
       - Storage: api/storage.md
       - Backend Utils: api/backend_utils.md
       - C/CUDA: api/csrc.md
-  - 示例:
+  - Examples:
       - Multiscale Filtered: examples/example_multiscale_filtered.md
       - Random Source Encoding: examples/example_multiscale_random_sources.md
       - Wavefield Animation: examples/wavefield_animation.md
       - Benchmark: examples/benchmark_maxwell.md
-  - 开发:
-      - 构建: dev/build.md
+  - Development:
+      - Build: dev/build.md
       - CUDA: dev/cuda.md

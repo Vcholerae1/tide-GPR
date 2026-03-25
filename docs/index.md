@@ -1,13 +1,13 @@
-# TIDE 文档首页
+# TIDE Documentation Home
 
-欢迎使用 TIDE 文档站。
+Welcome to the TIDE documentation site.
 
-推荐阅读顺序：
+Recommended reading order:
 
-1. [项目总览](overview.md)
-2. [快速开始](getting-started.md)
-3. [建模指南](guides/modeling.md)
-4. [存储与检查点](guides/storage.md)
-5. [API 索引](api/index.md)
+1. [Project Overview](overview.md)
+2. [Getting Started](getting-started.md)
+3. [Modeling Guide](guides/modeling.md)
+4. [Storage and Checkpointing](guides/storage.md)
+5. [API Index](api/index.md)
 
-如果你是首次接触该项目，建议先运行一次最小 2D 示例，再查看 3D 与性能章节。
+If you are new to this project, start with a minimal 2D example first, then continue with the 3D and performance sections.
