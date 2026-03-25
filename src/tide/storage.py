@@ -25,10 +25,9 @@ STORAGE_NONE = 3  # Do not store snapshots
 # guessing from element size alone.
 STORAGE_FORMAT_FULL = 0
 STORAGE_FORMAT_BF16 = 1
-STORAGE_FORMAT_FP16 = 2
 
-# Number of ring buffers for CPU-stage ping-pong: allows overlapping reads/writes
-# (write to one, read from another, keep one ready). MUST match csrc NUM_BUFFERS.
+# Number of ring buffers for host-staged snapshot storage. CUDA CPU- and
+# disk-backed storage use the same ring size and must match csrc NUM_BUFFERS.
 _CPU_STORAGE_BUFFERS = 3
 
 
@@ -70,14 +69,10 @@ def _resolve_storage_compression(
     context: str,
     compute_precision: str = "default",
 ) -> tuple[str, torch.dtype, int, int]:
-    if compute_precision == "fp16_scaled":
-        storage_kind = _normalize_storage_compression(storage_compression)
-        if storage_kind != "none":
-            raise ValueError(
-                f"{context} does not support storage_compression with "
-                "compute_precision='fp16_scaled'; fp16 snapshots are implicit."
-            )
-        return "fp16", torch.float16, 2, STORAGE_FORMAT_FP16
+    if compute_precision != "default":
+        raise ValueError(
+            f"{context} only supports compute_precision='default', got {compute_precision!r}."
+        )
 
     storage_kind = _normalize_storage_compression(storage_compression)
     if storage_kind == "none":

@@ -348,10 +348,12 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(forward)(
     int64_t const source_component,
     int64_t const receiver_component,
     int64_t const n_threads,
-    int64_t const device) {
+    int64_t const device,
+    void *const compute_stream_handle) {
   (void)dt;
   (void)step_ratio;
   (void)device;
+  (void)compute_stream_handle;
 
 #ifdef _OPENMP
   int const prev_threads = omp_get_max_threads();
@@ -672,9 +674,13 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(forward_with_storage)(
     int64_t const source_component,
     int64_t const receiver_component,
     int64_t const n_threads,
-    int64_t const device) {
+    int64_t const device,
+    void *const compute_stream_handle,
+    void *const storage_stream_handle) {
   (void)dt;
   (void)device;
+  (void)compute_stream_handle;
+  (void)storage_stream_handle;
   (void)store_2;
   (void)store_filenames_1;
   (void)store_4;
@@ -1006,8 +1012,12 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(backward)(
     int64_t const source_component,
     int64_t const receiver_component,
     int64_t const n_threads,
-    int64_t const device) {
+    int64_t const device,
+    void *const compute_stream_handle,
+    void *const storage_stream_handle) {
   (void)device;
+  (void)compute_stream_handle;
+  (void)storage_stream_handle;
   (void)store_2;
   (void)store_filenames_1;
   (void)store_4;

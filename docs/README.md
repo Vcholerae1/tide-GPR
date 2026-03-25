@@ -1,7 +1,14 @@
 # TIDE Documentation
 
-This directory is the entry point for user guides, API reference, examples, and developer notes.
-TODO: replace placeholders with project-specific content.
+This directory is the entry point for user guides, API reference, runnable examples, and developer notes.
+
+Recommended reading order:
+1. overview.md
+2. getting-started.md
+3. guides/modeling.md
+4. guides/sources-receivers.md
+5. guides/storage.md
+6. api/index.md
 
 ## Start Here
 - overview.md
@@ -42,5 +49,26 @@ TODO: replace placeholders with project-specific content.
 ## Developer Docs
 - dev/build.md
 - dev/cuda.md
-- dev/testing.md
-- dev/contributing.md
+
+Notes:
+- Paths in this directory are written for repository-local browsing.
+- The API pages focus on practical signatures, shapes, and constraints rather than implementation internals.
+
+## MkDocs Preview
+
+Local preview:
+
+```bash
+uv sync --group docs
+uv run mkdocs serve
+```
+
+Static build:
+
+```bash
+uv run mkdocs build
+```
+
+GitHub Pages:
+- This repository provides a workflow at .github/workflows/docs.yml.
+- In repository settings, set Pages source to GitHub Actions.

@@ -22,6 +22,7 @@
 #ifdef STAGGERED_GRID_H
 #undef STAGGERED_GRID_H
 #endif
+#include <cstdint>
 #define TIDE_STAGGERED_GRID_3D 1
 #include "staggered_grid.h"
 #undef TIDE_STAGGERED_GRID_3D
@@ -43,6 +44,47 @@
 namespace FUNC(Inst) {
 
 namespace {
+
+struct ScopedEventArray {
+  cudaEvent_t events[NUM_BUFFERS]{};
+
+  ~ScopedEventArray() {
+    for (int i = 0; i < NUM_BUFFERS; ++i) {
+      if (events[i] != nullptr) {
+        cudaEventDestroy(events[i]);
+      }
+    }
+  }
+};
+
+static inline cudaStream_t resolve_cuda_stream(void *const stream_handle) {
+  return stream_handle != nullptr ? reinterpret_cast<cudaStream_t>(stream_handle)
+                                  : static_cast<cudaStream_t>(0);
+}
+
+static inline size_t ring_storage_offset_bytes(
+    int64_t const step_idx, int64_t const storage_mode,
+    size_t const bytes_per_step_store) {
+  if (storage_mode == STORAGE_DEVICE) {
+    return static_cast<size_t>(step_idx) * bytes_per_step_store;
+  }
+  if (storage_mode == STORAGE_CPU || storage_mode == STORAGE_DISK) {
+    return static_cast<size_t>(step_idx % NUM_BUFFERS) * bytes_per_step_store;
+  }
+  return 0;
+}
+
+static inline size_t cpu_linear_storage_offset_bytes(
+    int64_t const step_idx, int64_t const storage_mode,
+    size_t const bytes_per_step_store) {
+  if (storage_mode == STORAGE_CPU) {
+    return static_cast<size_t>(step_idx) * bytes_per_step_store;
+  }
+  if (storage_mode == STORAGE_DISK) {
+    return static_cast<size_t>(step_idx % NUM_BUFFERS) * bytes_per_step_store;
+  }
+  return 0;
+}
 
 template <typename T>
 __host__ __device__ __forceinline__ T tide_max(T a, T b) {
@@ -130,6 +172,11 @@ __global__ void record_receivers_component(
   } else {
     r[idx] = (TIDE_DTYPE)0;
   }
+}
+
+template <typename T>
+__host__ __device__ __forceinline__ T tide_min(T a, T b) {
+  return a < b ? a : b;
 }
 
 __global__ void forward_kernel_h(
@@ -1186,12 +1233,15 @@ extern "C" void FUNC(forward)(
     int64_t const source_component,
     int64_t const receiver_component,
     int64_t const n_threads,
-    int64_t const device) {
+    int64_t const device,
+    void *const compute_stream_handle) {
   (void)dt_h;
   (void)step_ratio_h;
   (void)n_threads;
 
   cudaSetDevice((int)device);
+  cudaStream_t const stream_compute =
+      resolve_cuda_stream(compute_stream_handle);
 
   int64_t const shot_numel_h = nz_h * ny_h * nx_h;
   set_constants(
@@ -1234,7 +1284,7 @@ extern "C" void FUNC(forward)(
 
   for (int64_t t = start_t; t < start_t + nt; ++t) {
     forward_kernel_h<<<(unsigned)launch_cfg.blocks_cells,
-                       launch_cfg.threads_cells>>>(
+                       launch_cfg.threads_cells, 0, stream_compute>>>(
         cq,
         ex,
         ey,
@@ -1262,16 +1312,20 @@ extern "C" void FUNC(forward)(
       size_t const field_bytes =
           (size_t)(n_shots_h * shot_numel_h) * sizeof(TIDE_DTYPE);
       tide::cuda_check_or_abort(
-          cudaMemcpy(ex_prev, ex, field_bytes, cudaMemcpyDeviceToDevice), __FILE__,
-          __LINE__);
+          cudaMemcpyAsync(ex_prev, ex, field_bytes, cudaMemcpyDeviceToDevice,
+                          stream_compute),
+          __FILE__, __LINE__);
       tide::cuda_check_or_abort(
-          cudaMemcpy(ey_prev, ey, field_bytes, cudaMemcpyDeviceToDevice), __FILE__,
-          __LINE__);
+          cudaMemcpyAsync(ey_prev, ey, field_bytes, cudaMemcpyDeviceToDevice,
+                          stream_compute),
+          __FILE__, __LINE__);
       tide::cuda_check_or_abort(
-          cudaMemcpy(ez_prev, ez, field_bytes, cudaMemcpyDeviceToDevice), __FILE__,
-          __LINE__);
+          cudaMemcpyAsync(ez_prev, ez, field_bytes, cudaMemcpyDeviceToDevice,
+                          stream_compute),
+          __FILE__, __LINE__);
       forward_kernel_e_debye<<<(unsigned)launch_cfg.blocks_cells,
-                               launch_cfg.threads_cells>>>(
+                               launch_cfg.threads_cells, 0,
+                               stream_compute>>>(
           ca,
           cb,
           debye_cp,
@@ -1305,7 +1359,7 @@ extern "C" void FUNC(forward)(
           n_poles);
     } else {
       forward_kernel_e<<<(unsigned)launch_cfg.blocks_cells,
-                         launch_cfg.threads_cells>>>(
+                         launch_cfg.threads_cells, 0, stream_compute>>>(
           ca,
           cb,
           ex,
@@ -1333,7 +1387,7 @@ extern "C" void FUNC(forward)(
 
     if (n_sources_per_shot_h > 0 && f != nullptr && sources_i != nullptr) {
       add_sources_component<<<(unsigned)launch_cfg.blocks_sources,
-                              launch_cfg.threads_sr>>>(
+                              launch_cfg.threads_sr, 0, stream_compute>>>(
           source_field,
           f + t * n_shots_h * n_sources_per_shot_h,
           sources_i);
@@ -1345,17 +1399,24 @@ extern "C" void FUNC(forward)(
           total_pol > 0 ? (total_pol + launch_cfg.threads_cells - 1) /
                               launch_cfg.threads_cells
                         : 1;
-      update_polarization_debye_3d<<<(unsigned)blocks_pol, launch_cfg.threads_cells>>>(
+      update_polarization_debye_3d<<<(unsigned)blocks_pol,
+                                     launch_cfg.threads_cells, 0,
+                                     stream_compute>>>(
           ex_prev, ex, debye_a, debye_b, pol_ex, n_poles);
-      update_polarization_debye_3d<<<(unsigned)blocks_pol, launch_cfg.threads_cells>>>(
+      update_polarization_debye_3d<<<(unsigned)blocks_pol,
+                                     launch_cfg.threads_cells, 0,
+                                     stream_compute>>>(
           ey_prev, ey, debye_a, debye_b, pol_ey, n_poles);
-      update_polarization_debye_3d<<<(unsigned)blocks_pol, launch_cfg.threads_cells>>>(
+      update_polarization_debye_3d<<<(unsigned)blocks_pol,
+                                     launch_cfg.threads_cells, 0,
+                                     stream_compute>>>(
           ez_prev, ez, debye_a, debye_b, pol_ez, n_poles);
     }
 
     if (n_receivers_per_shot_h > 0 && r != nullptr && receivers_i != nullptr) {
       record_receivers_component<<<(unsigned)launch_cfg.blocks_receivers,
-                                   launch_cfg.threads_sr>>>(
+                                   launch_cfg.threads_sr, 0,
+                                   stream_compute>>>(
           r + t * n_shots_h * n_receivers_per_shot_h,
           receiver_field,
           receivers_i);
@@ -1456,29 +1517,31 @@ extern "C" void FUNC(forward_with_storage)(
     int64_t const source_component,
     int64_t const receiver_component,
     int64_t const n_threads,
-    int64_t const device) {
+    int64_t const device,
+    void *const compute_stream_handle,
+    void *const storage_stream_handle) {
   (void)dt_h;
   (void)n_threads;
-  (void)store_2;
-  (void)store_filenames_1;
-  (void)store_4;
-  (void)store_filenames_2;
-  (void)store_6;
-  (void)store_filenames_3;
-  (void)store_8;
-  (void)store_filenames_4;
-  (void)store_10;
-  (void)store_filenames_5;
-  (void)store_12;
-  (void)store_filenames_6;
 
   cudaSetDevice((int)device);
+  cudaStream_t const stream_compute =
+      resolve_cuda_stream(compute_stream_handle);
+  cudaStream_t const stream_storage =
+      resolve_cuda_stream(storage_stream_handle);
 
   int64_t const shot_numel_h = nz_h * ny_h * nx_h;
   int64_t const step_ratio_eff = step_ratio_h > 0 ? step_ratio_h : 1;
+  size_t const bytes_per_step_store =
+      (size_t)shot_bytes_uncomp * (size_t)n_shots_h;
   bool const storage_direct =
       (storage_mode == STORAGE_DEVICE) &&
       (shot_bytes_uncomp == (int64_t)(shot_numel_h * (int64_t)sizeof(TIDE_DTYPE)));
+  bool const host_backed_storage =
+      (storage_mode == STORAGE_CPU || storage_mode == STORAGE_DISK) &&
+      (shot_bytes_uncomp == (int64_t)(shot_numel_h * (int64_t)sizeof(TIDE_DTYPE)));
+  bool const use_storage_pipeline =
+      host_backed_storage && (ca_requires_grad || cb_requires_grad) &&
+      stream_storage != nullptr && stream_storage != stream_compute;
 
   set_constants(
       rdz_h,
@@ -1518,9 +1581,57 @@ extern "C" void FUNC(forward_with_storage)(
   ScalarLaunchConfig3D const launch_cfg = make_scalar_launch_config_3d(
       n_shots_h, shot_numel_h, n_sources_per_shot_h, n_receivers_per_shot_h);
 
+  TIDE_DTYPE *const device_stores[6] = {store_1, store_3, store_5,
+                                        store_7, store_9, store_11};
+  TIDE_DTYPE *const host_stores[6] = {store_2, store_4, store_6,
+                                      store_8, store_10, store_12};
+  char **const store_filenames[6] = {store_filenames_1, store_filenames_2,
+                                     store_filenames_3, store_filenames_4,
+                                     store_filenames_5, store_filenames_6};
+  bool const component_required[6] = {ca_requires_grad, ca_requires_grad,
+                                      ca_requires_grad, cb_requires_grad,
+                                      cb_requires_grad, cb_requires_grad};
+  void *async_disk_handles[6] = {};
+  if (storage_mode == STORAGE_DISK) {
+    for (int i = 0; i < 6; ++i) {
+      if (component_required[i] && store_filenames[i] != nullptr) {
+        async_disk_handles[i] =
+            storage_async_disk_open(store_filenames[i][0], true, NUM_BUFFERS);
+      }
+    }
+  }
+
+  ScopedEventArray storage_done_events;
+  ScopedEventArray compute_done_events;
+  if (use_storage_pipeline) {
+    for (int i = 0; i < NUM_BUFFERS; ++i) {
+      tide::cuda_check_or_abort(cudaEventCreate(&storage_done_events.events[i]),
+                                __FILE__, __LINE__);
+      tide::cuda_check_or_abort(cudaEventCreate(&compute_done_events.events[i]),
+                                __FILE__, __LINE__);
+      tide::cuda_check_or_abort(
+          cudaEventRecord(storage_done_events.events[i], stream_storage),
+          __FILE__, __LINE__);
+    }
+  }
+
   for (int64_t t = start_t; t < start_t + nt; ++t) {
-    forward_kernel_h<<<(unsigned)launch_cfg.blocks_cells,
-                       launch_cfg.threads_cells>>>(
+    bool const do_store =
+        (storage_direct || host_backed_storage) && ((t % step_ratio_eff) == 0);
+    int slot = 0;
+    cudaEvent_t slot_storage_done = nullptr;
+    cudaEvent_t slot_compute_done = nullptr;
+    if (do_store && use_storage_pipeline) {
+      slot = (int)((t / step_ratio_eff) % NUM_BUFFERS);
+      slot_storage_done = storage_done_events.events[slot];
+      slot_compute_done = compute_done_events.events[slot];
+      tide::cuda_check_or_abort(
+          cudaStreamWaitEvent(stream_compute, slot_storage_done, 0), __FILE__,
+          __LINE__);
+    }
+
+    forward_kernel_h<<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells,
+                       0, stream_compute>>>(
         cq,
         ex,
         ey,
@@ -1544,25 +1655,46 @@ extern "C" void FUNC(forward_with_storage)(
         kyh,
         kxh);
 
-    bool const do_store = storage_direct && ((t % step_ratio_eff) == 0);
     if (do_store) {
       int64_t const store_idx = t / step_ratio_eff;
-      int64_t const step_offset = store_idx * n_shots_h * shot_numel_h;
+      size_t const device_offset = ring_storage_offset_bytes(
+          store_idx, storage_mode, bytes_per_step_store);
+      size_t const host_offset = cpu_linear_storage_offset_bytes(
+          store_idx, storage_mode, bytes_per_step_store);
       TIDE_DTYPE *const ex_store_t =
-          (ca_requires_grad && store_1 != nullptr) ? (store_1 + step_offset) : nullptr;
+          (ca_requires_grad && device_stores[0] != nullptr)
+              ? reinterpret_cast<TIDE_DTYPE *>(
+                    reinterpret_cast<uint8_t *>(device_stores[0]) + device_offset)
+              : nullptr;
       TIDE_DTYPE *const ey_store_t =
-          (ca_requires_grad && store_3 != nullptr) ? (store_3 + step_offset) : nullptr;
+          (ca_requires_grad && device_stores[1] != nullptr)
+              ? reinterpret_cast<TIDE_DTYPE *>(
+                    reinterpret_cast<uint8_t *>(device_stores[1]) + device_offset)
+              : nullptr;
       TIDE_DTYPE *const ez_store_t =
-          (ca_requires_grad && store_5 != nullptr) ? (store_5 + step_offset) : nullptr;
+          (ca_requires_grad && device_stores[2] != nullptr)
+              ? reinterpret_cast<TIDE_DTYPE *>(
+                    reinterpret_cast<uint8_t *>(device_stores[2]) + device_offset)
+              : nullptr;
       TIDE_DTYPE *const curl_x_store_t =
-          (cb_requires_grad && store_7 != nullptr) ? (store_7 + step_offset) : nullptr;
+          (cb_requires_grad && device_stores[3] != nullptr)
+              ? reinterpret_cast<TIDE_DTYPE *>(
+                    reinterpret_cast<uint8_t *>(device_stores[3]) + device_offset)
+              : nullptr;
       TIDE_DTYPE *const curl_y_store_t =
-          (cb_requires_grad && store_9 != nullptr) ? (store_9 + step_offset) : nullptr;
+          (cb_requires_grad && device_stores[4] != nullptr)
+              ? reinterpret_cast<TIDE_DTYPE *>(
+                    reinterpret_cast<uint8_t *>(device_stores[4]) + device_offset)
+              : nullptr;
       TIDE_DTYPE *const curl_z_store_t =
-          (cb_requires_grad && store_11 != nullptr) ? (store_11 + step_offset) : nullptr;
+          (cb_requires_grad && device_stores[5] != nullptr)
+              ? reinterpret_cast<TIDE_DTYPE *>(
+                    reinterpret_cast<uint8_t *>(device_stores[5]) + device_offset)
+              : nullptr;
 
       forward_kernel_e_with_storage<<<(unsigned)launch_cfg.blocks_cells,
-                                      launch_cfg.threads_cells>>>(
+                                      launch_cfg.threads_cells, 0,
+                                      stream_compute>>>(
           ca,
           cb,
           ex,
@@ -1594,9 +1726,62 @@ extern "C" void FUNC(forward_with_storage)(
           curl_z_store_t,
           ca_requires_grad,
           cb_requires_grad);
+
+      if (host_backed_storage) {
+        cudaStream_t save_stream = stream_compute;
+        if (use_storage_pipeline) {
+          tide::cuda_check_or_abort(
+              cudaEventRecord(slot_compute_done, stream_compute), __FILE__,
+              __LINE__);
+          tide::cuda_check_or_abort(
+              cudaStreamWaitEvent(stream_storage, slot_compute_done, 0),
+              __FILE__, __LINE__);
+          save_stream = stream_storage;
+        }
+
+        TIDE_DTYPE *const current_device[6] = {ex_store_t, ey_store_t, ez_store_t,
+                                               curl_x_store_t, curl_y_store_t,
+                                               curl_z_store_t};
+        for (int i = 0; i < 6; ++i) {
+          if (!component_required[i] || current_device[i] == nullptr ||
+              host_stores[i] == nullptr) {
+            continue;
+          }
+          TIDE_DTYPE *const current_host = reinterpret_cast<TIDE_DTYPE *>(
+              reinterpret_cast<uint8_t *>(host_stores[i]) + host_offset);
+          if (storage_mode == STORAGE_DISK) {
+            int64_t const file_offset =
+                store_idx * (int64_t)bytes_per_step_store;
+            storage_async_disk_wait_slot(async_disk_handles[i], slot);
+            tide::cuda_check_or_abort(
+                cudaMemcpyAsync(current_host, current_device[i],
+                                bytes_per_step_store, cudaMemcpyDeviceToHost,
+                                save_stream),
+                __FILE__, __LINE__);
+            cudaEvent_t ready_event = nullptr;
+            tide::cuda_check_or_abort(
+                cudaEventCreateWithFlags(&ready_event, cudaEventDisableTiming),
+                __FILE__, __LINE__);
+            tide::cuda_check_or_abort(
+                cudaEventRecord(ready_event, save_stream), __FILE__, __LINE__);
+            storage_async_disk_enqueue_write(
+                async_disk_handles[i], slot, current_host, bytes_per_step_store,
+                file_offset, ready_event);
+          } else {
+            storage_copy_snapshot_d2h(current_device[i], current_host,
+                                      (size_t)shot_bytes_uncomp,
+                                      (size_t)n_shots_h, save_stream);
+          }
+        }
+        if (use_storage_pipeline) {
+          tide::cuda_check_or_abort(
+              cudaEventRecord(slot_storage_done, save_stream), __FILE__,
+              __LINE__);
+        }
+      }
     } else {
       forward_kernel_e<<<(unsigned)launch_cfg.blocks_cells,
-                         launch_cfg.threads_cells>>>(
+                         launch_cfg.threads_cells, 0, stream_compute>>>(
           ca,
           cb,
           ex,
@@ -1624,18 +1809,26 @@ extern "C" void FUNC(forward_with_storage)(
 
     if (n_sources_per_shot_h > 0 && f != nullptr && sources_i != nullptr) {
       add_sources_component<<<(unsigned)launch_cfg.blocks_sources,
-                              launch_cfg.threads_sr>>>(
+                              launch_cfg.threads_sr, 0, stream_compute>>>(
           source_field,
           f + t * n_shots_h * n_sources_per_shot_h,
           sources_i);
     }
     if (n_receivers_per_shot_h > 0 && r != nullptr && receivers_i != nullptr) {
       record_receivers_component<<<(unsigned)launch_cfg.blocks_receivers,
-                                   launch_cfg.threads_sr>>>(
+                                   launch_cfg.threads_sr, 0, stream_compute>>>(
           r + t * n_shots_h * n_receivers_per_shot_h,
           receiver_field,
           receivers_i);
     }
+  }
+
+  if (use_storage_pipeline) {
+    tide::cuda_check_or_abort(cudaStreamSynchronize(stream_storage), __FILE__,
+                              __LINE__);
+  }
+  for (void *&handle : async_disk_handles) {
+    storage_async_disk_close(handle);
   }
 
   tide::cuda_check_or_abort(cudaPeekAtLastError(), __FILE__, __LINE__);
@@ -1738,27 +1931,29 @@ extern "C" void FUNC(backward)(
     int64_t const source_component,
     int64_t const receiver_component,
     int64_t const n_threads,
-    int64_t const device) {
+    int64_t const device,
+    void *const compute_stream_handle,
+    void *const storage_stream_handle) {
   cudaSetDevice((int)device);
   (void)n_threads;
-  (void)store_2;
-  (void)store_filenames_1;
-  (void)store_4;
-  (void)store_filenames_2;
-  (void)store_6;
-  (void)store_filenames_3;
-  (void)store_8;
-  (void)store_filenames_4;
-  (void)store_10;
-  (void)store_filenames_5;
-  (void)store_12;
-  (void)store_filenames_6;
+  cudaStream_t const stream_compute =
+      resolve_cuda_stream(compute_stream_handle);
+  cudaStream_t const stream_storage =
+      resolve_cuda_stream(storage_stream_handle);
 
   int64_t const shot_numel_h = nz_h * ny_h * nx_h;
   int64_t const step_ratio_eff = step_ratio_h > 0 ? step_ratio_h : 1;
+  size_t const bytes_per_step_store =
+      (size_t)shot_bytes_uncomp * (size_t)n_shots_h;
   bool const storage_direct =
       (storage_mode == STORAGE_DEVICE) &&
       (shot_bytes_uncomp == (int64_t)(shot_numel_h * (int64_t)sizeof(TIDE_DTYPE)));
+  bool const host_backed_storage =
+      (storage_mode == STORAGE_CPU || storage_mode == STORAGE_DISK) &&
+      (shot_bytes_uncomp == (int64_t)(shot_numel_h * (int64_t)sizeof(TIDE_DTYPE)));
+  bool const use_storage_pipeline =
+      host_backed_storage && (ca_requires_grad || cb_requires_grad) &&
+      stream_storage != nullptr && stream_storage != stream_compute;
 
   set_constants(
       rdz_h,
@@ -1797,6 +1992,69 @@ extern "C" void FUNC(backward)(
 
   ScalarLaunchConfig3D const launch_cfg = make_scalar_launch_config_3d(
       n_shots_h, shot_numel_h, n_sources_per_shot_h, n_receivers_per_shot_h);
+
+  TIDE_DTYPE *const device_stores[6] = {store_1, store_3, store_5,
+                                        store_7, store_9, store_11};
+  TIDE_DTYPE *const host_stores[6] = {store_2, store_4, store_6,
+                                      store_8, store_10, store_12};
+  char **const store_filenames[6] = {store_filenames_1, store_filenames_2,
+                                     store_filenames_3, store_filenames_4,
+                                     store_filenames_5, store_filenames_6};
+  bool const component_required[6] = {ca_requires_grad, ca_requires_grad,
+                                      ca_requires_grad, cb_requires_grad,
+                                      cb_requires_grad, cb_requires_grad};
+  void *async_disk_handles[6] = {};
+  if (storage_mode == STORAGE_DISK) {
+    for (int i = 0; i < 6; ++i) {
+      if (component_required[i] && store_filenames[i] != nullptr) {
+        async_disk_handles[i] =
+            storage_async_disk_open(store_filenames[i][0], false, NUM_BUFFERS);
+      }
+    }
+  }
+
+  ScopedEventArray storage_done_events;
+  ScopedEventArray compute_done_events;
+  if (use_storage_pipeline) {
+    for (int i = 0; i < NUM_BUFFERS; ++i) {
+      tide::cuda_check_or_abort(cudaEventCreate(&storage_done_events.events[i]),
+                                __FILE__, __LINE__);
+      tide::cuda_check_or_abort(cudaEventCreate(&compute_done_events.events[i]),
+                                __FILE__, __LINE__);
+      tide::cuda_check_or_abort(
+          cudaEventRecord(compute_done_events.events[i], stream_compute),
+          __FILE__, __LINE__);
+    }
+  }
+
+  int64_t const first_store_idx = (start_t - 1) / step_ratio_eff;
+  int64_t const first_t_in_chunk = start_t - nt;
+  int64_t const last_store_idx =
+      (first_t_in_chunk + step_ratio_eff - 1) / step_ratio_eff;
+  if (storage_mode == STORAGE_DISK) {
+    int64_t const stored_steps_in_chunk =
+        first_store_idx >= last_store_idx ? (first_store_idx - last_store_idx + 1)
+                                          : 0;
+    int64_t const prefetch_count =
+        tide_min<int64_t>(NUM_BUFFERS, stored_steps_in_chunk);
+    for (int64_t i = 0; i < prefetch_count; ++i) {
+      int64_t const store_idx = first_store_idx - i;
+      int const slot = (int)(store_idx % NUM_BUFFERS);
+      size_t const host_offset = cpu_linear_storage_offset_bytes(
+          store_idx, storage_mode, bytes_per_step_store);
+      int64_t const file_offset = store_idx * (int64_t)bytes_per_step_store;
+      for (int comp = 0; comp < 6; ++comp) {
+        if (!component_required[comp] || host_stores[comp] == nullptr) {
+          continue;
+        }
+        TIDE_DTYPE *const host_ptr = reinterpret_cast<TIDE_DTYPE *>(
+            reinterpret_cast<uint8_t *>(host_stores[comp]) + host_offset);
+        storage_async_disk_enqueue_read(async_disk_handles[comp], slot, host_ptr,
+                                        bytes_per_step_store, file_offset,
+                                        nullptr);
+      }
+    }
+  }
 
   if (grad_f != nullptr && nt > 0 && n_shots_h > 0 && n_sources_per_shot_h > 0) {
     tide::cuda_check_or_abort(
@@ -1848,29 +2106,153 @@ extern "C" void FUNC(backward)(
 
   for (int64_t t = start_t - 1; t >= start_t - nt; --t) {
     bool const do_grad = ((t % step_ratio_eff) == 0);
-    bool const grad_ca_step = do_grad && ca_requires_grad && storage_direct &&
-                              store_1 != nullptr && store_3 != nullptr &&
-                              store_5 != nullptr;
-    bool const grad_cb_step = do_grad && cb_requires_grad && storage_direct &&
-                              store_7 != nullptr && store_9 != nullptr &&
-                              store_11 != nullptr;
+    bool const grad_ca_step =
+        do_grad && ca_requires_grad &&
+        ((storage_direct && store_1 != nullptr && store_3 != nullptr &&
+          store_5 != nullptr) ||
+         (host_backed_storage && store_1 != nullptr && store_2 != nullptr &&
+          store_3 != nullptr && store_4 != nullptr && store_5 != nullptr &&
+          store_6 != nullptr));
+    bool const grad_cb_step =
+        do_grad && cb_requires_grad &&
+        ((storage_direct && store_7 != nullptr && store_9 != nullptr &&
+          store_11 != nullptr) ||
+         (host_backed_storage && store_7 != nullptr && store_8 != nullptr &&
+          store_9 != nullptr && store_10 != nullptr && store_11 != nullptr &&
+          store_12 != nullptr));
+    bool const want_load = grad_ca_step || grad_cb_step;
+    int slot = 0;
+    cudaEvent_t slot_storage_done = nullptr;
+    cudaEvent_t slot_compute_done = nullptr;
+    cudaStream_t load_stream = stream_compute;
 
     int64_t const store_idx = t / step_ratio_eff;
-    int64_t const store_offset = store_idx * n_shots_h * shot_numel_h;
+    if (want_load) {
+      slot = (int)(store_idx % NUM_BUFFERS);
+      if (use_storage_pipeline) {
+        slot_storage_done = storage_done_events.events[slot];
+        slot_compute_done = compute_done_events.events[slot];
+      }
+    }
 
-    TIDE_DTYPE const *const ex_store = grad_ca_step ? (store_1 + store_offset) : nullptr;
-    TIDE_DTYPE const *const ey_store = grad_ca_step ? (store_3 + store_offset) : nullptr;
-    TIDE_DTYPE const *const ez_store = grad_ca_step ? (store_5 + store_offset) : nullptr;
+    size_t const device_offset = ring_storage_offset_bytes(
+        store_idx, storage_mode, bytes_per_step_store);
+    size_t const host_offset = cpu_linear_storage_offset_bytes(
+        store_idx, storage_mode, bytes_per_step_store);
+
+    TIDE_DTYPE const *const ex_store =
+        grad_ca_step
+            ? reinterpret_cast<TIDE_DTYPE const *>(
+                  reinterpret_cast<uint8_t *>(device_stores[0]) + device_offset)
+            : nullptr;
+    TIDE_DTYPE const *const ey_store =
+        grad_ca_step
+            ? reinterpret_cast<TIDE_DTYPE const *>(
+                  reinterpret_cast<uint8_t *>(device_stores[1]) + device_offset)
+            : nullptr;
+    TIDE_DTYPE const *const ez_store =
+        grad_ca_step
+            ? reinterpret_cast<TIDE_DTYPE const *>(
+                  reinterpret_cast<uint8_t *>(device_stores[2]) + device_offset)
+            : nullptr;
     TIDE_DTYPE const *const curl_x_store =
-        grad_cb_step ? (store_7 + store_offset) : nullptr;
+        grad_cb_step
+            ? reinterpret_cast<TIDE_DTYPE const *>(
+                  reinterpret_cast<uint8_t *>(device_stores[3]) + device_offset)
+            : nullptr;
     TIDE_DTYPE const *const curl_y_store =
-        grad_cb_step ? (store_9 + store_offset) : nullptr;
+        grad_cb_step
+            ? reinterpret_cast<TIDE_DTYPE const *>(
+                  reinterpret_cast<uint8_t *>(device_stores[4]) + device_offset)
+            : nullptr;
     TIDE_DTYPE const *const curl_z_store =
-        grad_cb_step ? (store_11 + store_offset) : nullptr;
+        grad_cb_step
+            ? reinterpret_cast<TIDE_DTYPE const *>(
+                  reinterpret_cast<uint8_t *>(device_stores[5]) + device_offset)
+            : nullptr;
+
+    if (storage_mode == STORAGE_CPU && want_load) {
+      if (use_storage_pipeline) {
+        tide::cuda_check_or_abort(
+            cudaStreamWaitEvent(stream_storage, slot_compute_done, 0),
+            __FILE__, __LINE__);
+        load_stream = stream_storage;
+      }
+      TIDE_DTYPE *const host_ptrs[6] = {
+          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[0]) +
+                                         host_offset),
+          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[1]) +
+                                         host_offset),
+          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[2]) +
+                                         host_offset),
+          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[3]) +
+                                         host_offset),
+          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[4]) +
+                                         host_offset),
+          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[5]) +
+                                         host_offset),
+      };
+      TIDE_DTYPE const *const device_ptrs[6] = {ex_store,    ey_store,   ez_store,
+                                                curl_x_store, curl_y_store, curl_z_store};
+      for (int i = 0; i < 6; ++i) {
+        if (!component_required[i] || device_ptrs[i] == nullptr ||
+            host_stores[i] == nullptr) {
+          continue;
+        }
+        storage_copy_snapshot_h2d(
+            const_cast<TIDE_DTYPE *>(device_ptrs[i]), host_ptrs[i],
+            (size_t)shot_bytes_uncomp, (size_t)n_shots_h, load_stream);
+      }
+      if (use_storage_pipeline) {
+        tide::cuda_check_or_abort(
+            cudaEventRecord(slot_storage_done, stream_storage), __FILE__,
+            __LINE__);
+      }
+    } else if (storage_mode == STORAGE_DISK && want_load) {
+      if (use_storage_pipeline) {
+        tide::cuda_check_or_abort(
+            cudaStreamWaitEvent(stream_storage, slot_compute_done, 0),
+            __FILE__, __LINE__);
+        load_stream = stream_storage;
+      }
+      TIDE_DTYPE *const host_ptrs[6] = {
+          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[0]) +
+                                         host_offset),
+          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[1]) +
+                                         host_offset),
+          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[2]) +
+                                         host_offset),
+          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[3]) +
+                                         host_offset),
+          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[4]) +
+                                         host_offset),
+          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[5]) +
+                                         host_offset),
+      };
+      TIDE_DTYPE const *const device_ptrs[6] = {ex_store,    ey_store,   ez_store,
+                                                curl_x_store, curl_y_store, curl_z_store};
+      for (int i = 0; i < 6; ++i) {
+        if (!component_required[i] || device_ptrs[i] == nullptr ||
+            host_stores[i] == nullptr) {
+          continue;
+        }
+        storage_async_disk_wait_slot(async_disk_handles[i], slot);
+        tide::cuda_check_or_abort(
+            cudaMemcpyAsync(const_cast<TIDE_DTYPE *>(device_ptrs[i]), host_ptrs[i],
+                            bytes_per_step_store, cudaMemcpyHostToDevice,
+                            load_stream),
+            __FILE__, __LINE__);
+      }
+      if (use_storage_pipeline) {
+        tide::cuda_check_or_abort(
+            cudaEventRecord(slot_storage_done, load_stream), __FILE__,
+            __LINE__);
+      }
+    }
 
     if (n_receivers_per_shot_h > 0 && grad_r != nullptr && receivers_i != nullptr) {
       add_adjoint_receivers_component<<<(unsigned)launch_cfg.blocks_receivers,
-                                        launch_cfg.threads_sr>>>(
+                                        launch_cfg.threads_sr, 0, stream_compute>>>(
           lambda_recv_field,
           grad_r + t * n_shots_h * n_receivers_per_shot_h,
           receivers_i);
@@ -1878,14 +2260,20 @@ extern "C" void FUNC(backward)(
 
     if (n_sources_per_shot_h > 0 && grad_f != nullptr && sources_i != nullptr) {
       record_adjoint_at_sources_component<<<(unsigned)launch_cfg.blocks_sources,
-                                            launch_cfg.threads_sr>>>(
+                                            launch_cfg.threads_sr, 0,
+                                            stream_compute>>>(
           grad_f + t * n_shots_h * n_sources_per_shot_h,
           lambda_src_field,
           sources_i);
     }
+    if (want_load && use_storage_pipeline) {
+      tide::cuda_check_or_abort(
+          cudaStreamWaitEvent(stream_compute, slot_storage_done, 0), __FILE__,
+          __LINE__);
+    }
 
     backward_kernel_lambda_h<<<(unsigned)launch_cfg.blocks_cells,
-                               launch_cfg.threads_cells>>>(
+                               launch_cfg.threads_cells, 0, stream_compute>>>(
         cb,
         lambda_ex,
         lambda_ey,
@@ -1910,7 +2298,8 @@ extern "C" void FUNC(backward)(
         kxh);
 
     backward_kernel_lambda_e_with_grad<<<(unsigned)launch_cfg.blocks_cells,
-                                         launch_cfg.threads_cells>>>(
+                                         launch_cfg.threads_cells, 0,
+                                         stream_compute>>>(
         ca,
         cq,
         lambda_hx,
@@ -1945,6 +2334,38 @@ extern "C" void FUNC(backward)(
         grad_ca_step,
         grad_cb_step,
         step_ratio_eff);
+
+    if (want_load && use_storage_pipeline) {
+      tide::cuda_check_or_abort(
+          cudaEventRecord(slot_compute_done, stream_compute), __FILE__,
+          __LINE__);
+    }
+
+    if (want_load && storage_mode == STORAGE_DISK) {
+      int64_t const future_store_idx = store_idx - NUM_BUFFERS;
+      if (future_store_idx >= last_store_idx) {
+        size_t const future_host_offset = cpu_linear_storage_offset_bytes(
+            future_store_idx, storage_mode, bytes_per_step_store);
+        int64_t const future_file_offset =
+            future_store_idx * (int64_t)bytes_per_step_store;
+        for (int comp = 0; comp < 6; ++comp) {
+          if (!component_required[comp] || host_stores[comp] == nullptr) {
+            continue;
+          }
+          TIDE_DTYPE *const future_host = reinterpret_cast<TIDE_DTYPE *>(
+              reinterpret_cast<uint8_t *>(host_stores[comp]) + future_host_offset);
+          cudaEvent_t ready_event = nullptr;
+          tide::cuda_check_or_abort(
+              cudaEventCreateWithFlags(&ready_event, cudaEventDisableTiming),
+              __FILE__, __LINE__);
+          tide::cuda_check_or_abort(
+              cudaEventRecord(ready_event, load_stream), __FILE__, __LINE__);
+          storage_async_disk_enqueue_read(
+              async_disk_handles[comp], slot, future_host, bytes_per_step_store,
+              future_file_offset, ready_event);
+        }
+      }
+    }
   }
 
   if ((grad_eps != nullptr || grad_sigma != nullptr) &&
@@ -1952,7 +2373,8 @@ extern "C" void FUNC(backward)(
     int64_t const total_conv = (ca_batched_h ? n_shots_h : 1) * shot_numel_h;
     int const threads_conv = 256;
     int64_t const blocks_conv = (total_conv + threads_conv - 1) / threads_conv;
-    convert_grad_ca_cb_to_eps_sigma_3d<<<(unsigned)blocks_conv, threads_conv>>>(
+    convert_grad_ca_cb_to_eps_sigma_3d<<<(unsigned)blocks_conv, threads_conv, 0,
+                                         stream_compute>>>(
         ca,
         cb,
         grad_ca,
@@ -1962,6 +2384,10 @@ extern "C" void FUNC(backward)(
         dt_h,
         ca_requires_grad,
         cb_requires_grad);
+  }
+
+  for (void *&handle : async_disk_handles) {
+    storage_async_disk_close(handle);
   }
 
   tide::cuda_check_or_abort(cudaPeekAtLastError(), __FILE__, __LINE__);

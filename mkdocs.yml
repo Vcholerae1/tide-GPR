@@ -1,0 +1,66 @@
+site_name: TIDE Documentation
+site_description: Torch-based Inversion & Development Engine documentation
+site_url: https://vcholerae1.github.io/tide/
+repo_name: vcholerae1/tide
+repo_url: https://github.com/vcholerae1/tide
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  language: zh
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+
+docs_dir: docs
+site_dir: site
+exclude_docs: README.md
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - 首页: index.md
+  - 总览: overview.md
+  - 快速开始: getting-started.md
+  - 指南:
+      - 建模: guides/modeling.md
+      - 震源与接收器: guides/sources-receivers.md
+      - 边界与 PML: guides/boundaries.md
+      - 存储与检查点: guides/storage.md
+      - 回调: guides/callbacks.md
+      - 反演流程: guides/inversion.md
+      - 性能建议: guides/performance.md
+      - 稳定性与校验: guides/validation.md
+  - API:
+      - 索引: api/index.md
+      - 顶层模块: api/tide.md
+      - Maxwell: api/maxwell.md
+      - Wavelets: api/wavelets.md
+      - Callbacks: api/callbacks.md
+      - Resampling: api/resampling.md
+      - CFL: api/cfl.md
+      - Padding: api/padding.md
+      - Validation: api/validation.md
+      - Staggered: api/staggered.md
+      - Utils: api/utils.md
+      - Storage: api/storage.md
+      - Backend Utils: api/backend_utils.md
+      - C/CUDA: api/csrc.md
+  - 示例:
+      - Multiscale Filtered: examples/example_multiscale_filtered.md
+      - Random Source Encoding: examples/example_multiscale_random_sources.md
+      - Wavefield Animation: examples/wavefield_animation.md
+      - Benchmark: examples/benchmark_maxwell.md
+  - 开发:
+      - 构建: dev/build.md
+      - CUDA: dev/cuda.md

@@ -2,21 +2,73 @@
 
 ## Public API
 - class MaxwellTM
+- class Maxwell3D
 - function maxwelltm
+- function maxwell3d
 
-### `maxwelltm(...)` precision arguments
+## maxwelltm
 
-- Default compute uses the input tensor dtype (`float32` or `float64`).
-- `compute_precision="fp16_scaled"` enables a CUDA-only TM2D mixed-precision
-  path with float32 public tensors and internal fp16 field/snapshot storage.
-- Snapshot storage compression remains configurable via `storage_compression`,
-  including `"bf16"` on the default path.
+Signature highlights:
 
-Behavior:
-- External parameter units are unchanged (SI-compatible inputs).
-- Returned fields remain in physical units.
-- `compute_precision="fp16_scaled"` rejects `python_backend=True`,
-  float64 public tensors, and `storage_compression="bf16"`.
+```python
+maxwelltm(
+    epsilon, sigma, mu,
+    grid_spacing, dt,
+    source_amplitude, source_location, receiver_location,
+    stencil=2, pml_width=20,
+    ...,
+    python_backend=False,
+    storage_mode="device",
+    storage_compression=False,
+)
+```
+
+Key inputs:
+- epsilon, sigma, mu: shape [ny, nx]
+- source_amplitude: [n_shots, n_sources, nt]
+- source_location: [n_shots, n_sources, 2]
+- receiver_location: [n_shots, n_receivers, 2]
+
+Return tuple:
+- Ey, Hx, Hz
+- m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x
+- receiver_amplitudes with shape [nt, n_shots, n_receivers]
+
+Important behavior:
+- TIDE checks CFL stability and may use an internal smaller time step.
+- If internal sub-stepping is used, source signals are upsampled and receiver traces are downsampled automatically.
+- save_snapshots defaults to auto behavior based on gradient requirements.
+
+## maxwell3d
+
+Signature highlights:
+
+```python
+maxwell3d(
+    epsilon, sigma, mu,
+    grid_spacing, dt,
+    source_amplitude, source_location, receiver_location,
+    source_component="ey", receiver_component="ey",
+    python_backend=False,
+    storage_mode="device",
+)
+```
+
+Key inputs:
+- epsilon, sigma, mu: shape [nz, ny, nx]
+- source_location: [n_shots, n_sources, 3]
+- receiver_location: [n_shots, n_receivers, 3]
+- source_component and receiver_component: one of ex, ey, ez, hx, hy, hz
+
+Return tuple:
+- Ex, Ey, Ez, Hx, Hy, Hz
+- 12 CPML memory tensors
+- receiver_amplitudes
+
+## Class Wrappers
+
+- MaxwellTM and Maxwell3D are torch.nn.Module wrappers that store model tensors and call maxwelltm/maxwell3d in forward.
+- Useful when integrating with training loops that repeatedly propagate on the same model object.
 
 ## Advanced or Internal Functions
 - prepare_parameters

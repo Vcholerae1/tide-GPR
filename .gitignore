@@ -11,6 +11,7 @@ __pycache__/
 build/
 dist/
 wheels/
+site/
 
 # Compiled shared libraries (keep libtide_C.so tracked via git add -f)
 *.so
@@ -27,6 +28,7 @@ compile_commands.json
 # Temporary/generated outputs
 outputs/
 benchmark_history/
+artifacts/
 
 # Development notes 
 .vscode/

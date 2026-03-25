@@ -1,6 +1,6 @@
 [project]
 name = "tide-GPR"
-version = "0.0.22"
+version = "0.0.23"
 description = "Torch-based Inversion & Development Engine for electromagnetic wave propagation"
 readme = "README.md"
 license = {text = "MIT"}
@@ -48,6 +48,11 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+]
+docs = [
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.6.0",
+    "pymdown-extensions>=10.0",
 ]
 
 [build-system]
@@ -108,4 +113,9 @@ test-command = "pytest {project}/tests"
 dev = [
     "pytest>=9.0.2",
     "ruff>=0.15.2",
+]
+docs = [
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.6.0",
+    "pymdown-extensions>=10.0",
 ]

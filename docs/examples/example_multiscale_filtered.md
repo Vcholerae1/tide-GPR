@@ -3,7 +3,7 @@
 Script: `examples/example_multiscale_filtered.py`
 
 ## Goal
-TODO: Explain the multiscale workflow and FIR low-pass schedule.
+Demonstrate multiscale inversion by progressively increasing data bandwidth using FIR low-pass schedules.
 
 ## Inputs
 - Model file: `examples/data/OverThrust.npy`
@@ -20,4 +20,7 @@ TODO: Explain the multiscale workflow and FIR low-pass schedule.
 - Summary plot with loss curve.
 
 ## Notes
-TODO: Document expected runtime and device requirements.
+
+- CUDA is strongly recommended for practical runtime.
+- Runtime depends on grid size, shot count, and inversion stage count.
+- For debugging, reduce nt and n_shots first.

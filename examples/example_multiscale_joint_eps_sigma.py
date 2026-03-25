@@ -308,6 +308,7 @@ def forward_shots(
         if requires_grad
         else 1,
         compute_precision=compute_precision,
+        # storage_mode='cpu'
     )
     return out[-1]  # [nt, shots_in_batch, 1]
 

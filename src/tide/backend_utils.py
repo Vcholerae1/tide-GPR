@@ -3,6 +3,7 @@ import itertools
 import pathlib
 import platform
 from ctypes import c_bool, c_double, c_float, c_int64, c_void_p
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -18,6 +19,8 @@ if SO_EXT is None:
 _SUPPORTED_ACCURACIES = (2, 4, 6, 8)
 _SUPPORTED_DEVICES = ("cpu", "cuda")
 _SUPPORTED_BACKEND_DTYPES = ("float", "double")
+_SUPPORTED_PROPAGATORS = ("maxwell_tm", "maxwell_3d")
+_SUPPORTED_PASSES = ("forward", "forward_with_storage", "backward")
 
 # Mapping from torch dtypes to backend dtype strings and from backend dtype strings to C types.
 _TORCH_DTYPE_TO_BACKEND_DTYPE: dict[torch.dtype, str] = {
@@ -45,63 +48,75 @@ def _candidate_lib_paths() -> list[pathlib.Path]:
     return list(dict.fromkeys(candidates))
 
 
-_dll: ctypes.CDLL | None = None
-_lib_path: pathlib.Path = (
-    pathlib.Path(__file__).resolve().parent / f"libtide_C.{SO_EXT}"
+@dataclass(slots=True)
+class _BackendRuntime:
+    dll: ctypes.CDLL | None
+    lib_path: pathlib.Path
+    probed: bool
+    use_openmp: bool
+
+
+_runtime = _BackendRuntime(
+    dll=None,
+    lib_path=pathlib.Path(__file__).resolve().parent / f"libtide_C.{SO_EXT}",
+    probed=False,
+    use_openmp=False,
 )
-_backend_probed = False
 
 USE_OPENMP = False
 
 
 def _load_backend_once() -> None:
-    global _dll, _lib_path, _backend_probed, USE_OPENMP
-    if _backend_probed:
+    global USE_OPENMP
+    if _runtime.probed:
         return
-    _backend_probed = True
+    _runtime.probed = True
 
     for candidate in _candidate_lib_paths():
         if not candidate.exists():
             continue
         try:
-            _dll = ctypes.CDLL(str(candidate))
-            _lib_path = candidate
+            _runtime.dll = ctypes.CDLL(str(candidate))
+            _runtime.lib_path = candidate
             break
         except OSError:
             continue
 
-    USE_OPENMP = _dll is not None and hasattr(_dll, "omp_get_num_threads")
+    _runtime.use_openmp = _runtime.dll is not None and hasattr(
+        _runtime.dll, "omp_get_num_threads"
+    )
+    USE_OPENMP = _runtime.use_openmp
 
 
 def is_backend_available() -> bool:
     """Check if the C/CUDA backend is available."""
     _load_backend_once()
-    return _dll is not None
+    return _runtime.dll is not None
 
 
 def get_dll() -> ctypes.CDLL:
     """Get the loaded DLL, raising an error if not available."""
     _load_backend_once()
-    if _dll is None:
+    if _runtime.dll is None:
         raise RuntimeError(
             f"C/CUDA backend not available. Please compile the library first. "
-            f"Expected library at: {_lib_path}"
+            f"Expected library at: {_runtime.lib_path}"
         )
-    return _dll
+    return _runtime.dll
 
 
 def get_library_path() -> pathlib.Path:
     """Return the resolved shared library path."""
     _load_backend_once()
-    return _lib_path
+    return _runtime.lib_path
 
 
 def cuda_build_arches() -> str | None:
     """Return the CUDA arch list the backend was compiled for, if available."""
     _load_backend_once()
-    if _dll is None or not hasattr(_dll, "tide_cuda_arches"):
+    if _runtime.dll is None or not hasattr(_runtime.dll, "tide_cuda_arches"):
         return None
-    func = _dll.tide_cuda_arches
+    func = _runtime.dll.tide_cuda_arches
     func.restype = ctypes.c_char_p
     value = func()
     if not value:
@@ -174,6 +189,7 @@ _TM_FORWARD_SPEC: _Spec = [
     *_TM_COMMON_TAIL,
     (_B, 1, "has_dispersion"),
     *_TM_BATCHED_FLAGS,
+    (_P, 1, "compute_stream"),
 ]
 
 _TM_FORWARD_WITH_STORAGE_SPEC: _Spec = [
@@ -191,6 +207,7 @@ _TM_FORWARD_WITH_STORAGE_SPEC: _Spec = [
     *_TM_COMMON_TAIL,
     *_TM_STORAGE_TAIL,
     *_TM_BATCHED_FLAGS,
+    (_P, 2, "compute_stream, storage_stream"),
 ]
 
 _TM_BACKWARD_SPEC: _Spec = [
@@ -210,6 +227,7 @@ _TM_BACKWARD_SPEC: _Spec = [
     *_TM_COMMON_TAIL,
     *_TM_STORAGE_TAIL,
     *_TM_BATCHED_FLAGS,
+    (_P, 2, "compute_stream, storage_stream"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -271,6 +289,7 @@ _3D_FORWARD_SPEC: _Spec = [
     *_3D_COMMON_TAIL,
     (_B, 1, "has_dispersion"),
     *_3D_BATCHED_FLAGS,
+    (_P, 1, "compute_stream"),
 ]
 
 _3D_FORWARD_WITH_STORAGE_SPEC: _Spec = [
@@ -288,6 +307,7 @@ _3D_FORWARD_WITH_STORAGE_SPEC: _Spec = [
     *_3D_COMMON_TAIL,
     *_3D_STORAGE_TAIL,
     *_3D_BATCHED_FLAGS,
+    (_P, 2, "compute_stream, storage_stream"),
 ]
 
 _3D_ADJ_FIELDS: _Spec = [
@@ -318,6 +338,7 @@ _3D_BACKWARD_SPEC: _Spec = [
     *_3D_COMMON_TAIL,
     *_3D_STORAGE_TAIL,
     *_3D_BATCHED_FLAGS,
+    (_P, 2, "compute_stream, storage_stream"),
 ]
 
 # Flat template registry.
@@ -364,15 +385,22 @@ def _assign_argtypes_for_variant(
     backend_dtype: str,
     pass_name: str,
 ) -> None:
-    if _dll is None:
+    if _runtime.dll is None:
         return
 
-    template_name = f"{propagator}_{pass_name}"
+    template_name = _build_template_name(propagator, pass_name)
     argtypes = _template_argtypes(template_name, backend_dtype)
 
     for device_name in _SUPPORTED_DEVICES:
-        func_name = f"{propagator}_{accuracy}_{backend_dtype}_{pass_name}_{device_name}"
-        func = getattr(_dll, func_name, None)
+        func_name = _build_backend_function_name(
+            propagator,
+            pass_name,
+            accuracy,
+            backend_dtype,
+            device_name,
+            variant="",
+        )
+        func = getattr(_runtime.dll, func_name, None)
         if func is None:
             continue
         func.argtypes = argtypes
@@ -381,18 +409,70 @@ def _assign_argtypes_for_variant(
 
 def _initialize_argtypes() -> None:
     global _ARGTYPES_INITIALIZED
-    if _ARGTYPES_INITIALIZED or _dll is None:
+    if _ARGTYPES_INITIALIZED or _runtime.dll is None:
         return
 
     for propagator, pass_name, accuracy, backend_dtype in itertools.product(
-        ("maxwell_tm", "maxwell_3d"),
-        ("forward", "forward_with_storage", "backward"),
+        _SUPPORTED_PROPAGATORS,
+        _SUPPORTED_PASSES,
         _SUPPORTED_ACCURACIES,
         _SUPPORTED_BACKEND_DTYPES,
     ):
         _assign_argtypes_for_variant(propagator, accuracy, backend_dtype, pass_name)
 
     _ARGTYPES_INITIALIZED = True
+
+
+def _build_backend_function_name(
+    propagator: str,
+    pass_name: str,
+    accuracy: int,
+    dtype_str: str,
+    device_str: str,
+    *,
+    variant: str,
+) -> str:
+    suffix = f"_{variant}" if variant else ""
+    return f"{propagator}_{accuracy}_{dtype_str}_{pass_name}{suffix}_{device_str}"
+
+
+def _build_template_name(propagator: str, pass_name: str) -> str:
+    return f"{propagator}_{pass_name}"
+
+
+def _validate_backend_selection(
+    propagator: str,
+    pass_name: str,
+    accuracy: int,
+    dtype_str: str,
+    device_str: str,
+) -> None:
+    if propagator not in _SUPPORTED_PROPAGATORS:
+        raise ValueError(
+            f"Unsupported propagator {propagator!r}. "
+            f"Supported propagators: {_SUPPORTED_PROPAGATORS}."
+        )
+    if pass_name not in _SUPPORTED_PASSES:
+        raise ValueError(
+            f"Unsupported pass {pass_name!r}. Supported passes: {_SUPPORTED_PASSES}."
+        )
+    if accuracy not in _SUPPORTED_ACCURACIES:
+        raise ValueError(
+            f"Unsupported accuracy {accuracy}. Supported values: {_SUPPORTED_ACCURACIES}."
+        )
+    if dtype_str not in _SUPPORTED_BACKEND_DTYPES:
+        raise ValueError(
+            f"Unsupported backend dtype {dtype_str!r}. "
+            f"Supported dtypes: {_SUPPORTED_BACKEND_DTYPES}."
+        )
+    if device_str not in _SUPPORTED_DEVICES:
+        raise ValueError(
+            f"Unsupported backend device {device_str!r}. "
+            f"Supported devices: {_SUPPORTED_DEVICES}."
+        )
+    template_name = _build_template_name(propagator, pass_name)
+    if template_name not in _TEMPLATE_SPECS:
+        raise ValueError(f"No argtype template registered for {template_name!r}.")
 
 
 def get_backend_function(
@@ -430,14 +510,24 @@ def get_backend_function(
 
     device_str = device.type
 
-    suffix = f"_{variant}" if variant else ""
-    func_name = f"{propagator}_{accuracy}_{dtype_str}_{pass_name}{suffix}_{device_str}"
+    _validate_backend_selection(propagator, pass_name, accuracy, dtype_str, device_str)
+
+    template_name = _build_template_name(propagator, pass_name)
+
+    func_name = _build_backend_function_name(
+        propagator,
+        pass_name,
+        accuracy,
+        dtype_str,
+        device_str,
+        variant=variant,
+    )
 
     try:
         func = getattr(dll, func_name)
     except AttributeError as e:
         raise AttributeError(f"Backend function {func_name} not found.") from e
-    func.argtypes = _template_argtypes(f"{propagator}_{pass_name}", dtype_str)
+    func.argtypes = _template_argtypes(template_name, dtype_str)
     func.restype = None
     return func
 

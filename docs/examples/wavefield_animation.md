@@ -3,13 +3,27 @@
 Script: `examples/wavefield_animation.py`
 
 ## Goal
-TODO: Explain how wavefields are collected and animated.
+Visualize the temporal evolution of electromagnetic fields from a forward simulation.
 
 ## Inputs
-TODO: Describe model parameters and source setup.
+
+- 2D model tensors (epsilon, sigma, mu)
+- Source wavelet and source/receiver locations
+- Visualization settings (frame stride, color limits, output path)
 
 ## Steps
-TODO: Outline rendering/animation workflow.
+
+1. Run forward propagation and collect field snapshots over time.
+2. Convert field tensors to plotting frames.
+3. Render frames with consistent scaling.
+4. Export animation (for example GIF or MP4 depending on script settings).
 
 ## Outputs
-TODO: Describe generated animation files.
+
+- Wavefield animation file in examples/outputs or configured output directory.
+- Optional static previews for selected time steps.
+
+## Practical Tips
+
+- Start with small grid and short nt to validate plotting pipeline.
+- Fix color range across frames to avoid misleading amplitude interpretation.

@@ -7,7 +7,7 @@ def cfl_condition(
     grid_spacing: float | list[float],
     dt: float,
     max_vel: float,
-    c_max: float = 1,
+    c_max: float = 0.8,
     eps: float = 1e-15,
 ) -> tuple[float, int]:
     """Calculate time step interval to satisfy CFL condition.

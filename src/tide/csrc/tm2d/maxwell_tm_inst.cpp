@@ -419,9 +419,11 @@ extern "C"
         bool const ca_batched, bool const cb_batched, bool const cq_batched,
         int64_t const start_t, int64_t const pml_y0, int64_t const pml_x0,
         int64_t const pml_y1, int64_t const pml_x1, int64_t const n_threads,
-        int64_t const device /* unused for CPU */) {
+        int64_t const device /* unused for CPU */,
+        void *const compute_stream_handle) {
 
   (void)device;
+  (void)compute_stream_handle;
   (void)dt;
   (void)step_ratio;
 #ifdef _OPENMP
@@ -517,9 +519,12 @@ extern "C"
         bool const ca_batched, bool const cb_batched, bool const cq_batched,
         int64_t const start_t, int64_t const pml_y0, int64_t const pml_x0,
         int64_t const pml_y1, int64_t const pml_x1, int64_t const n_threads,
-        int64_t const device /* unused for CPU */) {
+        int64_t const device /* unused for CPU */, void *const compute_stream,
+        void *const storage_stream) {
 
   (void)device;
+  (void)compute_stream;
+  (void)storage_stream;
   (void)dt;
 #ifdef _OPENMP
   int const prev_threads = omp_get_max_threads();
@@ -941,9 +946,12 @@ extern "C"
         bool const ca_batched, bool const cb_batched, bool const cq_batched,
         int64_t const start_t, int64_t const pml_y0, int64_t const pml_x0,
         int64_t const pml_y1, int64_t const pml_x1, int64_t const n_threads,
-        int64_t const device /* unused for CPU */) {
+        int64_t const device /* unused for CPU */, void *const compute_stream,
+        void *const storage_stream) {
 
   (void)device;
+  (void)compute_stream;
+  (void)storage_stream;
   (void)ey_store_3;
   (void)curl_store_3;
 #ifdef _OPENMP

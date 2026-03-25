@@ -19,6 +19,10 @@
 #define TIDE_DEVICE cuda
 #endif
 
+#ifndef NUM_BUFFERS
+#define NUM_BUFFERS 3
+#endif
+
 #define CAT_I(name, accuracy, dtype, device) \
   maxwell_3d_##accuracy##_##dtype##_##name##_##device
 #define CAT(name, accuracy, dtype, device) \
