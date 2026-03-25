@@ -1,8 +1,8 @@
 site_name: TIDE Documentation
 site_description: Torch-based Inversion & Development Engine documentation
-site_url: https://vcholerae1.github.io/tide/
-repo_name: vcholerae1/tide
-repo_url: https://github.com/vcholerae1/tide
+site_url: https://vcholerae1.github.io/tide-GPR/
+repo_name: Vcholerae1/tide-GPR
+repo_url: https://github.com/Vcholerae1/tide-GPR
 edit_uri: edit/main/docs/
 
 theme:

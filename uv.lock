@@ -1247,7 +1247,7 @@ wheels = [
 
 [[package]]
 name = "tide-gpr"
-version = "0.0.22"
+version = "0.0.23"
 source = { editable = "." }
 dependencies = [
     { name = "matplotlib" },
