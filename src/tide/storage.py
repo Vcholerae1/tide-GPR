@@ -122,6 +122,24 @@ def storage_mode_to_int(storage_mode_str: str) -> int:
     return int(get_storage_mode(storage_mode_str, torch.device("cuda")))
 
 
+def ensure_contiguous(*args: Any) -> Any:
+    """Recursively make tensors or lists of tensors contiguous."""
+
+    def _make_contiguous(item: Any) -> Any:
+        if item is None:
+            return None
+        if isinstance(item, torch.Tensor):
+            return item.contiguous()
+        if isinstance(item, list):
+            return [_make_contiguous(i) for i in item]
+        if isinstance(item, tuple):
+            return tuple(_make_contiguous(i) for i in item)
+        return item
+
+    out = [_make_contiguous(arg) for arg in args]
+    return out[0] if len(out) == 1 else tuple(out)
+
+
 class TemporaryStorage:
     """Manages temporary files for disk storage.
 
@@ -309,3 +327,89 @@ def setup_storage(
             **allocation_kwargs,
         )
     return storage_manager
+
+
+def setup_model_grad_buffer(
+    model: torch.Tensor,
+    model_batched: bool,
+    n_shots: int,
+    model_shape: tuple[int, ...],
+    storage_mode: StorageMode,
+    aux: int,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Allocate model gradient output and temporary reduction workspace."""
+    grad_model = torch.empty(0, device=model.device, dtype=model.dtype)
+    grad_model_tmp = torch.empty(0, device=model.device, dtype=model.dtype)
+    grad_model_tmp_ptr = 0
+
+    if model.requires_grad:
+        grad_model = torch.zeros_like(model)
+        grad_model_tmp_ptr = grad_model.data_ptr()
+
+    if model.requires_grad and not model_batched and storage_mode != StorageMode.NONE:
+        if model.is_cuda:
+            if n_shots > 1:
+                grad_model_tmp = torch.zeros(
+                    n_shots,
+                    *model_shape,
+                    device=model.device,
+                    dtype=model.dtype,
+                )
+                grad_model_tmp_ptr = grad_model_tmp.data_ptr()
+        elif aux > 1:
+            grad_model_tmp = torch.zeros(
+                aux,
+                *model_shape,
+                device=model.device,
+                dtype=model.dtype,
+            )
+            grad_model_tmp_ptr = grad_model_tmp.data_ptr()
+
+    return grad_model, grad_model_tmp, grad_model_tmp_ptr
+
+
+def setup_backward_gradients(
+    *,
+    models: list[torch.Tensor],
+    model_batched_list: list[bool],
+    n_shots: int,
+    model_shape: tuple[int, ...],
+    storage_mode: StorageMode,
+    aux: int,
+    nt: int,
+    source_requires_grad_list: list[bool],
+    n_sources_per_shot_list: list[int],
+) -> tuple[list[torch.Tensor], list[torch.Tensor], list[int], list[torch.Tensor]]:
+    """Allocate model/source gradient buffers for native backward."""
+    grad_models: list[torch.Tensor] = []
+    grad_models_tmp: list[torch.Tensor] = []
+    grad_models_tmp_ptr: list[int] = []
+    for model, model_batched in zip(models, model_batched_list, strict=True):
+        grad_model, grad_model_tmp, grad_model_tmp_ptr = setup_model_grad_buffer(
+            model,
+            model_batched,
+            n_shots,
+            model_shape,
+            storage_mode,
+            aux,
+        )
+        grad_models.append(grad_model)
+        grad_models_tmp.append(grad_model_tmp)
+        grad_models_tmp_ptr.append(grad_model_tmp_ptr)
+
+    grad_f_list: list[torch.Tensor] = []
+    for requires_grad, n_sources_per_shot in zip(
+        source_requires_grad_list, n_sources_per_shot_list, strict=True
+    ):
+        grad_f = torch.empty(0, device=models[0].device, dtype=models[0].dtype)
+        if requires_grad:
+            grad_f = torch.zeros(
+                nt,
+                n_shots,
+                n_sources_per_shot,
+                device=models[0].device,
+                dtype=models[0].dtype,
+            )
+        grad_f_list.append(grad_f)
+
+    return grad_models, grad_models_tmp, grad_models_tmp_ptr, grad_f_list
