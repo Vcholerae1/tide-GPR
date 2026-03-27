@@ -9,16 +9,27 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
+from enum import IntEnum
 from pathlib import Path
 from uuid import uuid4
 
 import torch
 
+
+class StorageMode(IntEnum):
+    """Snapshot storage location for native forward/backward state."""
+
+    DEVICE = 0
+    CPU = 1
+    DISK = 2
+    NONE = 3
+
+
 # Snapshot storage modes: prefer DEVICE, fall back to CPU or DISK; NONE disables snapshotting
-STORAGE_DEVICE = 0  # Keep snapshots on the accelerator (fastest, uses device memory)
-STORAGE_CPU = 1  # Stage snapshots in host memory (slower, avoids GPU OOM)
-STORAGE_DISK = 2  # Spill snapshots to disk (slowest, preserves host/GPU memory)
-STORAGE_NONE = 3  # Do not store snapshots
+STORAGE_DEVICE = StorageMode.DEVICE  # Keep snapshots on the accelerator (fastest)
+STORAGE_CPU = StorageMode.CPU  # Stage snapshots in host memory
+STORAGE_DISK = StorageMode.DISK  # Spill snapshots to disk
+STORAGE_NONE = StorageMode.NONE  # Do not store snapshots
 
 # Snapshot payload formats. These are passed to the native TM2D storage path so
 # it can distinguish full-precision, bf16-compressed, and fp16 payloads without
@@ -87,15 +98,19 @@ def _resolve_storage_compression(
 
 
 def storage_mode_to_int(storage_mode_str: str) -> int:
+    return int(storage_mode_from_str(storage_mode_str))
+
+
+def storage_mode_from_str(storage_mode_str: str) -> StorageMode:
     mode = storage_mode_str.lower()
     if mode == "device":
-        return STORAGE_DEVICE
+        return StorageMode.DEVICE
     if mode == "cpu":
-        return STORAGE_CPU
+        return StorageMode.CPU
     if mode == "disk":
-        return STORAGE_DISK
+        return StorageMode.DISK
     if mode == "none":
-        return STORAGE_NONE
+        return StorageMode.NONE
     raise ValueError(
         "storage_mode must be 'device', 'cpu', 'disk', 'none', or 'auto', "
         f"but got {storage_mode_str!r}"
