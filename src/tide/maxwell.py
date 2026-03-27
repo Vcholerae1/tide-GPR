@@ -11,9 +11,12 @@ from .common import (
     execute_stepping_loop,
     get_ctx_handle as _get_ctx_handle,
     make_compute_stream as _make_compute_stream,
+    make_native_runtime_context,
     make_storage_streams as _make_storage_streams,
+    prepare_initial_wavefields,
     register_ctx_handle as _register_ctx_handle,
     release_ctx_handle as _release_ctx_handle,
+    save_storage_context,
     stream_handle as _stream_handle,
 )
 from .callbacks import Callback, CallbackState
@@ -25,7 +28,7 @@ from .grid_utils import (
     _normalize_pml_width_2d,
     _normalize_pml_width_3d,
 )
-from .padding import create_or_pad, zero_interior
+from .padding import create_or_pad
 from .resampling import downsample_and_movedim, upsample
 from .storage import (
     STORAGE_DISK,
@@ -527,33 +530,6 @@ def _make_tm_storage_streams(
     device: torch.device, storage_mode: StorageMode
 ) -> tuple[int, int, tuple[Any, ...]]:
     return _make_storage_streams(device, storage_mode)
-
-
-def _init_tm_wavefield(
-    field_0: torch.Tensor | None,
-    *,
-    n_shots: int,
-    size_with_batch: tuple[int, int, int],
-    fd_pad_list: list[int],
-    device: torch.device,
-    dtype: torch.dtype,
-    contiguous: bool = False,
-) -> torch.Tensor:
-    """Initialize TM wavefield tensors with asymmetric FD padding."""
-    if field_0 is not None:
-        if field_0.ndim == 2:
-            field_0 = field_0[None, :, :].expand(n_shots, -1, -1)
-        wavefield = create_or_pad(
-            field_0,
-            fd_pad_list,
-            device,
-            dtype,
-            size_with_batch,
-            mode="constant",
-        )
-    else:
-        wavefield = torch.zeros(size_with_batch, device=device, dtype=dtype)
-    return wavefield.contiguous() if contiguous else wavefield
 
 
 def _init_polarization_state(
@@ -1471,62 +1447,27 @@ def maxwell_python(
     # Which equals [n_shots, padded_ny, padded_nx]
     # =========================================================================
     size_with_batch = (n_shots, padded_ny, padded_nx)
-
-    Ey = _init_tm_wavefield(
-        Ey_0,
+    (
+        Ey,
+        Hx,
+        Hz,
+        m_Ey_x,
+        m_Ey_z,
+        m_Hx_z,
+        m_Hz_x,
+    ) = prepare_initial_wavefields(
+        [Ey_0, Hx_0, Hz_0, m_Ey_x_0, m_Ey_z_0, m_Hx_z_0, m_Hz_x_0],
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
         device=device,
         dtype=dtype,
-    )
-    Hx = _init_tm_wavefield(
-        Hx_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-    )
-    Hz = _init_tm_wavefield(
-        Hz_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-    )
-    m_Ey_x = _init_tm_wavefield(
-        m_Ey_x_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-    )
-    m_Ey_z = _init_tm_wavefield(
-        m_Ey_z_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-    )
-    m_Hx_z = _init_tm_wavefield(
-        m_Hx_z_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-    )
-    m_Hz_x = _init_tm_wavefield(
-        m_Hz_x_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
+        zero_interior_plan=[
+            (3, 1, pml_width_list),
+            (4, 0, pml_width_list),
+            (5, 0, pml_width_list),
+            (6, 1, pml_width_list),
+        ],
     )
     polarization = None
     if has_dispersion and debye is not None:
@@ -1537,21 +1478,6 @@ def maxwell_python(
             device=device,
             dtype=dtype,
         )
-
-    # Zero out interior of PML auxiliary variables (optimization)
-    # PML memory variables should only be non-zero in PML regions.
-    # This works correctly even with user-provided initial states because:
-    # 1. The output preserves PML region (only fd_pad is cropped)
-    # 2. zero_interior only zeros the interior, preserving PML boundary values
-    # 3. Interior values are already zero in correctly propagated wavefields
-    # Dimension mapping for zero_interior:
-    # - m_Ey_x: x-direction auxiliary -> dim=1 (zero y-interior, keep x-boundaries)
-    # - m_Ey_z: y/z-direction auxiliary -> dim=0 (zero x-interior, keep y-boundaries)
-    # - m_Hx_z: y/z-direction auxiliary -> dim=0
-    # - m_Hz_x: x-direction auxiliary -> dim=1
-    pml_aux_dims = [1, 0, 0, 1]  # [m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x]
-    for wf, dim in zip([m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x], pml_aux_dims):
-        zero_interior(wf, fd_pad_list, pml_width_list, dim)
 
     # Set up PML profiles for the padded domain
     pml_profiles_list = staggered.set_pml_profiles(
@@ -2186,75 +2112,29 @@ def maxwell_c_cuda(
 
     # Initialize fields with padded dimensions
     size_with_batch = (n_shots, padded_ny, padded_nx)
-    Ey = _init_tm_wavefield(
-        Ey_0,
+    (
+        Ey,
+        Hx,
+        Hz,
+        m_Ey_x,
+        m_Ey_z,
+        m_Hx_z,
+        m_Hz_x,
+    ) = prepare_initial_wavefields(
+        [Ey_0, Hx_0, Hz_0, m_Ey_x_0, m_Ey_z_0, m_Hx_z_0, m_Hz_x_0],
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
         device=device,
         dtype=dtype,
         contiguous=True,
+        zero_interior_plan=[
+            (3, 1, pml_width_list),
+            (4, 0, pml_width_list),
+            (5, 0, pml_width_list),
+            (6, 1, pml_width_list),
+        ],
     )
-    Hx = _init_tm_wavefield(
-        Hx_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        contiguous=True,
-    )
-    Hz = _init_tm_wavefield(
-        Hz_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        contiguous=True,
-    )
-    m_Ey_x = _init_tm_wavefield(
-        m_Ey_x_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        contiguous=True,
-    )
-    m_Ey_z = _init_tm_wavefield(
-        m_Ey_z_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        contiguous=True,
-    )
-    m_Hx_z = _init_tm_wavefield(
-        m_Hx_z_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        contiguous=True,
-    )
-    m_Hz_x = _init_tm_wavefield(
-        m_Hz_x_0,
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        contiguous=True,
-    )
-
-    # Zero out interior of PML auxiliary variables (optimization)
-    # This works correctly with user-provided states (see forward pass comments)
-    pml_aux_dims = [1, 0, 0, 1]  # [m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x]
-    for wf, dim in zip([m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x], pml_aux_dims):
-        zero_interior(wf, fd_pad_list, pml_width_list, dim)
 
     # Set up PML profiles for the padded domain
     pml_profiles_list = staggered.set_pml_profiles(
@@ -2829,31 +2709,18 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         n_receivers: int,
         backend_device: torch.device,
     ) -> dict[str, Any]:
-        device = Ey.device
-        coeff_dtype = ca.dtype
-        return {
-            "device": device,
-            "coeff_dtype": coeff_dtype,
-            "backend_device": backend_device,
-            "receiver_amplitudes": (
-                torch.zeros(
-                    nt,
-                    n_shots,
-                    n_receivers,
-                    device=device,
-                    dtype=coeff_dtype,
-                )
-                if n_receivers > 0
-                else torch.empty(0, device=device, dtype=coeff_dtype)
-            ),
-            "ca_requires_grad": bool(ca.requires_grad),
-            "cb_requires_grad": bool(cb.requires_grad),
-            "device_idx": (
-                device.index
-                if device.type == "cuda" and device.index is not None
-                else 0
-            ),
-        }
+        runtime = make_native_runtime_context(
+            ca=ca,
+            cb=cb,
+            reference=Ey,
+            nt=nt,
+            n_shots=n_shots,
+            n_receivers=n_receivers,
+            receiver_dtype=ca.dtype,
+            extra={"backend_device": backend_device},
+        )
+        runtime["coeff_dtype"] = runtime.pop("dtype")
+        return runtime
 
     @staticmethod
     def _setup_storage(
@@ -2974,14 +2841,16 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         forward_tensors: tuple[torch.Tensor, ...],
         attrs: dict[str, Any],
     ) -> None:
-        ctx.save_for_backward(*tensors)
-        ctx.save_for_forward(*forward_tensors)
-        for key, value in attrs.items():
-            setattr(ctx, key, value)
-        ctx.backward_storage_objects = ctx_data["backward_storage_objects"]
-        ctx.backward_storage_filename_arrays = ctx_data[
-            "backward_storage_filename_arrays"
-        ]
+        save_storage_context(
+            ctx,
+            tensors=tensors,
+            forward_tensors=forward_tensors,
+            attrs=attrs,
+            backward_storage_objects=ctx_data["backward_storage_objects"],
+            backward_storage_filename_arrays=ctx_data[
+                "backward_storage_filename_arrays"
+            ],
+        )
         ctx.stream_keepalive = ctx_data["stream_keepalive"]
         ctx.storage_mode = ctx_data["storage_mode"]
         ctx.storage_format = ctx_data["storage_format"]
@@ -4438,7 +4307,7 @@ def maxwell3d_python(
         n_threads,
         experimental_cuda_graph,
     )
-    from .padding import create_or_pad, zero_interior
+    from .padding import create_or_pad
 
     if epsilon.ndim != 3:
         raise RuntimeError("epsilon must be 3D")
@@ -4557,40 +4426,66 @@ def maxwell3d_python(
     cq = cq[None, :, :, :]
 
     size_with_batch = (n_shots, padded_nz, padded_ny, padded_nx)
-
-    def init_wavefield(field_0: torch.Tensor | None) -> torch.Tensor:
-        if field_0 is not None:
-            if field_0.ndim == 3:
-                field_0 = field_0[None, :, :, :].expand(n_shots, -1, -1, -1)
-            return create_or_pad(
-                field_0,
-                fd_pad_list,
-                device,
-                dtype,
-                size_with_batch,
-                mode="constant",
-            )
-        return torch.zeros(size_with_batch, device=device, dtype=dtype)
-
-    Ex = init_wavefield(Ex_0)
-    Ey = init_wavefield(Ey_0)
-    Ez = init_wavefield(Ez_0)
-    Hx = init_wavefield(Hx_0)
-    Hy = init_wavefield(Hy_0)
-    Hz = init_wavefield(Hz_0)
-
-    m_hz_y = init_wavefield(m_hz_y_0)
-    m_hy_z = init_wavefield(m_hy_z_0)
-    m_hx_z = init_wavefield(m_hx_z_0)
-    m_hz_x = init_wavefield(m_hz_x_0)
-    m_hy_x = init_wavefield(m_hy_x_0)
-    m_hx_y = init_wavefield(m_hx_y_0)
-    m_ey_z = init_wavefield(m_ey_z_0)
-    m_ez_y = init_wavefield(m_ez_y_0)
-    m_ez_x = init_wavefield(m_ez_x_0)
-    m_ex_z = init_wavefield(m_ex_z_0)
-    m_ex_y = init_wavefield(m_ex_y_0)
-    m_ey_x = init_wavefield(m_ey_x_0)
+    (
+        Ex,
+        Ey,
+        Ez,
+        Hx,
+        Hy,
+        Hz,
+        m_hz_y,
+        m_hy_z,
+        m_hx_z,
+        m_hz_x,
+        m_hy_x,
+        m_hx_y,
+        m_ey_z,
+        m_ez_y,
+        m_ez_x,
+        m_ex_z,
+        m_ex_y,
+        m_ey_x,
+    ) = prepare_initial_wavefields(
+        [
+            Ex_0,
+            Ey_0,
+            Ez_0,
+            Hx_0,
+            Hy_0,
+            Hz_0,
+            m_hz_y_0,
+            m_hy_z_0,
+            m_hx_z_0,
+            m_hz_x_0,
+            m_hy_x_0,
+            m_hx_y_0,
+            m_ey_z_0,
+            m_ez_y_0,
+            m_ez_x_0,
+            m_ex_z_0,
+            m_ex_y_0,
+            m_ey_x_0,
+        ],
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        zero_interior_plan=[
+            (6, 1, pml_width_list),
+            (7, 0, pml_width_list),
+            (8, 0, pml_width_list),
+            (9, 2, pml_width_list),
+            (10, 2, pml_width_list),
+            (11, 1, pml_width_list),
+            (12, 0, pml_width_list),
+            (13, 1, pml_width_list),
+            (14, 2, pml_width_list),
+            (15, 0, pml_width_list),
+            (16, 1, pml_width_list),
+            (17, 2, pml_width_list),
+        ],
+    )
     pol_ex = pol_ey = pol_ez = None
     if has_dispersion and debye is not None:
         pol_ex = _init_polarization_state(
@@ -4602,23 +4497,6 @@ def maxwell3d_python(
         )
         pol_ey = torch.zeros_like(pol_ex)
         pol_ez = torch.zeros_like(pol_ex)
-
-    pml_aux = [
-        (m_hz_y, 1),
-        (m_hy_z, 0),
-        (m_hx_z, 0),
-        (m_hz_x, 2),
-        (m_hy_x, 2),
-        (m_hx_y, 1),
-        (m_ey_z, 0),
-        (m_ez_y, 1),
-        (m_ez_x, 2),
-        (m_ex_z, 0),
-        (m_ex_y, 1),
-        (m_ey_x, 2),
-    ]
-    for wf, dim in pml_aux:
-        zero_interior(wf, fd_pad_list, pml_width_list, dim)
 
     from . import staggered as _staggered
 
@@ -4889,30 +4767,14 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         wavefields: tuple[torch.Tensor, ...],
         meta: dict[str, Any],
     ) -> dict[str, Any]:
-        device = wavefields[0].device
-        dtype = wavefields[0].dtype
-        nt = int(meta["nt"])
-        n_shots = int(meta["n_shots"])
-        n_receivers = int(meta["n_receivers"])
-        return {
-            "device": device,
-            "dtype": dtype,
-            "nt": nt,
-            "n_shots": n_shots,
-            "n_receivers": n_receivers,
-            "receiver_amplitudes": (
-                torch.zeros(nt, n_shots, n_receivers, device=device, dtype=dtype)
-                if n_receivers > 0
-                else torch.empty(0, device=device, dtype=dtype)
-            ),
-            "ca_requires_grad": bool(ca.requires_grad),
-            "cb_requires_grad": bool(cb.requires_grad),
-            "device_idx": (
-                device.index
-                if device.type == "cuda" and device.index is not None
-                else 0
-            ),
-        }
+        return make_native_runtime_context(
+            ca=ca,
+            cb=cb,
+            reference=wavefields[0],
+            nt=int(meta["nt"]),
+            n_shots=int(meta["n_shots"]),
+            n_receivers=int(meta["n_receivers"]),
+        )
 
     @staticmethod
     def _setup_storage(
@@ -5038,18 +4900,30 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         }
 
     @staticmethod
-    def _save_ctx(ctx: Any, *, meta: dict[str, Any], storage_setup: dict[str, Any]) -> None:
-        ctx.meta = {
-            **meta,
-            "ca_requires_grad": bool(meta["ca_requires_grad"]),
-            "cb_requires_grad": bool(meta["cb_requires_grad"]),
-            "storage_mode": storage_setup["storage_mode"],
-            "stream_keepalive": storage_setup["stream_keepalive"],
-        }
-        ctx.backward_storage_objects = storage_setup["backward_storage_objects"]
-        ctx.backward_storage_filename_arrays = storage_setup[
-            "backward_storage_filename_arrays"
-        ]
+    def _save_ctx(
+        ctx: Any,
+        *,
+        meta: dict[str, Any],
+        storage_setup: dict[str, Any],
+        tensors: tuple[torch.Tensor, ...],
+    ) -> None:
+        save_storage_context(
+            ctx,
+            tensors=tensors,
+            attrs={
+                "meta": {
+                    **meta,
+                    "ca_requires_grad": bool(meta["ca_requires_grad"]),
+                    "cb_requires_grad": bool(meta["cb_requires_grad"]),
+                    "storage_mode": storage_setup["storage_mode"],
+                    "stream_keepalive": storage_setup["stream_keepalive"],
+                }
+            },
+            backward_storage_objects=storage_setup["backward_storage_objects"],
+            backward_storage_filename_arrays=storage_setup[
+                "backward_storage_filename_arrays"
+            ],
+        )
 
     @staticmethod
     def _prepare_grad_wavefields(
@@ -5401,43 +5275,6 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             run_chunk=run_chunk,
         )
 
-        ctx.save_for_backward(
-            ca,
-            cb,
-            cq,
-            az,
-            bz,
-            az_h,
-            bz_h,
-            ay,
-            by,
-            ay_h,
-            by_h,
-            ax,
-            bx,
-            ax_h,
-            bx_h,
-            kz,
-            kz_h,
-            ky,
-            ky_h,
-            kx,
-            kx_h,
-            sources_i,
-            receivers_i,
-            storage_setup["store_ex"],
-            storage_setup["store_ex_host"],
-            storage_setup["store_ey"],
-            storage_setup["store_ey_host"],
-            storage_setup["store_ez"],
-            storage_setup["store_ez_host"],
-            storage_setup["store_curl_x"],
-            storage_setup["store_curl_x_host"],
-            storage_setup["store_curl_y"],
-            storage_setup["store_curl_y_host"],
-            storage_setup["store_curl_z"],
-            storage_setup["store_curl_z_host"],
-        )
         ctx_meta = {
             "dt": dt,
             "nt": nt,
@@ -5470,7 +5307,48 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             "rdx": float(meta["rdx"]),
             "shot_bytes_uncomp": shot_bytes_uncomp,
         }
-        Maxwell3DForwardFunc._save_ctx(ctx, meta=ctx_meta, storage_setup=storage_setup)
+        Maxwell3DForwardFunc._save_ctx(
+            ctx,
+            meta=ctx_meta,
+            storage_setup=storage_setup,
+            tensors=(
+                ca,
+                cb,
+                cq,
+                az,
+                bz,
+                az_h,
+                bz_h,
+                ay,
+                by,
+                ay_h,
+                by_h,
+                ax,
+                bx,
+                ax_h,
+                bx_h,
+                kz,
+                kz_h,
+                ky,
+                ky_h,
+                kx,
+                kx_h,
+                sources_i,
+                receivers_i,
+                storage_setup["store_ex"],
+                storage_setup["store_ex_host"],
+                storage_setup["store_ey"],
+                storage_setup["store_ey_host"],
+                storage_setup["store_ez"],
+                storage_setup["store_ez_host"],
+                storage_setup["store_curl_x"],
+                storage_setup["store_curl_x_host"],
+                storage_setup["store_curl_y"],
+                storage_setup["store_curl_y_host"],
+                storage_setup["store_curl_z"],
+                storage_setup["store_curl_z_host"],
+            ),
+        )
 
         return (
             Ex,
@@ -5836,7 +5714,7 @@ def maxwell3d_c_cuda(
 ):
     """3D C/CUDA forward propagation path with Python fallback for gradients."""
     from . import backend_utils, staggered
-    from .padding import create_or_pad, zero_interior
+    from .padding import create_or_pad
     import warnings
 
     del (
@@ -6081,57 +5959,67 @@ def maxwell3d_c_cuda(
     has_dispersion = bool(material["has_dispersion"])
     debye = material.get("debye")
     size_with_batch = (n_shots, padded_nz, padded_ny, padded_nx)
-
-    def init_wavefield(field_0: torch.Tensor | None) -> torch.Tensor:
-        if field_0 is not None:
-            if field_0.ndim == 3:
-                field_0 = field_0[None, :, :, :].expand(n_shots, -1, -1, -1)
-            return create_or_pad(
-                field_0,
-                fd_pad_list,
-                device,
-                dtype,
-                size_with_batch,
-                mode="constant",
-            ).contiguous()
-        return torch.zeros(size_with_batch, device=device, dtype=dtype)
-
-    Ex = init_wavefield(Ex_0)
-    Ey = init_wavefield(Ey_0)
-    Ez = init_wavefield(Ez_0)
-    Hx = init_wavefield(Hx_0)
-    Hy = init_wavefield(Hy_0)
-    Hz = init_wavefield(Hz_0)
-
-    m_hz_y = init_wavefield(m_hz_y_0)
-    m_hy_z = init_wavefield(m_hy_z_0)
-    m_hx_z = init_wavefield(m_hx_z_0)
-    m_hz_x = init_wavefield(m_hz_x_0)
-    m_hy_x = init_wavefield(m_hy_x_0)
-    m_hx_y = init_wavefield(m_hx_y_0)
-    m_ey_z = init_wavefield(m_ey_z_0)
-    m_ez_y = init_wavefield(m_ez_y_0)
-    m_ez_x = init_wavefield(m_ez_x_0)
-    m_ex_z = init_wavefield(m_ex_z_0)
-    m_ex_y = init_wavefield(m_ex_y_0)
-    m_ey_x = init_wavefield(m_ey_x_0)
-
-    pml_aux = [
-        (m_hz_y, 1),
-        (m_hy_z, 0),
-        (m_hx_z, 0),
-        (m_hz_x, 2),
-        (m_hy_x, 2),
-        (m_hx_y, 1),
-        (m_ey_z, 0),
-        (m_ez_y, 1),
-        (m_ez_x, 2),
-        (m_ex_z, 0),
-        (m_ex_y, 1),
-        (m_ey_x, 2),
-    ]
-    for wf, dim in pml_aux:
-        zero_interior(wf, fd_pad_list, pml_width_list, dim)
+    (
+        Ex,
+        Ey,
+        Ez,
+        Hx,
+        Hy,
+        Hz,
+        m_hz_y,
+        m_hy_z,
+        m_hx_z,
+        m_hz_x,
+        m_hy_x,
+        m_hx_y,
+        m_ey_z,
+        m_ez_y,
+        m_ez_x,
+        m_ex_z,
+        m_ex_y,
+        m_ey_x,
+    ) = prepare_initial_wavefields(
+        [
+            Ex_0,
+            Ey_0,
+            Ez_0,
+            Hx_0,
+            Hy_0,
+            Hz_0,
+            m_hz_y_0,
+            m_hy_z_0,
+            m_hx_z_0,
+            m_hz_x_0,
+            m_hy_x_0,
+            m_hx_y_0,
+            m_ey_z_0,
+            m_ez_y_0,
+            m_ez_x_0,
+            m_ex_z_0,
+            m_ex_y_0,
+            m_ey_x_0,
+        ],
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+        zero_interior_plan=[
+            (6, 1, pml_width_list),
+            (7, 0, pml_width_list),
+            (8, 0, pml_width_list),
+            (9, 2, pml_width_list),
+            (10, 2, pml_width_list),
+            (11, 1, pml_width_list),
+            (12, 0, pml_width_list),
+            (13, 1, pml_width_list),
+            (14, 2, pml_width_list),
+            (15, 0, pml_width_list),
+            (16, 1, pml_width_list),
+            (17, 2, pml_width_list),
+        ],
+    )
 
     pml_ab_profiles, pml_k_profiles = staggered.set_pml_profiles_3d(
         pml_width=pml_width_list,
