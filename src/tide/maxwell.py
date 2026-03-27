@@ -19,14 +19,13 @@ from .grid_utils import (
 from .padding import create_or_pad, zero_interior
 from .resampling import downsample_and_movedim, upsample
 from .storage import (
-    _CPU_STORAGE_BUFFERS,
     STORAGE_DISK,
     STORAGE_NONE,
     StorageMode,
-    TemporaryStorage,
     _normalize_storage_compression,
     _resolve_storage_compression,
-    storage_mode_from_str,
+    get_storage_mode,
+    setup_storage,
 )
 from .utils import (
     C0,
@@ -2976,10 +2975,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 "backward_storage_filename_arrays": backward_storage_filename_arrays,
             }
 
-        normalized_storage_mode = storage_mode_str
-        if device.type == "cpu" and normalized_storage_mode == "cpu":
-            normalized_storage_mode = "device"
-        storage_mode = storage_mode_from_str(normalized_storage_mode)
+        storage_mode = get_storage_mode(storage_mode_str, device)
         compute_stream_handle, storage_stream_handle, stream_keepalive = (
             _make_tm_storage_streams(device, storage_mode)
         )
@@ -2996,89 +2992,38 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             raise RuntimeError("Mismatched TM2D storage format resolution.")
 
         shot_bytes_uncomp = num_elements_per_shot * store_dtype.itemsize
-        num_steps_stored = (nt + step_ratio - 1) // step_ratio
-        char_ptr_type = ctypes.c_char_p
-        is_cuda = device.type == "cuda"
-
-        def alloc_storage(requires_grad_cond: bool) -> tuple[torch.Tensor, torch.Tensor, Any]:
-            store_1 = torch.empty(0)
-            store_3 = torch.empty(0)
-            filenames_arr = (char_ptr_type * 0)()
-
-            if requires_grad_cond and storage_mode != StorageMode.NONE:
-                if storage_mode == StorageMode.DEVICE:
-                    store_1 = torch.empty(
-                        num_steps_stored,
-                        n_shots,
-                        ny,
-                        nx,
-                        device=device,
-                        dtype=store_dtype,
-                    )
-                elif storage_mode == StorageMode.CPU:
-                    store_1 = torch.empty(
-                        _CPU_STORAGE_BUFFERS,
-                        n_shots,
-                        ny,
-                        nx,
-                        device=device,
-                        dtype=store_dtype,
-                    )
-                    store_3 = torch.empty(
-                        num_steps_stored,
-                        n_shots,
-                        shot_bytes_uncomp // store_dtype.itemsize,
-                        device="cpu",
-                        pin_memory=True,
-                        dtype=store_dtype,
-                    )
-                elif storage_mode == StorageMode.DISK:
-                    storage_obj = TemporaryStorage(storage_path, 1 if is_cuda else n_shots)
-                    backward_storage_objects.append(storage_obj)
-                    filenames_list = [
-                        name.encode("utf-8") for name in storage_obj.get_filenames()
-                    ]
-                    filenames_arr = (char_ptr_type * len(filenames_list))()
-                    for i_file, f_name in enumerate(filenames_list):
-                        filenames_arr[i_file] = ctypes.cast(
-                            ctypes.create_string_buffer(f_name), char_ptr_type
-                        )
-
-                    if is_cuda:
-                        store_1 = torch.empty(
-                            _CPU_STORAGE_BUFFERS,
-                            n_shots,
-                            ny,
-                            nx,
-                            device=device,
-                            dtype=store_dtype,
-                        )
-                        store_3 = torch.empty(
-                            _CPU_STORAGE_BUFFERS,
-                            n_shots,
-                            shot_bytes_uncomp // store_dtype.itemsize,
-                            device="cpu",
-                            pin_memory=True,
-                            dtype=store_dtype,
-                        )
-                    else:
-                        store_1 = torch.empty(
-                            n_shots, ny, nx, device=device, dtype=store_dtype
-                        )
-
-            backward_storage_tensors.extend([store_1, store_3])
+        storage_manager = setup_storage(
+            shot_shape=(ny, nx),
+            dtype=store_dtype,
+            n_shots=n_shots,
+            nt=nt,
+            step_ratio=step_ratio,
+            storage_mode=storage_mode,
+            storage_path=storage_path,
+            device=device,
+            requires_grad_list=[ca_requires_grad, cb_requires_grad],
+            allocation_kwargs_list=[{"host_linear": True}, {"host_linear": True}],
+        )
+        for allocation in storage_manager.allocations:
+            backward_storage_objects.append(allocation.temporary_storage)
+            filenames_arr = allocation.get_filenames_ptr()
+            backward_storage_tensors.extend([allocation.store_device, allocation.store_host])
             backward_storage_filename_arrays.append(filenames_arr)
 
-            filenames_ptr = (
-                ctypes.cast(filenames_arr, ctypes.c_void_p)
-                if storage_mode == StorageMode.DISK
-                else 0
-            )
-            return store_1, store_3, filenames_ptr
-
-        ey_store_1, ey_store_3, ey_filenames_ptr = alloc_storage(ca_requires_grad)
-        curl_store_1, curl_store_3, curl_filenames_ptr = alloc_storage(
-            cb_requires_grad
+        ey_allocation, curl_allocation = storage_manager.allocations
+        ey_store_1 = ey_allocation.store_device
+        ey_store_3 = ey_allocation.store_host
+        curl_store_1 = curl_allocation.store_device
+        curl_store_3 = curl_allocation.store_host
+        ey_filenames_ptr = (
+            ctypes.cast(ey_allocation.get_filenames_ptr(), ctypes.c_void_p)
+            if storage_mode == StorageMode.DISK
+            else 0
+        )
+        curl_filenames_ptr = (
+            ctypes.cast(curl_allocation.get_filenames_ptr(), ctypes.c_void_p)
+            if storage_mode == StorageMode.DISK
+            else 0
         )
 
         return {
@@ -5064,101 +5009,83 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
     ) -> dict[str, Any]:
         import ctypes
 
-        storage_mode = storage_mode_from_str(storage_mode_str)
+        storage_mode = get_storage_mode(storage_mode_str, device)
         compute_stream_handle, storage_stream_handle, stream_keepalive = (
             _make_storage_streams(device, storage_mode)
         )
         backward_storage_objects: list[Any] = []
         backward_storage_filename_arrays: list[Any] = []
-        char_ptr_type = ctypes.c_char_p
-        is_cuda = device.type == "cuda"
-        empty_store = torch.empty(0, device=device, dtype=dtype)
-
-        def alloc_storage(requires_grad_cond: bool) -> tuple[torch.Tensor, torch.Tensor, Any]:
-            store_1 = empty_store
-            store_3 = empty_store
-            filenames_arr = (char_ptr_type * 0)()
-            if not requires_grad_cond:
-                backward_storage_filename_arrays.append(filenames_arr)
-                return store_1, store_3, 0
-
-            if storage_mode == StorageMode.DEVICE:
-                store_1 = torch.empty(
-                    num_steps_stored, n_shots, nz, ny, nx, device=device, dtype=dtype
-                )
-            elif storage_mode == StorageMode.CPU:
-                store_1 = torch.empty(
-                    _CPU_STORAGE_BUFFERS,
-                    n_shots,
-                    nz,
-                    ny,
-                    nx,
-                    device=device,
-                    dtype=dtype,
-                )
-                store_3 = torch.empty(
-                    num_steps_stored,
-                    n_shots,
-                    nz,
-                    ny,
-                    nx,
-                    device="cpu",
-                    pin_memory=True,
-                    dtype=dtype,
-                )
-            elif storage_mode == StorageMode.DISK:
-                storage_obj = TemporaryStorage(storage_path, 1 if is_cuda else n_shots)
-                backward_storage_objects.append(storage_obj)
-                filenames_list = [name.encode("utf-8") for name in storage_obj.get_filenames()]
-                filenames_arr = (char_ptr_type * len(filenames_list))()
-                for i_file, f_name in enumerate(filenames_list):
-                    filenames_arr[i_file] = ctypes.cast(
-                        ctypes.create_string_buffer(f_name), char_ptr_type
-                    )
-                if is_cuda:
-                    store_1 = torch.empty(
-                        _CPU_STORAGE_BUFFERS,
-                        n_shots,
-                        nz,
-                        ny,
-                        nx,
-                        device=device,
-                        dtype=dtype,
-                    )
-                    store_3 = torch.empty(
-                        _CPU_STORAGE_BUFFERS,
-                        n_shots,
-                        nz,
-                        ny,
-                        nx,
-                        device="cpu",
-                        pin_memory=True,
-                        dtype=dtype,
-                    )
-                else:
-                    store_1 = torch.empty(
-                        n_shots, nz, ny, nx, device=device, dtype=dtype
-                    )
-
-            backward_storage_filename_arrays.append(filenames_arr)
-            filenames_ptr = (
-                ctypes.cast(filenames_arr, ctypes.c_void_p)
-                if storage_mode == StorageMode.DISK
-                else 0
-            )
-            return store_1, store_3, filenames_ptr
-
-        store_ex, store_ex_host, store_ex_filenames_ptr = alloc_storage(ca_requires_grad)
-        store_ey, store_ey_host, store_ey_filenames_ptr = alloc_storage(ca_requires_grad)
-        store_ez, store_ez_host, store_ez_filenames_ptr = alloc_storage(ca_requires_grad)
-        store_curl_x, store_curl_x_host, store_curl_x_filenames_ptr = alloc_storage(
-            cb_requires_grad
+        storage_manager = setup_storage(
+            shot_shape=(nz, ny, nx),
+            dtype=dtype,
+            n_shots=n_shots,
+            nt=num_steps_stored,
+            step_ratio=1,
+            storage_mode=storage_mode,
+            storage_path=storage_path,
+            device=device,
+            requires_grad_list=[
+                ca_requires_grad,
+                ca_requires_grad,
+                ca_requires_grad,
+                cb_requires_grad,
+                cb_requires_grad,
+                cb_requires_grad,
+            ],
         )
-        store_curl_y, store_curl_y_host, store_curl_y_filenames_ptr = alloc_storage(
-            cb_requires_grad
+        for allocation in storage_manager.allocations:
+            backward_storage_objects.append(allocation.temporary_storage)
+            backward_storage_filename_arrays.append(allocation.get_filenames_ptr())
+
+        (
+            store_ex_alloc,
+            store_ey_alloc,
+            store_ez_alloc,
+            store_curl_x_alloc,
+            store_curl_y_alloc,
+            store_curl_z_alloc,
+        ) = storage_manager.allocations
+        store_ex = store_ex_alloc.store_device
+        store_ex_host = store_ex_alloc.store_host
+        store_ey = store_ey_alloc.store_device
+        store_ey_host = store_ey_alloc.store_host
+        store_ez = store_ez_alloc.store_device
+        store_ez_host = store_ez_alloc.store_host
+        store_curl_x = store_curl_x_alloc.store_device
+        store_curl_x_host = store_curl_x_alloc.store_host
+        store_curl_y = store_curl_y_alloc.store_device
+        store_curl_y_host = store_curl_y_alloc.store_host
+        store_curl_z = store_curl_z_alloc.store_device
+        store_curl_z_host = store_curl_z_alloc.store_host
+        store_ex_filenames_ptr = (
+            ctypes.cast(store_ex_alloc.get_filenames_ptr(), ctypes.c_void_p)
+            if storage_mode == StorageMode.DISK
+            else 0
         )
-        store_curl_z, store_curl_z_host, store_curl_z_filenames_ptr = alloc_storage(
-            cb_requires_grad
+        store_ey_filenames_ptr = (
+            ctypes.cast(store_ey_alloc.get_filenames_ptr(), ctypes.c_void_p)
+            if storage_mode == StorageMode.DISK
+            else 0
+        )
+        store_ez_filenames_ptr = (
+            ctypes.cast(store_ez_alloc.get_filenames_ptr(), ctypes.c_void_p)
+            if storage_mode == StorageMode.DISK
+            else 0
+        )
+        store_curl_x_filenames_ptr = (
+            ctypes.cast(store_curl_x_alloc.get_filenames_ptr(), ctypes.c_void_p)
+            if storage_mode == StorageMode.DISK
+            else 0
+        )
+        store_curl_y_filenames_ptr = (
+            ctypes.cast(store_curl_y_alloc.get_filenames_ptr(), ctypes.c_void_p)
+            if storage_mode == StorageMode.DISK
+            else 0
+        )
+        store_curl_z_filenames_ptr = (
+            ctypes.cast(store_curl_z_alloc.get_filenames_ptr(), ctypes.c_void_p)
+            if storage_mode == StorageMode.DISK
+            else 0
         )
 
         return {
