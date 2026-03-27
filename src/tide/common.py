@@ -212,8 +212,7 @@ def save_storage_context(
     tensors: tuple[torch.Tensor, ...] = (),
     forward_tensors: tuple[torch.Tensor, ...] | None = None,
     attrs: dict[str, Any] | None = None,
-    backward_storage_objects: Any = (),
-    backward_storage_filename_arrays: Any = (),
+    storage_manager: Any = None,
 ) -> None:
     """Store autograd metadata and keep storage resources alive."""
     save_autograd_context(
@@ -222,8 +221,7 @@ def save_storage_context(
         forward_tensors=forward_tensors,
         attrs=attrs,
     )
-    ctx.backward_storage_objects = backward_storage_objects
-    ctx.backward_storage_filename_arrays = backward_storage_filename_arrays
+    ctx.storage_manager = storage_manager
 
 
 def execute_stepping_loop(

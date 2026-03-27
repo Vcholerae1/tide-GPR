@@ -31,12 +31,13 @@ from .grid_utils import (
 from .padding import create_or_pad
 from .resampling import downsample_and_movedim, upsample
 from .storage import (
-    STORAGE_DISK,
     StorageMode,
     _normalize_storage_compression,
     _resolve_storage_compression,
+    get_storage_filename_ptrs,
     get_storage_mode,
     setup_storage,
+    unpack_storage_allocations,
 )
 from .utils import (
     C0,
@@ -2740,28 +2741,24 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         ca_requires_grad: bool,
         cb_requires_grad: bool,
     ) -> dict[str, Any]:
-        import ctypes
-
         storage_mode = StorageMode.NONE
+        storage_manager = None
         stream_keepalive: tuple[Any, ...] = ()
         compute_stream_handle = 0
         storage_stream_handle = 0
         shot_bytes_uncomp = 0
         backward_storage_tensors: list[torch.Tensor] = []
-        backward_storage_objects: list[Any] = []
-        backward_storage_filename_arrays: list[Any] = []
 
         needs_grad = ca_requires_grad or cb_requires_grad
         if not needs_grad:
             return {
                 "storage_mode": storage_mode,
+                "storage_manager": storage_manager,
                 "compute_stream_handle": compute_stream_handle,
                 "storage_stream_handle": storage_stream_handle,
                 "stream_keepalive": stream_keepalive,
                 "shot_bytes_uncomp": shot_bytes_uncomp,
                 "backward_storage_tensors": backward_storage_tensors,
-                "backward_storage_objects": backward_storage_objects,
-                "backward_storage_filename_arrays": backward_storage_filename_arrays,
             }
 
         storage_mode = get_storage_mode(storage_mode_str, device)
@@ -2794,42 +2791,27 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             allocation_kwargs_list=[{"host_linear": True}, {"host_linear": True}],
         )
         for allocation in storage_manager.allocations:
-            backward_storage_objects.append(allocation.temporary_storage)
-            filenames_arr = allocation.get_filenames_ptr()
-            backward_storage_tensors.extend([allocation.store_device, allocation.store_host])
-            backward_storage_filename_arrays.append(filenames_arr)
-
-        ey_allocation, curl_allocation = storage_manager.allocations
-        ey_store_1 = ey_allocation.store_device
-        ey_store_3 = ey_allocation.store_host
-        curl_store_1 = curl_allocation.store_device
-        curl_store_3 = curl_allocation.store_host
-        ey_filenames_ptr = (
-            ctypes.cast(ey_allocation.get_filenames_ptr(), ctypes.c_void_p)
-            if storage_mode == StorageMode.DISK
-            else 0
-        )
-        curl_filenames_ptr = (
-            ctypes.cast(curl_allocation.get_filenames_ptr(), ctypes.c_void_p)
-            if storage_mode == StorageMode.DISK
-            else 0
+            backward_storage_tensors.extend(
+                [allocation.store_device, allocation.store_host]
+            )
+        unpacked_allocations = unpack_storage_allocations(
+            storage_manager=storage_manager,
+            storage_mode=storage_mode,
+            specs=[
+                ("ey_store_1", "ey_store_3", "ey_filenames_ptr"),
+                ("curl_store_1", "curl_store_3", "curl_filenames_ptr"),
+            ],
         )
 
         return {
             "storage_mode": storage_mode,
+            "storage_manager": storage_manager,
             "compute_stream_handle": compute_stream_handle,
             "storage_stream_handle": storage_stream_handle,
             "stream_keepalive": stream_keepalive,
             "shot_bytes_uncomp": shot_bytes_uncomp,
             "backward_storage_tensors": backward_storage_tensors,
-            "backward_storage_objects": backward_storage_objects,
-            "backward_storage_filename_arrays": backward_storage_filename_arrays,
-            "ey_store_1": ey_store_1,
-            "ey_store_3": ey_store_3,
-            "ey_filenames_ptr": ey_filenames_ptr,
-            "curl_store_1": curl_store_1,
-            "curl_store_3": curl_store_3,
-            "curl_filenames_ptr": curl_filenames_ptr,
+            **unpacked_allocations,
         }
 
     @staticmethod
@@ -2846,10 +2828,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             tensors=tensors,
             forward_tensors=forward_tensors,
             attrs=attrs,
-            backward_storage_objects=ctx_data["backward_storage_objects"],
-            backward_storage_filename_arrays=ctx_data[
-                "backward_storage_filename_arrays"
-            ],
+            storage_manager=ctx_data["storage_manager"],
         )
         ctx.stream_keepalive = ctx_data["stream_keepalive"]
         ctx.storage_mode = ctx_data["storage_mode"]
@@ -3232,10 +3211,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
 
         ctx_data = {
             "backward_storage_tensors": storage_setup["backward_storage_tensors"],
-            "backward_storage_objects": storage_setup["backward_storage_objects"],
-            "backward_storage_filename_arrays": storage_setup[
-                "backward_storage_filename_arrays"
-            ],
+            "storage_manager": storage_setup["storage_manager"],
             "storage_mode": storage_setup["storage_mode"],
             "storage_format": storage_format,
             "shot_bytes_uncomp": storage_setup["shot_bytes_uncomp"],
@@ -3483,18 +3459,9 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         storage_format = ctx.storage_format
         shot_bytes_uncomp = ctx.shot_bytes_uncomp
 
-        import ctypes
-
-        if storage_mode == StorageMode.DISK:
-            ey_filenames_ptr = ctypes.cast(
-                ctx.backward_storage_filename_arrays[0], ctypes.c_void_p
-            )
-            curl_filenames_ptr = ctypes.cast(
-                ctx.backward_storage_filename_arrays[1], ctypes.c_void_p
-            )
-        else:
-            ey_filenames_ptr = 0
-            curl_filenames_ptr = 0
+        filename_ptrs = get_storage_filename_ptrs(ctx.storage_manager, storage_mode)
+        ey_filenames_ptr = filename_ptrs[0] if filename_ptrs else 0
+        curl_filenames_ptr = filename_ptrs[1] if len(filename_ptrs) > 1 else 0
 
         grad_state = MaxwellTMForwardFunc._prepare_grad_wavefields(
             ctx=ctx,
@@ -4791,14 +4758,10 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         ny: int,
         nx: int,
     ) -> dict[str, Any]:
-        import ctypes
-
         storage_mode = get_storage_mode(storage_mode_str, device)
         compute_stream_handle, storage_stream_handle, stream_keepalive = (
             _make_storage_streams(device, storage_mode)
         )
-        backward_storage_objects: list[Any] = []
-        backward_storage_filename_arrays: list[Any] = []
         storage_manager = setup_storage(
             shot_shape=(nz, ny, nx),
             dtype=dtype,
@@ -4817,86 +4780,26 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 cb_requires_grad,
             ],
         )
-        for allocation in storage_manager.allocations:
-            backward_storage_objects.append(allocation.temporary_storage)
-            backward_storage_filename_arrays.append(allocation.get_filenames_ptr())
-
-        (
-            store_ex_alloc,
-            store_ey_alloc,
-            store_ez_alloc,
-            store_curl_x_alloc,
-            store_curl_y_alloc,
-            store_curl_z_alloc,
-        ) = storage_manager.allocations
-        store_ex = store_ex_alloc.store_device
-        store_ex_host = store_ex_alloc.store_host
-        store_ey = store_ey_alloc.store_device
-        store_ey_host = store_ey_alloc.store_host
-        store_ez = store_ez_alloc.store_device
-        store_ez_host = store_ez_alloc.store_host
-        store_curl_x = store_curl_x_alloc.store_device
-        store_curl_x_host = store_curl_x_alloc.store_host
-        store_curl_y = store_curl_y_alloc.store_device
-        store_curl_y_host = store_curl_y_alloc.store_host
-        store_curl_z = store_curl_z_alloc.store_device
-        store_curl_z_host = store_curl_z_alloc.store_host
-        store_ex_filenames_ptr = (
-            ctypes.cast(store_ex_alloc.get_filenames_ptr(), ctypes.c_void_p)
-            if storage_mode == StorageMode.DISK
-            else 0
-        )
-        store_ey_filenames_ptr = (
-            ctypes.cast(store_ey_alloc.get_filenames_ptr(), ctypes.c_void_p)
-            if storage_mode == StorageMode.DISK
-            else 0
-        )
-        store_ez_filenames_ptr = (
-            ctypes.cast(store_ez_alloc.get_filenames_ptr(), ctypes.c_void_p)
-            if storage_mode == StorageMode.DISK
-            else 0
-        )
-        store_curl_x_filenames_ptr = (
-            ctypes.cast(store_curl_x_alloc.get_filenames_ptr(), ctypes.c_void_p)
-            if storage_mode == StorageMode.DISK
-            else 0
-        )
-        store_curl_y_filenames_ptr = (
-            ctypes.cast(store_curl_y_alloc.get_filenames_ptr(), ctypes.c_void_p)
-            if storage_mode == StorageMode.DISK
-            else 0
-        )
-        store_curl_z_filenames_ptr = (
-            ctypes.cast(store_curl_z_alloc.get_filenames_ptr(), ctypes.c_void_p)
-            if storage_mode == StorageMode.DISK
-            else 0
+        unpacked_allocations = unpack_storage_allocations(
+            storage_manager=storage_manager,
+            storage_mode=storage_mode,
+            specs=[
+                ("store_ex", "store_ex_host", "store_ex_filenames_ptr"),
+                ("store_ey", "store_ey_host", "store_ey_filenames_ptr"),
+                ("store_ez", "store_ez_host", "store_ez_filenames_ptr"),
+                ("store_curl_x", "store_curl_x_host", "store_curl_x_filenames_ptr"),
+                ("store_curl_y", "store_curl_y_host", "store_curl_y_filenames_ptr"),
+                ("store_curl_z", "store_curl_z_host", "store_curl_z_filenames_ptr"),
+            ],
         )
 
         return {
             "storage_mode": storage_mode,
+            "storage_manager": storage_manager,
             "compute_stream_handle": compute_stream_handle,
             "storage_stream_handle": storage_stream_handle,
             "stream_keepalive": stream_keepalive,
-            "backward_storage_objects": backward_storage_objects,
-            "backward_storage_filename_arrays": backward_storage_filename_arrays,
-            "store_ex": store_ex,
-            "store_ex_host": store_ex_host,
-            "store_ex_filenames_ptr": store_ex_filenames_ptr,
-            "store_ey": store_ey,
-            "store_ey_host": store_ey_host,
-            "store_ey_filenames_ptr": store_ey_filenames_ptr,
-            "store_ez": store_ez,
-            "store_ez_host": store_ez_host,
-            "store_ez_filenames_ptr": store_ez_filenames_ptr,
-            "store_curl_x": store_curl_x,
-            "store_curl_x_host": store_curl_x_host,
-            "store_curl_x_filenames_ptr": store_curl_x_filenames_ptr,
-            "store_curl_y": store_curl_y,
-            "store_curl_y_host": store_curl_y_host,
-            "store_curl_y_filenames_ptr": store_curl_y_filenames_ptr,
-            "store_curl_z": store_curl_z,
-            "store_curl_z_host": store_curl_z_host,
-            "store_curl_z_filenames_ptr": store_curl_z_filenames_ptr,
+            **unpacked_allocations,
         }
 
     @staticmethod
@@ -4919,10 +4822,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                     "stream_keepalive": storage_setup["stream_keepalive"],
                 }
             },
-            backward_storage_objects=storage_setup["backward_storage_objects"],
-            backward_storage_filename_arrays=storage_setup[
-                "backward_storage_filename_arrays"
-            ],
+            storage_manager=storage_setup["storage_manager"],
         )
 
     @staticmethod
@@ -5377,7 +5277,6 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         ctx: Any, *grad_outputs: torch.Tensor
     ) -> tuple[torch.Tensor | None, ...]:
         from . import backend_utils
-        import ctypes
 
         saved = ctx.saved_tensors
         ca, cb, cq = saved[0], saved[1], saved[2]
@@ -5432,6 +5331,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         shot_bytes_uncomp = int(meta["shot_bytes_uncomp"])
         dt = float(meta["dt"])
         storage_mode = StorageMode(meta["storage_mode"])
+        filename_ptrs = get_storage_filename_ptrs(ctx.storage_manager, storage_mode)
         grad_state = Maxwell3DForwardFunc._prepare_grad_wavefields(
             meta=meta,
             grad_r=grad_outputs[-1],
@@ -5505,46 +5405,22 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(m_lambda_hx_y),
                 backend_utils.tensor_to_ptr(store_ex),
                 backend_utils.tensor_to_ptr(store_ex_host),
-                ctypes.cast(
-                    ctx.backward_storage_filename_arrays[0], ctypes.c_void_p
-                )
-                if storage_mode == STORAGE_DISK
-                else 0,
+                filename_ptrs[0] if filename_ptrs else 0,
                 backend_utils.tensor_to_ptr(store_ey),
                 backend_utils.tensor_to_ptr(store_ey_host),
-                ctypes.cast(
-                    ctx.backward_storage_filename_arrays[1], ctypes.c_void_p
-                )
-                if storage_mode == STORAGE_DISK
-                else 0,
+                filename_ptrs[1] if len(filename_ptrs) > 1 else 0,
                 backend_utils.tensor_to_ptr(store_ez),
                 backend_utils.tensor_to_ptr(store_ez_host),
-                ctypes.cast(
-                    ctx.backward_storage_filename_arrays[2], ctypes.c_void_p
-                )
-                if storage_mode == STORAGE_DISK
-                else 0,
+                filename_ptrs[2] if len(filename_ptrs) > 2 else 0,
                 backend_utils.tensor_to_ptr(store_curl_x),
                 backend_utils.tensor_to_ptr(store_curl_x_host),
-                ctypes.cast(
-                    ctx.backward_storage_filename_arrays[3], ctypes.c_void_p
-                )
-                if storage_mode == STORAGE_DISK
-                else 0,
+                filename_ptrs[3] if len(filename_ptrs) > 3 else 0,
                 backend_utils.tensor_to_ptr(store_curl_y),
                 backend_utils.tensor_to_ptr(store_curl_y_host),
-                ctypes.cast(
-                    ctx.backward_storage_filename_arrays[4], ctypes.c_void_p
-                )
-                if storage_mode == STORAGE_DISK
-                else 0,
+                filename_ptrs[4] if len(filename_ptrs) > 4 else 0,
                 backend_utils.tensor_to_ptr(store_curl_z),
                 backend_utils.tensor_to_ptr(store_curl_z_host),
-                ctypes.cast(
-                    ctx.backward_storage_filename_arrays[5], ctypes.c_void_p
-                )
-                if storage_mode == STORAGE_DISK
-                else 0,
+                filename_ptrs[5] if len(filename_ptrs) > 5 else 0,
                 backend_utils.tensor_to_ptr(grad_f),
                 backend_utils.tensor_to_ptr(grad_ca),
                 backend_utils.tensor_to_ptr(grad_cb),

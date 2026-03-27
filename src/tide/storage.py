@@ -275,6 +275,46 @@ class StorageManager:
         return allocation
 
 
+def allocation_filenames_ptr(
+    allocation: IntermediateStorage,
+    storage_mode: StorageMode,
+) -> ctypes.c_void_p | int:
+    """Return a disk filename pointer for a storage allocation when needed."""
+    if storage_mode != StorageMode.DISK:
+        return 0
+    return ctypes.cast(allocation.get_filenames_ptr(), ctypes.c_void_p)
+
+
+def unpack_storage_allocations(
+    *,
+    storage_manager: StorageManager,
+    storage_mode: StorageMode,
+    specs: list[tuple[str, str, str]],
+) -> dict[str, Any]:
+    """Expose allocation tensors and optional filename pointers by key."""
+    unpacked: dict[str, Any] = {}
+    for allocation, (device_key, host_key, filenames_key) in zip(
+        storage_manager.allocations, specs, strict=True
+    ):
+        unpacked[device_key] = allocation.store_device
+        unpacked[host_key] = allocation.store_host
+        unpacked[filenames_key] = allocation_filenames_ptr(allocation, storage_mode)
+    return unpacked
+
+
+def get_storage_filename_ptrs(
+    storage_manager: StorageManager | None,
+    storage_mode: StorageMode,
+) -> list[ctypes.c_void_p | int]:
+    """Return filename pointers for all storage allocations."""
+    if storage_manager is None:
+        return []
+    return [
+        allocation_filenames_ptr(allocation, storage_mode)
+        for allocation in storage_manager.allocations
+    ]
+
+
 def setup_storage(
     *,
     shot_shape: tuple[int, ...],
