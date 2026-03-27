@@ -473,3 +473,69 @@ class TestGradientBackendConsistency:
         p95_sig = torch.quantile(rel_sig[mask], 0.95)
         assert float(p95_eps) < 0.35, f"epsilon p95 rel too high: {float(p95_eps):.4f}"
         assert float(p95_sig) < 0.35, f"sigma p95 rel too high: {float(p95_sig):.4f}"
+
+
+def test_eager_vs_native_gradients_cuda_include_pml_foldback():
+    try:
+        from tide import backend_utils
+    except Exception:  # pragma: no cover
+        pytest.skip("backend_utils unavailable")
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    if not backend_utils.is_backend_available():
+        pytest.skip("native backend unavailable")
+
+    device = torch.device("cuda")
+    dtype = torch.float32
+    ny, nx = 18, 22
+    nt = 28
+
+    y = torch.linspace(0.0, 1.0, ny, device=device, dtype=dtype)
+    x = torch.linspace(0.0, 1.0, nx, device=device, dtype=dtype)
+    yy, xx = torch.meshgrid(y, x, indexing="ij")
+    epsilon = (
+        4.0
+        + 0.5 * torch.exp(-((xx - 0.15) ** 2 + (yy - 0.20) ** 2) / 0.02)
+        + 0.3 * xx
+    ).detach()
+    sigma = (5e-4 + 8e-4 * yy).detach()
+    mu = torch.ones_like(epsilon)
+
+    source_locations = torch.tensor([[[1, 1]]], dtype=torch.long, device=device)
+    receiver_locations = torch.tensor(
+        [[[1, 3], [2, 2], [3, 4]]], dtype=torch.long, device=device
+    )
+    wavelet = tide.ricker(160e6, nt, 4e-11, dtype=dtype, device=device)
+    source_amplitude = wavelet.view(1, 1, nt)
+
+    def compute_grad(backend: bool | str) -> torch.Tensor:
+        eps = epsilon.clone().detach().requires_grad_(True)
+        rec = tide.maxwelltm(
+            eps,
+            sigma,
+            mu,
+            grid_spacing=0.02,
+            dt=4e-11,
+            source_amplitude=source_amplitude,
+            source_location=source_locations,
+            receiver_location=receiver_locations,
+            pml_width=4,
+            stencil=2,
+            python_backend=backend,
+        )[-1]
+        loss = 0.5 * rec.square().mean()
+        loss.backward()
+        assert eps.grad is not None
+        return eps.grad.detach().clone()
+
+    grad_ref = compute_grad("eager")
+    grad_native = compute_grad(False)
+
+    top_ref = grad_ref[0, :]
+    top_native = grad_native[0, :]
+    left_ref = grad_ref[:, 0]
+    left_native = grad_native[:, 0]
+
+    torch.testing.assert_close(top_native, top_ref, rtol=1e-5, atol=1e-7)
+    torch.testing.assert_close(left_native, left_ref, rtol=1e-5, atol=1e-7)

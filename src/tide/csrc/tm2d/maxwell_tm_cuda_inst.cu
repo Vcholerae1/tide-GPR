@@ -1032,8 +1032,6 @@ __global__ void backward_kernel_lambda_e_apply_exact_boundary(
     return;
   }
 
-  bool const pml_y = y < pml_y0 || y >= pml_y1;
-  bool const pml_x = x < pml_x0 || x >= pml_x1;
   int64_t const shot_offset = shot_idx * shot_numel;
   int64_t const j = y * nx + x;
   int64_t const i = shot_offset + j;
@@ -1050,11 +1048,11 @@ __global__ void backward_kernel_lambda_e_apply_exact_boundary(
       DIFFYH1_ADJ(constant_one, work_z_l);
   TIDE_DTYPE const lambda_ey_curr = lambda_ey[i];
   lambda_ey[i] = ca_val * lambda_ey_curr + curl_lambda_h;
-  if (!pml_y && !pml_x && ca_requires_grad && ey_store != nullptr) {
+  if (ca_requires_grad && ey_store != nullptr) {
     grad_ca_shot[i] +=
         lambda_ey_curr * ey_store[i] * step_ratio_to_field(step_ratio_val);
   }
-  if (!pml_y && !pml_x && cb_requires_grad && curl_h_store != nullptr) {
+  if (cb_requires_grad && curl_h_store != nullptr) {
     grad_cb_shot[i] +=
         lambda_ey_curr * curl_h_store[i] * step_ratio_to_field(step_ratio_val);
   }
@@ -1185,8 +1183,6 @@ __global__ void backward_kernel_lambda_e_apply_exact_bf16_boundary(
     return;
   }
 
-  bool const pml_y = y < pml_y0 || y >= pml_y1;
-  bool const pml_x = x < pml_x0 || x >= pml_x1;
   int64_t const shot_offset = shot_idx * shot_numel;
   int64_t const j = y * nx + x;
   int64_t const i = shot_offset + j;
@@ -1203,12 +1199,12 @@ __global__ void backward_kernel_lambda_e_apply_exact_bf16_boundary(
       DIFFYH1_ADJ(constant_one, work_z_l);
   TIDE_DTYPE const lambda_ey_curr = lambda_ey[i];
   lambda_ey[i] = ca_val * lambda_ey_curr + curl_lambda_h;
-  if (!pml_y && !pml_x && ca_requires_grad && ey_store != nullptr) {
+  if (ca_requires_grad && ey_store != nullptr) {
     TIDE_DTYPE const ey_n = (TIDE_DTYPE)__bfloat162float(ey_store[i]);
     grad_ca_shot[i] +=
         lambda_ey_curr * ey_n * step_ratio_to_field(step_ratio_val);
   }
-  if (!pml_y && !pml_x && cb_requires_grad && curl_h_store != nullptr) {
+  if (cb_requires_grad && curl_h_store != nullptr) {
     TIDE_DTYPE const curl_h_n = (TIDE_DTYPE)__bfloat162float(curl_h_store[i]);
     grad_cb_shot[i] +=
         lambda_ey_curr * curl_h_n * step_ratio_to_field(step_ratio_val);

@@ -721,15 +721,14 @@ static TIDE_HOST_DEVICE void backward_kernel_lambda_e_with_grad_core(
 
     lambda_ey[i] = ca_val * lambda_ey_curr + cq_val * curl_lambda_h;
 
-    if (!pml_y && !pml_x && ca_requires_grad && ey_store != nullptr &&
-        grad_ca_shot != nullptr) {
+    if (ca_requires_grad && ey_store != nullptr && grad_ca_shot != nullptr) {
       T ey_n = decode_snapshot<StoreT, T>(ey_store[i]);
       // Accumulate grad_ca += λ_Ey^{n+1} * E_y^n
       grad_ca_shot[i] +=
           lambda_ey_curr * ey_n * static_cast<T>(step_ratio_val);
     }
 
-    if (!pml_y && !pml_x && cb_requires_grad && curl_h_store != nullptr &&
+    if (cb_requires_grad && curl_h_store != nullptr &&
         grad_cb_shot != nullptr) {
       T curl_h_n = decode_snapshot<StoreT, T>(curl_h_store[i]);
       // Accumulate grad_cb += λ_Ey^{n+1} * curl_H^n

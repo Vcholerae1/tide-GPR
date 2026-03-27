@@ -685,8 +685,11 @@ static void backward_kernel_lambda_h(
  *
  * Uses pml_bounds arrays to divide domain into 9 regions (3x3 grid):
  *   pml_y/pml_x == 0: Left/Top PML region
- *   pml_y/pml_x == 1: Interior region (where gradients are accumulated)
+ *   pml_y/pml_x == 1: Interior region
  *   pml_y/pml_x == 2: Right/Bottom PML region
+ *
+ * Gradient accumulation covers the full padded model domain so replicate-padded
+ * PML cells fold back into the physical boundary cells during autograd.
  */
 static void backward_kernel_lambda_e_with_grad(
     TIDE_DTYPE const *__restrict const ca,
