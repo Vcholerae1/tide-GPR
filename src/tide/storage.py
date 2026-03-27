@@ -122,24 +122,6 @@ def storage_mode_to_int(storage_mode_str: str) -> int:
     return int(get_storage_mode(storage_mode_str, torch.device("cuda")))
 
 
-def ensure_contiguous(*args: Any) -> Any:
-    """Recursively make tensors or lists of tensors contiguous."""
-
-    def _make_contiguous(item: Any) -> Any:
-        if item is None:
-            return None
-        if isinstance(item, torch.Tensor):
-            return item.contiguous()
-        if isinstance(item, list):
-            return [_make_contiguous(i) for i in item]
-        if isinstance(item, tuple):
-            return tuple(_make_contiguous(i) for i in item)
-        return item
-
-    out = [_make_contiguous(arg) for arg in args]
-    return out[0] if len(out) == 1 else tuple(out)
-
-
 class TemporaryStorage:
     """Manages temporary files for disk storage.
 

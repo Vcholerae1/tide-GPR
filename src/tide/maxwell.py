@@ -1,4 +1,3 @@
-import itertools
 import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
@@ -7,6 +6,16 @@ from typing import Any
 import torch
 
 from . import staggered
+from .common import (
+    copy_if_present as _copy_if_present,
+    execute_stepping_loop,
+    get_ctx_handle as _get_ctx_handle,
+    make_compute_stream as _make_compute_stream,
+    make_storage_streams as _make_storage_streams,
+    register_ctx_handle as _register_ctx_handle,
+    release_ctx_handle as _release_ctx_handle,
+    stream_handle as _stream_handle,
+)
 from .callbacks import Callback, CallbackState
 from .cfl import cfl_condition
 from .dispersion import DebyeDispersion
@@ -20,7 +29,6 @@ from .padding import create_or_pad, zero_interior
 from .resampling import downsample_and_movedim, upsample
 from .storage import (
     STORAGE_DISK,
-    STORAGE_NONE,
     StorageMode,
     _normalize_storage_compression,
     _resolve_storage_compression,
@@ -39,43 +47,11 @@ from .validation import (
     validate_time_pad_frac,
 )
 
-_CTX_HANDLE_COUNTER = itertools.count()
-_CTX_HANDLE_REGISTRY: dict[int, dict[str, Any]] = {}
 _COMPUTE_PRECISION_DEFAULT = "default"
 _MAXWELL3D_CUDA_GRAPH_CACHE_LIMIT = 8
 _MAXWELL3D_CUDA_GRAPH_CACHE: OrderedDict[
     tuple[Any, ...], "_Maxwell3DCudaGraphContext"
 ] = OrderedDict()
-
-
-def _register_ctx_handle(ctx_data: dict[str, Any]) -> torch.Tensor:
-    handle = next(_CTX_HANDLE_COUNTER)
-    _CTX_HANDLE_REGISTRY[handle] = ctx_data
-    return torch.tensor(handle, dtype=torch.int64)
-
-
-def _get_ctx_handle(handle: int) -> dict[str, Any]:
-    try:
-        return _CTX_HANDLE_REGISTRY[handle]
-    except KeyError as exc:
-        raise RuntimeError(f"Unknown context handle: {handle}") from exc
-
-
-def _release_ctx_handle(handle: int | None) -> None:
-    if handle is None:
-        return
-    _CTX_HANDLE_REGISTRY.pop(handle, None)
-
-
-def _stream_handle(stream: Any | None) -> int:
-    if stream is None:
-        return 0
-    return int(getattr(stream, "cuda_stream", 0) or 0)
-
-
-def _copy_if_present(dst: torch.Tensor, src: torch.Tensor) -> None:
-    if dst.numel() > 0:
-        dst.copy_(src)
 
 
 def _clear_maxwell3d_cuda_graph_cache() -> None:
@@ -547,64 +523,10 @@ def _get_maxwell3d_cuda_graph_context(
     return ctx
 
 
-def _make_storage_streams(
-    device: torch.device, storage_mode: StorageMode
-) -> tuple[int, int, tuple[Any, ...]]:
-    if device.type != "cuda":
-        return 0, 0, ()
-
-    compute_stream = torch.cuda.current_stream(device=device)
-    storage_stream = None
-    if storage_mode in {StorageMode.CPU, StorageMode.DISK}:
-        storage_stream = torch.cuda.Stream(device=device)
-
-    handles = (_stream_handle(compute_stream), _stream_handle(storage_stream))
-    keepalive = tuple(
-        stream for stream in (compute_stream, storage_stream) if stream is not None
-    )
-    return handles[0], handles[1], keepalive
-
-
-def _make_compute_stream(
-    device: torch.device,
-) -> tuple[int, tuple[Any, ...]]:
-    compute_stream_handle, _, keepalive = _make_storage_streams(device, STORAGE_NONE)
-    return compute_stream_handle, keepalive
-
-
 def _make_tm_storage_streams(
     device: torch.device, storage_mode: StorageMode
 ) -> tuple[int, int, tuple[Any, ...]]:
     return _make_storage_streams(device, storage_mode)
-
-
-def execute_stepping_loop(
-    *,
-    total_steps: int,
-    chunk_size: int,
-    run_chunk: Callable[[int, int], None],
-    reverse: bool = False,
-) -> None:
-    """Run a chunked stepping loop shared by native forward/backward paths."""
-    if total_steps <= 0:
-        return
-
-    if chunk_size <= 0:
-        chunk_size = total_steps
-
-    if reverse:
-        step = total_steps
-        while step > 0:
-            step_count = min(step, chunk_size)
-            run_chunk(step, step_count)
-            step -= step_count
-        return
-
-    step = 0
-    while step < total_steps:
-        step_count = min(total_steps - step, chunk_size)
-        run_chunk(step, step_count)
-        step += step_count
 
 
 def _init_tm_wavefield(
