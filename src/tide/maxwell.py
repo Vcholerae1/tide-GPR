@@ -1,3 +1,4 @@
+import itertools
 import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
@@ -6,19 +7,6 @@ from typing import Any
 import torch
 
 from . import staggered
-from .common import (
-    copy_if_present as _copy_if_present,
-    execute_stepping_loop,
-    get_ctx_handle as _get_ctx_handle,
-    make_compute_stream as _make_compute_stream,
-    make_native_runtime_context,
-    make_storage_streams as _make_storage_streams,
-    prepare_initial_wavefields,
-    register_ctx_handle as _register_ctx_handle,
-    release_ctx_handle as _release_ctx_handle,
-    save_storage_context,
-    stream_handle as _stream_handle,
-)
 from .callbacks import Callback, CallbackState
 from .cfl import cfl_condition
 from .dispersion import DebyeDispersion
@@ -28,16 +16,20 @@ from .grid_utils import (
     _normalize_pml_width_2d,
     _normalize_pml_width_3d,
 )
-from .padding import create_or_pad
+from .padding import create_or_pad, zero_interior
 from .resampling import downsample_and_movedim, upsample
 from .storage import (
-    StorageMode,
+    _CPU_STORAGE_BUFFERS,
+    STORAGE_CPU,
+    STORAGE_DEVICE,
+    STORAGE_DISK,
+    STORAGE_FORMAT_BF16,
+    STORAGE_FORMAT_FULL,
+    STORAGE_NONE,
+    TemporaryStorage,
     _normalize_storage_compression,
     _resolve_storage_compression,
-    get_storage_filename_ptrs,
-    get_storage_mode,
-    setup_storage,
-    unpack_storage_allocations,
+    storage_mode_to_int,
 )
 from .utils import (
     C0,
@@ -51,11 +43,43 @@ from .validation import (
     validate_time_pad_frac,
 )
 
+_CTX_HANDLE_COUNTER = itertools.count()
+_CTX_HANDLE_REGISTRY: dict[int, dict[str, Any]] = {}
 _COMPUTE_PRECISION_DEFAULT = "default"
 _MAXWELL3D_CUDA_GRAPH_CACHE_LIMIT = 8
 _MAXWELL3D_CUDA_GRAPH_CACHE: OrderedDict[
     tuple[Any, ...], "_Maxwell3DCudaGraphContext"
 ] = OrderedDict()
+
+
+def _register_ctx_handle(ctx_data: dict[str, Any]) -> torch.Tensor:
+    handle = next(_CTX_HANDLE_COUNTER)
+    _CTX_HANDLE_REGISTRY[handle] = ctx_data
+    return torch.tensor(handle, dtype=torch.int64)
+
+
+def _get_ctx_handle(handle: int) -> dict[str, Any]:
+    try:
+        return _CTX_HANDLE_REGISTRY[handle]
+    except KeyError as exc:
+        raise RuntimeError(f"Unknown context handle: {handle}") from exc
+
+
+def _release_ctx_handle(handle: int | None) -> None:
+    if handle is None:
+        return
+    _CTX_HANDLE_REGISTRY.pop(handle, None)
+
+
+def _stream_handle(stream: Any | None) -> int:
+    if stream is None:
+        return 0
+    return int(getattr(stream, "cuda_stream", 0) or 0)
+
+
+def _copy_if_present(dst: torch.Tensor, src: torch.Tensor) -> None:
+    if dst.numel() > 0:
+        dst.copy_(src)
 
 
 def _clear_maxwell3d_cuda_graph_cache() -> None:
@@ -527,10 +551,62 @@ def _get_maxwell3d_cuda_graph_context(
     return ctx
 
 
+def _make_storage_streams(
+    device: torch.device, storage_mode: int
+) -> tuple[int, int, tuple[Any, ...]]:
+    if device.type != "cuda":
+        return 0, 0, ()
+
+    compute_stream = torch.cuda.current_stream(device=device)
+    storage_stream = None
+    if storage_mode in {STORAGE_CPU, STORAGE_DISK}:
+        storage_stream = torch.cuda.Stream(device=device)
+
+    handles = (_stream_handle(compute_stream), _stream_handle(storage_stream))
+    keepalive = tuple(
+        stream for stream in (compute_stream, storage_stream) if stream is not None
+    )
+    return handles[0], handles[1], keepalive
+
+
+def _make_compute_stream(
+    device: torch.device,
+) -> tuple[int, tuple[Any, ...]]:
+    compute_stream_handle, _, keepalive = _make_storage_streams(device, STORAGE_NONE)
+    return compute_stream_handle, keepalive
+
+
 def _make_tm_storage_streams(
-    device: torch.device, storage_mode: StorageMode
+    device: torch.device, storage_mode: int
 ) -> tuple[int, int, tuple[Any, ...]]:
     return _make_storage_streams(device, storage_mode)
+
+
+def _init_tm_wavefield(
+    field_0: torch.Tensor | None,
+    *,
+    n_shots: int,
+    size_with_batch: tuple[int, int, int],
+    fd_pad_list: list[int],
+    device: torch.device,
+    dtype: torch.dtype,
+    contiguous: bool = False,
+) -> torch.Tensor:
+    """Initialize TM wavefield tensors with asymmetric FD padding."""
+    if field_0 is not None:
+        if field_0.ndim == 2:
+            field_0 = field_0[None, :, :].expand(n_shots, -1, -1)
+        wavefield = create_or_pad(
+            field_0,
+            fd_pad_list,
+            device,
+            dtype,
+            size_with_batch,
+            mode="constant",
+        )
+    else:
+        wavefield = torch.zeros(size_with_batch, device=device, dtype=dtype)
+    return wavefield.contiguous() if contiguous else wavefield
 
 
 def _init_polarization_state(
@@ -1448,27 +1524,62 @@ def maxwell_python(
     # Which equals [n_shots, padded_ny, padded_nx]
     # =========================================================================
     size_with_batch = (n_shots, padded_ny, padded_nx)
-    (
-        Ey,
-        Hx,
-        Hz,
-        m_Ey_x,
-        m_Ey_z,
-        m_Hx_z,
-        m_Hz_x,
-    ) = prepare_initial_wavefields(
-        [Ey_0, Hx_0, Hz_0, m_Ey_x_0, m_Ey_z_0, m_Hx_z_0, m_Hz_x_0],
+
+    Ey = _init_tm_wavefield(
+        Ey_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
         device=device,
         dtype=dtype,
-        zero_interior_plan=[
-            (3, 1, pml_width_list),
-            (4, 0, pml_width_list),
-            (5, 0, pml_width_list),
-            (6, 1, pml_width_list),
-        ],
+    )
+    Hx = _init_tm_wavefield(
+        Hx_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+    )
+    Hz = _init_tm_wavefield(
+        Hz_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+    )
+    m_Ey_x = _init_tm_wavefield(
+        m_Ey_x_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+    )
+    m_Ey_z = _init_tm_wavefield(
+        m_Ey_z_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+    )
+    m_Hx_z = _init_tm_wavefield(
+        m_Hx_z_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+    )
+    m_Hz_x = _init_tm_wavefield(
+        m_Hz_x_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
     )
     polarization = None
     if has_dispersion and debye is not None:
@@ -1479,6 +1590,21 @@ def maxwell_python(
             device=device,
             dtype=dtype,
         )
+
+    # Zero out interior of PML auxiliary variables (optimization)
+    # PML memory variables should only be non-zero in PML regions.
+    # This works correctly even with user-provided initial states because:
+    # 1. The output preserves PML region (only fd_pad is cropped)
+    # 2. zero_interior only zeros the interior, preserving PML boundary values
+    # 3. Interior values are already zero in correctly propagated wavefields
+    # Dimension mapping for zero_interior:
+    # - m_Ey_x: x-direction auxiliary -> dim=1 (zero y-interior, keep x-boundaries)
+    # - m_Ey_z: y/z-direction auxiliary -> dim=0 (zero x-interior, keep y-boundaries)
+    # - m_Hx_z: y/z-direction auxiliary -> dim=0
+    # - m_Hz_x: x-direction auxiliary -> dim=1
+    pml_aux_dims = [1, 0, 0, 1]  # [m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x]
+    for wf, dim in zip([m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x], pml_aux_dims):
+        zero_interior(wf, fd_pad_list, pml_width_list, dim)
 
     # Set up PML profiles for the padded domain
     pml_profiles_list = staggered.set_pml_profiles(
@@ -2113,29 +2239,75 @@ def maxwell_c_cuda(
 
     # Initialize fields with padded dimensions
     size_with_batch = (n_shots, padded_ny, padded_nx)
-    (
-        Ey,
-        Hx,
-        Hz,
-        m_Ey_x,
-        m_Ey_z,
-        m_Hx_z,
-        m_Hz_x,
-    ) = prepare_initial_wavefields(
-        [Ey_0, Hx_0, Hz_0, m_Ey_x_0, m_Ey_z_0, m_Hx_z_0, m_Hz_x_0],
+    Ey = _init_tm_wavefield(
+        Ey_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
         device=device,
         dtype=dtype,
         contiguous=True,
-        zero_interior_plan=[
-            (3, 1, pml_width_list),
-            (4, 0, pml_width_list),
-            (5, 0, pml_width_list),
-            (6, 1, pml_width_list),
-        ],
     )
+    Hx = _init_tm_wavefield(
+        Hx_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+    )
+    Hz = _init_tm_wavefield(
+        Hz_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+    )
+    m_Ey_x = _init_tm_wavefield(
+        m_Ey_x_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+    )
+    m_Ey_z = _init_tm_wavefield(
+        m_Ey_z_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+    )
+    m_Hx_z = _init_tm_wavefield(
+        m_Hx_z_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+    )
+    m_Hz_x = _init_tm_wavefield(
+        m_Hz_x_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+    )
+
+    # Zero out interior of PML auxiliary variables (optimization)
+    # This works correctly with user-provided states (see forward pass comments)
+    pml_aux_dims = [1, 0, 0, 1]  # [m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x]
+    for wf, dim in zip([m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x], pml_aux_dims):
+        zero_interior(wf, fd_pad_list, pml_width_list, dim)
 
     # Set up PML profiles for the padded domain
     pml_profiles_list = staggered.set_pml_profiles(
@@ -2700,232 +2872,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
     """
 
     @staticmethod
-    def _parse_args(
-        *,
-        ca: torch.Tensor,
-        cb: torch.Tensor,
-        Ey: torch.Tensor,
-        nt: int,
-        n_shots: int,
-        n_receivers: int,
-        backend_device: torch.device,
-    ) -> dict[str, Any]:
-        runtime = make_native_runtime_context(
-            ca=ca,
-            cb=cb,
-            reference=Ey,
-            nt=nt,
-            n_shots=n_shots,
-            n_receivers=n_receivers,
-            receiver_dtype=ca.dtype,
-            extra={"backend_device": backend_device},
-        )
-        runtime["coeff_dtype"] = runtime.pop("dtype")
-        return runtime
-
-    @staticmethod
-    def _setup_storage(
-        *,
-        device: torch.device,
-        coeff_dtype: torch.dtype,
-        compute_precision: str,
-        storage_mode_str: str,
-        storage_format: int,
-        storage_path: str,
-        storage_compression: bool | str,
-        ny: int,
-        nx: int,
-        nt: int,
-        step_ratio: int,
-        n_shots: int,
-        ca_requires_grad: bool,
-        cb_requires_grad: bool,
-    ) -> dict[str, Any]:
-        storage_mode = StorageMode.NONE
-        storage_manager = None
-        stream_keepalive: tuple[Any, ...] = ()
-        compute_stream_handle = 0
-        storage_stream_handle = 0
-        shot_bytes_uncomp = 0
-        backward_storage_tensors: list[torch.Tensor] = []
-
-        needs_grad = ca_requires_grad or cb_requires_grad
-        if not needs_grad:
-            return {
-                "storage_mode": storage_mode,
-                "storage_manager": storage_manager,
-                "compute_stream_handle": compute_stream_handle,
-                "storage_stream_handle": storage_stream_handle,
-                "stream_keepalive": stream_keepalive,
-                "shot_bytes_uncomp": shot_bytes_uncomp,
-                "backward_storage_tensors": backward_storage_tensors,
-            }
-
-        storage_mode = get_storage_mode(storage_mode_str, device)
-        compute_stream_handle, storage_stream_handle, stream_keepalive = (
-            _make_tm_storage_streams(device, storage_mode)
-        )
-
-        num_elements_per_shot = ny * nx
-        _, store_dtype, _, resolved_storage_format = _resolve_tm2d_storage_spec(
-            compute_precision=compute_precision,
-            storage_compression=storage_compression,
-            dtype=coeff_dtype,
-            device=device,
-            context="storage_compression",
-        )
-        if resolved_storage_format != storage_format:
-            raise RuntimeError("Mismatched TM2D storage format resolution.")
-
-        shot_bytes_uncomp = num_elements_per_shot * store_dtype.itemsize
-        storage_manager = setup_storage(
-            shot_shape=(ny, nx),
-            dtype=store_dtype,
-            n_shots=n_shots,
-            nt=nt,
-            step_ratio=step_ratio,
-            storage_mode=storage_mode,
-            storage_path=storage_path,
-            device=device,
-            requires_grad_list=[ca_requires_grad, cb_requires_grad],
-            allocation_kwargs_list=[{"host_linear": True}, {"host_linear": True}],
-        )
-        for allocation in storage_manager.allocations:
-            backward_storage_tensors.extend(
-                [allocation.store_device, allocation.store_host]
-            )
-        unpacked_allocations = unpack_storage_allocations(
-            storage_manager=storage_manager,
-            storage_mode=storage_mode,
-            specs=[
-                ("ey_store_1", "ey_store_3", "ey_filenames_ptr"),
-                ("curl_store_1", "curl_store_3", "curl_filenames_ptr"),
-            ],
-        )
-
-        return {
-            "storage_mode": storage_mode,
-            "storage_manager": storage_manager,
-            "compute_stream_handle": compute_stream_handle,
-            "storage_stream_handle": storage_stream_handle,
-            "stream_keepalive": stream_keepalive,
-            "shot_bytes_uncomp": shot_bytes_uncomp,
-            "backward_storage_tensors": backward_storage_tensors,
-            **unpacked_allocations,
-        }
-
-    @staticmethod
-    def _save_ctx(
-        ctx: Any,
-        *,
-        ctx_data: dict[str, Any],
-        tensors: tuple[torch.Tensor, ...],
-        forward_tensors: tuple[torch.Tensor, ...],
-        attrs: dict[str, Any],
-    ) -> None:
-        save_storage_context(
-            ctx,
-            tensors=tensors,
-            forward_tensors=forward_tensors,
-            attrs=attrs,
-            storage_manager=ctx_data["storage_manager"],
-        )
-        ctx.stream_keepalive = ctx_data["stream_keepalive"]
-        ctx.storage_mode = ctx_data["storage_mode"]
-        ctx.storage_format = ctx_data["storage_format"]
-        ctx.shot_bytes_uncomp = ctx_data["shot_bytes_uncomp"]
-        ctx.source_amplitudes_scaled = ctx_data["source_amplitudes_scaled"]
-        ctx.ca_requires_grad = ctx_data["ca_requires_grad"]
-        ctx.cb_requires_grad = ctx_data["cb_requires_grad"]
-        ctx.scale_ctx = ctx_data["scale_ctx"]
-
-    @staticmethod
-    def _prepare_grad_wavefields(
-        *,
-        ctx: Any,
-        grad_r: torch.Tensor | None,
-        coeff_dtype: torch.dtype,
-        device: torch.device,
-    ) -> dict[str, torch.Tensor]:
-        if grad_r is None or grad_r.numel() == 0:
-            grad_r = torch.zeros(
-                ctx.nt,
-                ctx.n_shots,
-                ctx.n_receivers,
-                device=device,
-                dtype=coeff_dtype,
-            )
-        else:
-            grad_r = grad_r.contiguous()
-
-        lambda_ey = torch.zeros(
-            ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
-        )
-        lambda_hx = torch.zeros_like(lambda_ey)
-        lambda_hz = torch.zeros_like(lambda_ey)
-        m_lambda_ey_x = torch.zeros_like(lambda_ey)
-        m_lambda_ey_z = torch.zeros_like(lambda_ey)
-        m_lambda_hx_z = torch.zeros_like(lambda_ey)
-        m_lambda_hz_x = torch.zeros_like(lambda_ey)
-
-        if ctx.n_sources > 0:
-            grad_f = torch.zeros(
-                ctx.nt,
-                ctx.n_shots,
-                ctx.n_sources,
-                device=device,
-                dtype=coeff_dtype,
-            )
-        else:
-            grad_f = torch.empty(0, device=device, dtype=coeff_dtype)
-
-        if ctx.ca_requires_grad:
-            grad_ca = (
-                torch.zeros(
-                    ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
-                )
-                if ctx.ca_batched
-                else torch.zeros(ctx.ny, ctx.nx, device=device, dtype=coeff_dtype)
-            )
-            grad_ca_shot = torch.zeros(
-                ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
-            )
-        else:
-            grad_ca = torch.empty(0, device=device, dtype=coeff_dtype)
-            grad_ca_shot = torch.empty(0, device=device, dtype=coeff_dtype)
-
-        if ctx.cb_requires_grad:
-            grad_cb = (
-                torch.zeros(
-                    ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
-                )
-                if ctx.cb_batched
-                else torch.zeros(ctx.ny, ctx.nx, device=device, dtype=coeff_dtype)
-            )
-            grad_cb_shot = torch.zeros(
-                ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
-            )
-        else:
-            grad_cb = torch.empty(0, device=device, dtype=coeff_dtype)
-            grad_cb_shot = torch.empty(0, device=device, dtype=coeff_dtype)
-
-        return {
-            "grad_r": grad_r,
-            "lambda_ey": lambda_ey,
-            "lambda_hx": lambda_hx,
-            "lambda_hz": lambda_hz,
-            "m_lambda_ey_x": m_lambda_ey_x,
-            "m_lambda_ey_z": m_lambda_ey_z,
-            "m_lambda_hx_z": m_lambda_hx_z,
-            "m_lambda_hz_x": m_lambda_hz_x,
-            "grad_f": grad_f,
-            "grad_ca": grad_ca,
-            "grad_cb": grad_cb,
-            "grad_ca_shot": grad_ca_shot,
-            "grad_cb_shot": grad_cb_shot,
-        }
-
-    @staticmethod
     def forward(
         ca: torch.Tensor,
         cb: torch.Tensor,
@@ -2988,73 +2934,154 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         """Performs the forward propagation of the Maxwell TM equations."""
         from . import backend_utils
 
-        parsed = MaxwellTMForwardFunc._parse_args(
-            ca=ca,
-            cb=cb,
-            Ey=Ey,
-            nt=nt,
-            n_shots=n_shots,
-            n_receivers=n_receivers,
-            backend_device=backend_device,
-        )
-        device = parsed["device"]
-        coeff_dtype = parsed["coeff_dtype"]
-        _backend_device = parsed["backend_device"]
+        device = Ey.device
+        coeff_dtype = ca.dtype
+        receiver_dtype = coeff_dtype
+        _backend_device = backend_device
         variant = ""
-        receiver_amplitudes = parsed["receiver_amplitudes"]
-        ca_requires_grad = parsed["ca_requires_grad"]
-        cb_requires_grad = parsed["cb_requires_grad"]
+
+        ca_requires_grad = ca.requires_grad
+        cb_requires_grad = cb.requires_grad
         needs_grad = ca_requires_grad or cb_requires_grad
 
-        storage_setup = MaxwellTMForwardFunc._setup_storage(
-            device=device,
-            coeff_dtype=coeff_dtype,
-            compute_precision=compute_precision,
-            storage_mode_str=storage_mode_str,
-            storage_format=storage_format,
-            storage_path=storage_path,
-            storage_compression=storage_compression,
-            ny=ny,
-            nx=nx,
-            nt=nt,
-            step_ratio=step_ratio,
-            n_shots=n_shots,
-            ca_requires_grad=ca_requires_grad,
-            cb_requires_grad=cb_requires_grad,
+        # Initialize receiver amplitudes
+        if n_receivers > 0:
+            receiver_amplitudes = torch.zeros(
+                nt, n_shots, n_receivers, device=device, dtype=receiver_dtype
+            )
+        else:
+            receiver_amplitudes = torch.empty(0, device=device, dtype=receiver_dtype)
+
+        # Get device index for CUDA
+        device_idx = (
+            device.index if device.type == "cuda" and device.index is not None else 0
         )
 
-        callback_chunk = callback_frequency if forward_callback is not None else nt // step_ratio
-
-        def run_forward_callback(step: int, step_count: int) -> None:
-            if forward_callback is None:
-                return
-            callback_wavefields = _physical_tm2d_callback_wavefields(
-                {
-                    "Ey": Ey,
-                    "Hx": Hx,
-                    "Hz": Hz,
-                    "m_Ey_x": m_Ey_x,
-                    "m_Ey_z": m_Ey_z,
-                    "m_Hx_z": m_Hx_z,
-                    "m_Hz_x": m_Hz_x,
-                },
-                scale_ctx=scale_ctx,
-            )
-            forward_callback(
-                CallbackState(
-                    dt=dt,
-                    step=step + step_count,
-                    nt=nt // step_ratio,
-                    wavefields=callback_wavefields,
-                    models=models,
-                    gradients={},
-                    fd_pad=list(fd_pad),
-                    pml_width=list(pml_width),
-                    is_backward=False,
-                )
-            )
+        backward_storage_tensors: list[torch.Tensor] = []
+        backward_storage_objects: list[Any] = []
+        backward_storage_filename_arrays: list[Any] = []
+        storage_mode = STORAGE_NONE
+        shot_bytes_uncomp = 0
+        stream_keepalive: tuple[Any, ...] = ()
 
         if needs_grad:
+            import ctypes
+
+            # Resolve storage mode and sizes
+            if str(device) == "cpu" and storage_mode_str == "cpu":
+                storage_mode_str = "device"
+            storage_mode = storage_mode_to_int(storage_mode_str)
+            compute_stream_handle, storage_stream_handle, stream_keepalive = (
+                _make_tm_storage_streams(device, storage_mode)
+            )
+
+            num_elements_per_shot = ny * nx
+            _, store_dtype, _, resolved_storage_format = _resolve_tm2d_storage_spec(
+                compute_precision=compute_precision,
+                storage_compression=storage_compression,
+                dtype=coeff_dtype,
+                device=device,
+                context="storage_compression",
+            )
+            if resolved_storage_format != storage_format:
+                raise RuntimeError("Mismatched TM2D storage format resolution.")
+
+            shot_bytes_uncomp = num_elements_per_shot * store_dtype.itemsize
+
+            num_steps_stored = (nt + step_ratio - 1) // step_ratio
+
+            # Storage buffers and filename arrays (mirrors Deepwave)
+            char_ptr_type = ctypes.c_char_p
+            is_cuda = device.type == "cuda"
+
+            def alloc_storage(requires_grad_cond: bool):
+                store_1 = torch.empty(0)
+                store_3 = torch.empty(0)
+                filenames_arr = (char_ptr_type * 0)()
+
+                if requires_grad_cond and storage_mode != STORAGE_NONE:
+                    if storage_mode == STORAGE_DEVICE:
+                        store_1 = torch.empty(
+                            num_steps_stored,
+                            n_shots,
+                            ny,
+                            nx,
+                            device=device,
+                            dtype=store_dtype,
+                        )
+                    elif storage_mode == STORAGE_CPU:
+                        # Multi-buffer device staging to overlap D2H copies.
+                        store_1 = torch.empty(
+                            _CPU_STORAGE_BUFFERS,
+                            n_shots,
+                            ny,
+                            nx,
+                            device=device,
+                            dtype=store_dtype,
+                        )
+                        store_3 = torch.empty(
+                            num_steps_stored,
+                            n_shots,
+                            shot_bytes_uncomp // store_dtype.itemsize,
+                            device="cpu",
+                            pin_memory=True,
+                            dtype=store_dtype,
+                        )
+                    elif storage_mode == STORAGE_DISK:
+                        storage_obj = TemporaryStorage(
+                            storage_path, 1 if is_cuda else n_shots
+                        )
+                        backward_storage_objects.append(storage_obj)
+                        filenames_list = [
+                            f.encode("utf-8") for f in storage_obj.get_filenames()
+                        ]
+                        filenames_arr = (char_ptr_type * len(filenames_list))()
+                        for i_file, f_name in enumerate(filenames_list):
+                            filenames_arr[i_file] = ctypes.cast(
+                                ctypes.create_string_buffer(f_name), char_ptr_type
+                            )
+
+                        if is_cuda:
+                            # Disk mode keeps a small device/host ring so D2H/H2D
+                            # can overlap with async file I/O.
+                            store_1 = torch.empty(
+                                _CPU_STORAGE_BUFFERS,
+                                n_shots,
+                                ny,
+                                nx,
+                                device=device,
+                                dtype=store_dtype,
+                            )
+                            store_3 = torch.empty(
+                                _CPU_STORAGE_BUFFERS,
+                                n_shots,
+                                shot_bytes_uncomp // store_dtype.itemsize,
+                                device="cpu",
+                                pin_memory=True,
+                                dtype=store_dtype,
+                            )
+                        else:
+                            store_1 = torch.empty(
+                                n_shots, ny, nx, device=device, dtype=store_dtype
+                            )
+
+                backward_storage_tensors.extend([store_1, store_3])
+                backward_storage_filename_arrays.append(filenames_arr)
+
+                filenames_ptr = (
+                    ctypes.cast(filenames_arr, ctypes.c_void_p)
+                    if storage_mode == STORAGE_DISK
+                    else 0
+                )
+
+                return store_1, store_3, filenames_ptr
+
+            ey_store_1, ey_store_3, ey_filenames_ptr = alloc_storage(ca_requires_grad)
+            curl_store_1, curl_store_3, curl_filenames_ptr = alloc_storage(
+                cb_requires_grad
+            )
+
+            # Get the backend function with storage
             forward_func = backend_utils.get_backend_function(
                 "maxwell_tm",
                 "forward_with_storage",
@@ -3064,9 +3091,20 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 variant=variant,
             )
 
-            def run_chunk(step: int, step_count: int) -> None:
-                step_nt = step_count * step_ratio
+            # Determine effective callback frequency
+            if forward_callback is None:
+                effective_callback_freq = nt // step_ratio
+            else:
+                effective_callback_freq = callback_frequency
+
+            # Chunked forward propagation with callback support
+            for step in range(0, nt // step_ratio, effective_callback_freq):
+                step_nt = (
+                    min(effective_callback_freq, nt // step_ratio - step) * step_ratio
+                )
                 start_t = step * step_ratio
+
+                # Call the C/CUDA function with storage for this chunk
                 forward_func(
                     backend_utils.tensor_to_ptr(ca),
                     backend_utils.tensor_to_ptr(cb),
@@ -3080,12 +3118,12 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                     backend_utils.tensor_to_ptr(m_Hx_z),
                     backend_utils.tensor_to_ptr(m_Hz_x),
                     backend_utils.tensor_to_ptr(receiver_amplitudes),
-                    backend_utils.tensor_to_ptr(storage_setup["ey_store_1"]),
-                    backend_utils.tensor_to_ptr(storage_setup["ey_store_3"]),
-                    storage_setup["ey_filenames_ptr"],
-                    backend_utils.tensor_to_ptr(storage_setup["curl_store_1"]),
-                    backend_utils.tensor_to_ptr(storage_setup["curl_store_3"]),
-                    storage_setup["curl_filenames_ptr"],
+                    backend_utils.tensor_to_ptr(ey_store_1),
+                    backend_utils.tensor_to_ptr(ey_store_3),
+                    ey_filenames_ptr,
+                    backend_utils.tensor_to_ptr(curl_store_1),
+                    backend_utils.tensor_to_ptr(curl_store_3),
+                    curl_filenames_ptr,
                     backend_utils.tensor_to_ptr(ay),
                     backend_utils.tensor_to_ptr(by),
                     backend_utils.tensor_to_ptr(ay_h),
@@ -3103,39 +3141,62 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                     rdy,
                     rdx,
                     dt,
-                    step_nt,
+                    step_nt,  # number of steps in this chunk
                     n_shots,
                     ny,
                     nx,
                     n_sources,
                     n_receivers,
                     step_ratio,
-                    int(storage_setup["storage_mode"]),
+                    storage_mode,
                     storage_format,
-                    storage_setup["shot_bytes_uncomp"],
+                    shot_bytes_uncomp,
                     ca_requires_grad,
                     cb_requires_grad,
                     ca_batched,
                     cb_batched,
                     cq_batched,
-                    start_t,
+                    start_t,  # starting time step
                     pml_y0,
                     pml_x0,
                     pml_y1,
                     pml_x1,
                     n_threads,
-                    parsed["device_idx"],
-                    storage_setup["compute_stream_handle"],
-                    storage_setup["storage_stream_handle"],
+                    device_idx,
+                    compute_stream_handle,
+                    storage_stream_handle,
                 )
-                run_forward_callback(step, step_count)
 
-            execute_stepping_loop(
-                total_steps=nt // step_ratio,
-                chunk_size=callback_chunk,
-                run_chunk=run_chunk,
-            )
+                # Call forward callback after each chunk
+                if forward_callback is not None:
+                    callback_wavefields = {
+                        "Ey": Ey,
+                        "Hx": Hx,
+                        "Hz": Hz,
+                        "m_Ey_x": m_Ey_x,
+                        "m_Ey_z": m_Ey_z,
+                        "m_Hx_z": m_Hx_z,
+                        "m_Hz_x": m_Hz_x,
+                    }
+                    callback_wavefields = _physical_tm2d_callback_wavefields(
+                        callback_wavefields,
+                        scale_ctx=scale_ctx,
+                    )
+                    forward_callback(
+                        CallbackState(
+                            dt=dt,
+                            step=step + step_nt // step_ratio,
+                            nt=nt // step_ratio,
+                            wavefields=callback_wavefields,
+                            models=models,
+                            gradients={},
+                            fd_pad=list(fd_pad),
+                            pml_width=list(pml_width),
+                            is_backward=False,
+                        )
+                    )
         else:
+            # Use regular forward without storage
             forward_func = backend_utils.get_backend_function(
                 "maxwell_tm",
                 "forward",
@@ -3144,14 +3205,21 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 _backend_device,
                 variant=variant,
             )
+
+            if forward_callback is None:
+                effective_callback_freq = nt // step_ratio
+            else:
+                effective_callback_freq = callback_frequency
             compute_stream_handle, compute_stream_keepalive = _make_compute_stream(
                 _backend_device
             )
-            storage_setup["stream_keepalive"] = compute_stream_keepalive
 
-            def run_chunk(step: int, step_count: int) -> None:
-                step_nt = step_count * step_ratio
+            for step in range(0, nt // step_ratio, effective_callback_freq):
+                step_nt = (
+                    min(effective_callback_freq, nt // step_ratio - step) * step_ratio
+                )
                 start_t = step * step_ratio
+
                 forward_func(
                     backend_utils.tensor_to_ptr(ca),
                     backend_utils.tensor_to_ptr(cb),
@@ -3198,29 +3266,50 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                     pml_y1,
                     pml_x1,
                     n_threads,
-                    parsed["device_idx"],
+                    device_idx,
                     compute_stream_handle,
                 )
-                run_forward_callback(step, step_count)
 
-            execute_stepping_loop(
-                total_steps=nt // step_ratio,
-                chunk_size=callback_chunk,
-                run_chunk=run_chunk,
-            )
+                if forward_callback is not None:
+                    callback_wavefields = _physical_tm2d_callback_wavefields(
+                        {
+                            "Ey": Ey,
+                            "Hx": Hx,
+                            "Hz": Hz,
+                            "m_Ey_x": m_Ey_x,
+                            "m_Ey_z": m_Ey_z,
+                            "m_Hx_z": m_Hx_z,
+                            "m_Hz_x": m_Hz_x,
+                        },
+                        scale_ctx=scale_ctx,
+                    )
+                    forward_callback(
+                        CallbackState(
+                            dt=dt,
+                            step=step + step_nt // step_ratio,
+                            nt=nt // step_ratio,
+                            wavefields=callback_wavefields,
+                            models=models,
+                            gradients={},
+                            fd_pad=list(fd_pad),
+                            pml_width=list(pml_width),
+                            is_backward=False,
+                        )
+                    )
 
         ctx_data = {
-            "backward_storage_tensors": storage_setup["backward_storage_tensors"],
-            "storage_manager": storage_setup["storage_manager"],
-            "storage_mode": storage_setup["storage_mode"],
+            "backward_storage_tensors": backward_storage_tensors,
+            "backward_storage_objects": backward_storage_objects,
+            "backward_storage_filename_arrays": backward_storage_filename_arrays,
+            "storage_mode": storage_mode,
             "storage_format": storage_format,
-            "shot_bytes_uncomp": storage_setup["shot_bytes_uncomp"],
+            "shot_bytes_uncomp": shot_bytes_uncomp,
             "source_amplitudes_scaled": source_amplitudes_scaled,
             "ca_requires_grad": ca_requires_grad,
             "cb_requires_grad": cb_requires_grad,
             "compute_precision": compute_precision,
             "scale_ctx": scale_ctx,
-            "stream_keepalive": storage_setup["stream_keepalive"],
+            "stream_keepalive": stream_keepalive,
         }
         ctx_handle = _register_ctx_handle(ctx_data)
 
@@ -3311,78 +3400,84 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         ctx_data = _get_ctx_handle(ctx_handle_id)
         ctx._ctx_handle_id = ctx_handle_id
         backward_storage_tensors = ctx_data["backward_storage_tensors"]
-        MaxwellTMForwardFunc._save_ctx(
-            ctx,
-            ctx_data=ctx_data,
-            tensors=(
-                ca,
-                cb,
-                cq,
-                ay,
-                by,
-                ay_h,
-                by_h,
-                ax,
-                bx,
-                ax_h,
-                bx_h,
-                ky,
-                ky_h,
-                kx,
-                kx_h,
-                sources_i,
-                receivers_i,
-                *backward_storage_tensors,
-            ),
-            forward_tensors=(
-                ca,
-                cb,
-                cq,
-                ay,
-                by,
-                ay_h,
-                by_h,
-                ax,
-                bx,
-                ax_h,
-                bx_h,
-                ky,
-                ky_h,
-                kx,
-                kx_h,
-                sources_i,
-                receivers_i,
-            ),
-            attrs={
-                "_ctx_handle_id": ctx_handle_id,
-                "rdy": rdy,
-                "rdx": rdx,
-                "dt": dt,
-                "nt": nt,
-                "n_shots": n_shots,
-                "ny": ny,
-                "nx": nx,
-                "n_sources": n_sources,
-                "n_receivers": n_receivers,
-                "step_ratio": step_ratio,
-                "accuracy": accuracy,
-                "ca_batched": ca_batched,
-                "cb_batched": cb_batched,
-                "cq_batched": cq_batched,
-                "pml_y0": pml_y0,
-                "pml_x0": pml_x0,
-                "pml_y1": pml_y1,
-                "pml_x1": pml_x1,
-                "fd_pad": fd_pad,
-                "pml_width": pml_width,
-                "models": models,
-                "backward_callback": backward_callback,
-                "callback_frequency": callback_frequency,
-                "n_threads": n_threads,
-                "_backend_device": _backend_device,
-                "compute_precision": compute_precision,
-            },
+
+        ctx.save_for_backward(
+            ca,
+            cb,
+            cq,
+            ay,
+            by,
+            ay_h,
+            by_h,
+            ax,
+            bx,
+            ax_h,
+            bx_h,
+            ky,
+            ky_h,
+            kx,
+            kx_h,
+            sources_i,
+            receivers_i,
+            *backward_storage_tensors,
         )
+        ctx.save_for_forward(
+            ca,
+            cb,
+            cq,
+            ay,
+            by,
+            ay_h,
+            by_h,
+            ax,
+            bx,
+            ax_h,
+            bx_h,
+            ky,
+            ky_h,
+            kx,
+            kx_h,
+            sources_i,
+            receivers_i,
+        )
+        ctx.backward_storage_objects = ctx_data["backward_storage_objects"]
+        ctx.backward_storage_filename_arrays = ctx_data[
+            "backward_storage_filename_arrays"
+        ]
+        ctx.stream_keepalive = ctx_data["stream_keepalive"]
+        ctx.rdy = rdy
+        ctx.rdx = rdx
+        ctx.dt = dt
+        ctx.nt = nt
+        ctx.n_shots = n_shots
+        ctx.ny = ny
+        ctx.nx = nx
+        ctx.n_sources = n_sources
+        ctx.n_receivers = n_receivers
+        ctx.step_ratio = step_ratio
+        ctx.accuracy = accuracy
+        ctx.ca_batched = ca_batched
+        ctx.cb_batched = cb_batched
+        ctx.cq_batched = cq_batched
+        ctx.pml_y0 = pml_y0
+        ctx.pml_x0 = pml_x0
+        ctx.pml_y1 = pml_y1
+        ctx.pml_x1 = pml_x1
+        ctx.ca_requires_grad = ctx_data["ca_requires_grad"]
+        ctx.cb_requires_grad = ctx_data["cb_requires_grad"]
+        ctx.storage_mode = ctx_data["storage_mode"]
+        ctx.storage_format = ctx_data["storage_format"]
+        ctx.shot_bytes_uncomp = ctx_data["shot_bytes_uncomp"]
+        ctx.fd_pad = fd_pad
+        ctx.pml_width = pml_width
+        ctx.models = models
+        ctx.backward_callback = backward_callback
+        ctx.callback_frequency = callback_frequency
+        ctx.source_amplitudes_scaled = ctx_data["source_amplitudes_scaled"]
+        ctx.n_threads = n_threads
+        ctx._backend_device = _backend_device
+        ctx.compute_precision = compute_precision
+        ctx.scale_ctx = ctx_data["scale_ctx"]
 
     @staticmethod
     def backward(
@@ -3434,6 +3529,8 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         _backend_device = ctx._backend_device
         scale_ctx = ctx.scale_ctx
         variant = ""
+        compute_precision = ctx.compute_precision
+
         rdy = ctx.rdy
         rdx = ctx.rdx
         dt = ctx.dt
@@ -3459,29 +3556,73 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         storage_format = ctx.storage_format
         shot_bytes_uncomp = ctx.shot_bytes_uncomp
 
-        filename_ptrs = get_storage_filename_ptrs(ctx.storage_manager, storage_mode)
-        ey_filenames_ptr = filename_ptrs[0] if filename_ptrs else 0
-        curl_filenames_ptr = filename_ptrs[1] if len(filename_ptrs) > 1 else 0
+        import ctypes
 
-        grad_state = MaxwellTMForwardFunc._prepare_grad_wavefields(
-            ctx=ctx,
-            grad_r=grad_r,
-            coeff_dtype=coeff_dtype,
-            device=device,
-        )
-        grad_r = grad_state["grad_r"]
-        lambda_ey = grad_state["lambda_ey"]
-        lambda_hx = grad_state["lambda_hx"]
-        lambda_hz = grad_state["lambda_hz"]
-        m_lambda_ey_x = grad_state["m_lambda_ey_x"]
-        m_lambda_ey_z = grad_state["m_lambda_ey_z"]
-        m_lambda_hx_z = grad_state["m_lambda_hx_z"]
-        m_lambda_hz_x = grad_state["m_lambda_hz_x"]
-        grad_f = grad_state["grad_f"]
-        grad_ca = grad_state["grad_ca"]
-        grad_cb = grad_state["grad_cb"]
-        grad_ca_shot = grad_state["grad_ca_shot"]
-        grad_cb_shot = grad_state["grad_cb_shot"]
+        if storage_mode == STORAGE_DISK:
+            ey_filenames_ptr = ctypes.cast(
+                ctx.backward_storage_filename_arrays[0], ctypes.c_void_p
+            )
+            curl_filenames_ptr = ctypes.cast(
+                ctx.backward_storage_filename_arrays[1], ctypes.c_void_p
+            )
+        else:
+            ey_filenames_ptr = 0
+            curl_filenames_ptr = 0
+
+        # Ensure grad_r is contiguous
+        if grad_r is None or grad_r.numel() == 0:
+            grad_r = torch.zeros(
+                nt,
+                n_shots,
+                n_receivers,
+                device=device,
+                dtype=coeff_dtype,
+            )
+        else:
+            grad_r = grad_r.contiguous()
+
+        field_dtype = coeff_dtype
+        memory_dtype = coeff_dtype
+        grad_dtype = coeff_dtype
+
+        # Initialize adjoint fields (lambda fields)
+        lambda_ey = torch.zeros(n_shots, ny, nx, device=device, dtype=field_dtype)
+        lambda_hx = torch.zeros(n_shots, ny, nx, device=device, dtype=field_dtype)
+        lambda_hz = torch.zeros(n_shots, ny, nx, device=device, dtype=field_dtype)
+
+        # Initialize adjoint PML memory variables
+        m_lambda_ey_x = torch.zeros(n_shots, ny, nx, device=device, dtype=memory_dtype)
+        m_lambda_ey_z = torch.zeros(n_shots, ny, nx, device=device, dtype=memory_dtype)
+        m_lambda_hx_z = torch.zeros(n_shots, ny, nx, device=device, dtype=memory_dtype)
+        m_lambda_hz_x = torch.zeros(n_shots, ny, nx, device=device, dtype=memory_dtype)
+
+        # Allocate gradient outputs
+        if n_sources > 0:
+            grad_f = torch.zeros(nt, n_shots, n_sources, device=device, dtype=grad_dtype)
+        else:
+            grad_f = torch.empty(0, device=device, dtype=grad_dtype)
+
+        if ca_requires_grad:
+            if ca_batched:
+                grad_ca = torch.zeros(n_shots, ny, nx, device=device, dtype=grad_dtype)
+            else:
+                grad_ca = torch.zeros(ny, nx, device=device, dtype=grad_dtype)
+            # Per-shot workspace for gradient accumulation (needed for CUDA)
+            grad_ca_shot = torch.zeros(n_shots, ny, nx, device=device, dtype=grad_dtype)
+        else:
+            grad_ca = torch.empty(0, device=device, dtype=grad_dtype)
+            grad_ca_shot = torch.empty(0, device=device, dtype=grad_dtype)
+
+        if cb_requires_grad:
+            if cb_batched:
+                grad_cb = torch.zeros(n_shots, ny, nx, device=device, dtype=grad_dtype)
+            else:
+                grad_cb = torch.zeros(ny, nx, device=device, dtype=grad_dtype)
+            # Per-shot workspace for gradient accumulation (needed for CUDA)
+            grad_cb_shot = torch.zeros(n_shots, ny, nx, device=device, dtype=grad_dtype)
+        else:
+            grad_cb = torch.empty(0, device=device, dtype=grad_dtype)
+            grad_cb_shot = torch.empty(0, device=device, dtype=grad_dtype)
 
         # Get device index for CUDA
         device_idx = (
@@ -3512,11 +3653,19 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             variant=variant,
         )
 
-        callback_chunk = callback_frequency if backward_callback is not None else nt // step_ratio
+        # Determine effective callback frequency
+        if backward_callback is None:
+            effective_callback_freq = nt // step_ratio
+        else:
+            effective_callback_freq = callback_frequency
 
-        def run_chunk(step: int, step_count: int) -> None:
-            step_nt = step_count * step_ratio
+        # Chunked backward propagation with callback support
+        # Backward propagation goes from nt to 0
+        for step in range(nt // step_ratio, 0, -effective_callback_freq):
+            step_nt = min(step, effective_callback_freq) * step_ratio
             start_t = step * step_ratio
+
+            # Call the C/CUDA backward function for this chunk
             backward_func(
                 backend_utils.tensor_to_ptr(ca),
                 backend_utils.tensor_to_ptr(cb),
@@ -3582,7 +3731,12 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 compute_stream_handle,
                 storage_stream_handle,
             )
+
+            # Call backward callback after each chunk
             if backward_callback is not None:
+                # The time step index is step - 1 because the callback is
+                # executed after the calculations for the current backward
+                # step are complete
                 callback_wavefields = {
                     "lambda_Ey": lambda_ey,
                     "lambda_Hx": lambda_hx,
@@ -3639,12 +3793,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                         is_backward=True,
                     )
                 )
-        execute_stepping_loop(
-            total_steps=nt // step_ratio,
-            chunk_size=callback_chunk,
-            run_chunk=run_chunk,
-            reverse=True,
-        )
 
         # Return gradients for all inputs
         # Order: ca, cb, cq, source_amplitudes_scaled,
@@ -4274,7 +4422,7 @@ def maxwell3d_python(
         n_threads,
         experimental_cuda_graph,
     )
-    from .padding import create_or_pad
+    from .padding import create_or_pad, zero_interior
 
     if epsilon.ndim != 3:
         raise RuntimeError("epsilon must be 3D")
@@ -4393,66 +4541,40 @@ def maxwell3d_python(
     cq = cq[None, :, :, :]
 
     size_with_batch = (n_shots, padded_nz, padded_ny, padded_nx)
-    (
-        Ex,
-        Ey,
-        Ez,
-        Hx,
-        Hy,
-        Hz,
-        m_hz_y,
-        m_hy_z,
-        m_hx_z,
-        m_hz_x,
-        m_hy_x,
-        m_hx_y,
-        m_ey_z,
-        m_ez_y,
-        m_ez_x,
-        m_ex_z,
-        m_ex_y,
-        m_ey_x,
-    ) = prepare_initial_wavefields(
-        [
-            Ex_0,
-            Ey_0,
-            Ez_0,
-            Hx_0,
-            Hy_0,
-            Hz_0,
-            m_hz_y_0,
-            m_hy_z_0,
-            m_hx_z_0,
-            m_hz_x_0,
-            m_hy_x_0,
-            m_hx_y_0,
-            m_ey_z_0,
-            m_ez_y_0,
-            m_ez_x_0,
-            m_ex_z_0,
-            m_ex_y_0,
-            m_ey_x_0,
-        ],
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        zero_interior_plan=[
-            (6, 1, pml_width_list),
-            (7, 0, pml_width_list),
-            (8, 0, pml_width_list),
-            (9, 2, pml_width_list),
-            (10, 2, pml_width_list),
-            (11, 1, pml_width_list),
-            (12, 0, pml_width_list),
-            (13, 1, pml_width_list),
-            (14, 2, pml_width_list),
-            (15, 0, pml_width_list),
-            (16, 1, pml_width_list),
-            (17, 2, pml_width_list),
-        ],
-    )
+
+    def init_wavefield(field_0: torch.Tensor | None) -> torch.Tensor:
+        if field_0 is not None:
+            if field_0.ndim == 3:
+                field_0 = field_0[None, :, :, :].expand(n_shots, -1, -1, -1)
+            return create_or_pad(
+                field_0,
+                fd_pad_list,
+                device,
+                dtype,
+                size_with_batch,
+                mode="constant",
+            )
+        return torch.zeros(size_with_batch, device=device, dtype=dtype)
+
+    Ex = init_wavefield(Ex_0)
+    Ey = init_wavefield(Ey_0)
+    Ez = init_wavefield(Ez_0)
+    Hx = init_wavefield(Hx_0)
+    Hy = init_wavefield(Hy_0)
+    Hz = init_wavefield(Hz_0)
+
+    m_hz_y = init_wavefield(m_hz_y_0)
+    m_hy_z = init_wavefield(m_hy_z_0)
+    m_hx_z = init_wavefield(m_hx_z_0)
+    m_hz_x = init_wavefield(m_hz_x_0)
+    m_hy_x = init_wavefield(m_hy_x_0)
+    m_hx_y = init_wavefield(m_hx_y_0)
+    m_ey_z = init_wavefield(m_ey_z_0)
+    m_ez_y = init_wavefield(m_ez_y_0)
+    m_ez_x = init_wavefield(m_ez_x_0)
+    m_ex_z = init_wavefield(m_ex_z_0)
+    m_ex_y = init_wavefield(m_ex_y_0)
+    m_ey_x = init_wavefield(m_ey_x_0)
     pol_ex = pol_ey = pol_ez = None
     if has_dispersion and debye is not None:
         pol_ex = _init_polarization_state(
@@ -4464,6 +4586,23 @@ def maxwell3d_python(
         )
         pol_ey = torch.zeros_like(pol_ex)
         pol_ez = torch.zeros_like(pol_ex)
+
+    pml_aux = [
+        (m_hz_y, 1),
+        (m_hy_z, 0),
+        (m_hx_z, 0),
+        (m_hz_x, 2),
+        (m_hy_x, 2),
+        (m_hx_y, 1),
+        (m_ey_z, 0),
+        (m_ez_y, 1),
+        (m_ez_x, 2),
+        (m_ex_z, 0),
+        (m_ex_y, 1),
+        (m_ey_x, 2),
+    ]
+    for wf, dim in pml_aux:
+        zero_interior(wf, fd_pad_list, pml_width_list, dim)
 
     from . import staggered as _staggered
 
@@ -4727,190 +4866,6 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
     """Autograd function for 3D C/CUDA backend propagation."""
 
     @staticmethod
-    def _parse_args(
-        *,
-        ca: torch.Tensor,
-        cb: torch.Tensor,
-        wavefields: tuple[torch.Tensor, ...],
-        meta: dict[str, Any],
-    ) -> dict[str, Any]:
-        return make_native_runtime_context(
-            ca=ca,
-            cb=cb,
-            reference=wavefields[0],
-            nt=int(meta["nt"]),
-            n_shots=int(meta["n_shots"]),
-            n_receivers=int(meta["n_receivers"]),
-        )
-
-    @staticmethod
-    def _setup_storage(
-        *,
-        device: torch.device,
-        dtype: torch.dtype,
-        storage_mode_str: str,
-        storage_path: str,
-        ca_requires_grad: bool,
-        cb_requires_grad: bool,
-        num_steps_stored: int,
-        n_shots: int,
-        nz: int,
-        ny: int,
-        nx: int,
-    ) -> dict[str, Any]:
-        storage_mode = get_storage_mode(storage_mode_str, device)
-        compute_stream_handle, storage_stream_handle, stream_keepalive = (
-            _make_storage_streams(device, storage_mode)
-        )
-        storage_manager = setup_storage(
-            shot_shape=(nz, ny, nx),
-            dtype=dtype,
-            n_shots=n_shots,
-            nt=num_steps_stored,
-            step_ratio=1,
-            storage_mode=storage_mode,
-            storage_path=storage_path,
-            device=device,
-            requires_grad_list=[
-                ca_requires_grad,
-                ca_requires_grad,
-                ca_requires_grad,
-                cb_requires_grad,
-                cb_requires_grad,
-                cb_requires_grad,
-            ],
-        )
-        unpacked_allocations = unpack_storage_allocations(
-            storage_manager=storage_manager,
-            storage_mode=storage_mode,
-            specs=[
-                ("store_ex", "store_ex_host", "store_ex_filenames_ptr"),
-                ("store_ey", "store_ey_host", "store_ey_filenames_ptr"),
-                ("store_ez", "store_ez_host", "store_ez_filenames_ptr"),
-                ("store_curl_x", "store_curl_x_host", "store_curl_x_filenames_ptr"),
-                ("store_curl_y", "store_curl_y_host", "store_curl_y_filenames_ptr"),
-                ("store_curl_z", "store_curl_z_host", "store_curl_z_filenames_ptr"),
-            ],
-        )
-
-        return {
-            "storage_mode": storage_mode,
-            "storage_manager": storage_manager,
-            "compute_stream_handle": compute_stream_handle,
-            "storage_stream_handle": storage_stream_handle,
-            "stream_keepalive": stream_keepalive,
-            **unpacked_allocations,
-        }
-
-    @staticmethod
-    def _save_ctx(
-        ctx: Any,
-        *,
-        meta: dict[str, Any],
-        storage_setup: dict[str, Any],
-        tensors: tuple[torch.Tensor, ...],
-    ) -> None:
-        save_storage_context(
-            ctx,
-            tensors=tensors,
-            attrs={
-                "meta": {
-                    **meta,
-                    "ca_requires_grad": bool(meta["ca_requires_grad"]),
-                    "cb_requires_grad": bool(meta["cb_requires_grad"]),
-                    "storage_mode": storage_setup["storage_mode"],
-                    "stream_keepalive": storage_setup["stream_keepalive"],
-                }
-            },
-            storage_manager=storage_setup["storage_manager"],
-        )
-
-    @staticmethod
-    def _prepare_grad_wavefields(
-        *,
-        meta: dict[str, Any],
-        grad_r: torch.Tensor | None,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> dict[str, torch.Tensor]:
-        nt = int(meta["nt"])
-        n_shots = int(meta["n_shots"])
-        nz = int(meta["nz"])
-        ny = int(meta["ny"])
-        nx = int(meta["nx"])
-        n_sources = int(meta["n_sources"])
-        n_receivers = int(meta["n_receivers"])
-        ca_requires_grad = bool(meta["ca_requires_grad"])
-        cb_requires_grad = bool(meta["cb_requires_grad"])
-
-        if grad_r is None or grad_r.numel() == 0:
-            grad_r = torch.zeros(nt, n_shots, n_receivers, device=device, dtype=dtype)
-        else:
-            grad_r = grad_r.contiguous()
-
-        lambda_ex = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
-        lambda_ey = torch.zeros_like(lambda_ex)
-        lambda_ez = torch.zeros_like(lambda_ex)
-        lambda_hx = torch.zeros_like(lambda_ex)
-        lambda_hy = torch.zeros_like(lambda_ex)
-        lambda_hz = torch.zeros_like(lambda_ex)
-
-        if n_sources > 0:
-            grad_f = torch.zeros(nt, n_shots, n_sources, device=device, dtype=dtype)
-        else:
-            grad_f = torch.empty(0, device=device, dtype=dtype)
-
-        if ca_requires_grad:
-            grad_ca = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
-            grad_ca_shot = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
-        else:
-            grad_ca = torch.empty(0, device=device, dtype=dtype)
-            grad_ca_shot = torch.empty(0, device=device, dtype=dtype)
-
-        if cb_requires_grad:
-            grad_cb = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
-            grad_cb_shot = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
-        else:
-            grad_cb = torch.empty(0, device=device, dtype=dtype)
-            grad_cb_shot = torch.empty(0, device=device, dtype=dtype)
-
-        if ca_requires_grad or cb_requires_grad:
-            grad_eps = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
-            grad_sigma = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
-        else:
-            grad_eps = torch.empty(0, device=device, dtype=dtype)
-            grad_sigma = torch.empty(0, device=device, dtype=dtype)
-
-        return {
-            "grad_r": grad_r,
-            "lambda_ex": lambda_ex,
-            "lambda_ey": lambda_ey,
-            "lambda_ez": lambda_ez,
-            "lambda_hx": lambda_hx,
-            "lambda_hy": lambda_hy,
-            "lambda_hz": lambda_hz,
-            "m_lambda_ey_z": torch.zeros_like(lambda_ex),
-            "m_lambda_ez_y": torch.zeros_like(lambda_ex),
-            "m_lambda_ez_x": torch.zeros_like(lambda_ex),
-            "m_lambda_ex_z": torch.zeros_like(lambda_ex),
-            "m_lambda_ex_y": torch.zeros_like(lambda_ex),
-            "m_lambda_ey_x": torch.zeros_like(lambda_ex),
-            "m_lambda_hz_y": torch.zeros_like(lambda_ex),
-            "m_lambda_hy_z": torch.zeros_like(lambda_ex),
-            "m_lambda_hx_z": torch.zeros_like(lambda_ex),
-            "m_lambda_hz_x": torch.zeros_like(lambda_ex),
-            "m_lambda_hy_x": torch.zeros_like(lambda_ex),
-            "m_lambda_hx_y": torch.zeros_like(lambda_ex),
-            "grad_f": grad_f,
-            "grad_ca": grad_ca,
-            "grad_cb": grad_cb,
-            "grad_eps": grad_eps,
-            "grad_sigma": grad_sigma,
-            "grad_ca_shot": grad_ca_shot,
-            "grad_cb_shot": grad_cb_shot,
-        }
-
-    @staticmethod
     def forward(  # type: ignore[override]
         ctx: Any,
         ca: torch.Tensor,
@@ -4923,6 +4878,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         meta: dict[str, Any],
     ) -> tuple[torch.Tensor, ...]:
         from . import backend_utils
+        import ctypes
 
         (
             az,
@@ -4966,22 +4922,16 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             m_ey_x,
         ) = wavefields
 
-        parsed = Maxwell3DForwardFunc._parse_args(
-            ca=ca,
-            cb=cb,
-            wavefields=wavefields,
-            meta=meta,
-        )
-        device = parsed["device"]
-        dtype = parsed["dtype"]
+        device = Ex.device
+        dtype = Ex.dtype
 
-        nt = parsed["nt"]
-        n_shots = parsed["n_shots"]
-        n_receivers = parsed["n_receivers"]
+        nt = int(meta["nt"])
+        n_shots = int(meta["n_shots"])
         nz = int(meta["nz"])
         ny = int(meta["ny"])
         nx = int(meta["nx"])
         n_sources = int(meta["n_sources"])
+        n_receivers = int(meta["n_receivers"])
         step_ratio = int(meta["step_ratio"])
         accuracy = int(meta["accuracy"])
         pml_z0 = int(meta["pml_z0"])
@@ -5001,14 +4951,21 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         grid_spacing = meta["grid_spacing"]
         dt = float(meta["dt"])
 
-        ca_requires_grad = parsed["ca_requires_grad"]
-        cb_requires_grad = parsed["cb_requires_grad"]
+        ca_requires_grad = bool(ca.requires_grad)
+        cb_requires_grad = bool(cb.requires_grad)
         requires_grad = ca_requires_grad or cb_requires_grad
         if not requires_grad:
             raise RuntimeError(
                 "Maxwell3DForwardFunc should only be used when gradients are required."
             )
-        receiver_amplitudes = parsed["receiver_amplitudes"]
+
+        if n_receivers > 0:
+            receiver_amplitudes = torch.zeros(
+                nt, n_shots, n_receivers, device=device, dtype=dtype
+            )
+        else:
+            receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
+
         step_ratio = max(1, step_ratio)
         num_steps_stored = (nt + step_ratio - 1) // step_ratio
         shot_numel = nz * ny * nx
@@ -5017,27 +4974,114 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         storage_path = str(meta["storage_path"])
         if device.type == "cpu" and storage_mode_str in {"cpu", "disk"}:
             storage_mode_str = "device"
-        storage_setup = Maxwell3DForwardFunc._setup_storage(
-            device=device,
-            dtype=dtype,
-            storage_mode_str=storage_mode_str,
-            storage_path=storage_path,
-            ca_requires_grad=ca_requires_grad,
-            cb_requires_grad=cb_requires_grad,
-            num_steps_stored=num_steps_stored,
-            n_shots=n_shots,
-            nz=nz,
-            ny=ny,
-            nx=nx,
+        storage_mode = storage_mode_to_int(storage_mode_str)
+        compute_stream_handle, storage_stream_handle, stream_keepalive = (
+            _make_storage_streams(device, storage_mode)
+        )
+        backward_storage_objects: list[Any] = []
+        backward_storage_filename_arrays: list[Any] = []
+        char_ptr_type = ctypes.c_char_p
+        is_cuda = device.type == "cuda"
+        empty_store = torch.empty(0, device=device, dtype=dtype)
+
+        def alloc_storage(requires_grad_cond: bool):
+            store_1 = empty_store
+            store_3 = empty_store
+            filenames_arr = (char_ptr_type * 0)()
+            if not requires_grad_cond:
+                backward_storage_filename_arrays.append(filenames_arr)
+                return store_1, store_3, 0
+
+            if storage_mode == STORAGE_DEVICE:
+                store_1 = torch.empty(
+                    num_steps_stored, n_shots, nz, ny, nx, device=device, dtype=dtype
+                )
+            elif storage_mode == STORAGE_CPU:
+                store_1 = torch.empty(
+                    _CPU_STORAGE_BUFFERS,
+                    n_shots,
+                    nz,
+                    ny,
+                    nx,
+                    device=device,
+                    dtype=dtype,
+                )
+                store_3 = torch.empty(
+                    num_steps_stored,
+                    n_shots,
+                    nz,
+                    ny,
+                    nx,
+                    device="cpu",
+                    pin_memory=True,
+                    dtype=dtype,
+                )
+            elif storage_mode == STORAGE_DISK:
+                storage_obj = TemporaryStorage(storage_path, 1 if is_cuda else n_shots)
+                backward_storage_objects.append(storage_obj)
+                filenames_list = [f.encode("utf-8") for f in storage_obj.get_filenames()]
+                filenames_arr = (char_ptr_type * len(filenames_list))()
+                for i_file, f_name in enumerate(filenames_list):
+                    filenames_arr[i_file] = ctypes.cast(
+                        ctypes.create_string_buffer(f_name), char_ptr_type
+                    )
+                if is_cuda:
+                    store_1 = torch.empty(
+                        _CPU_STORAGE_BUFFERS,
+                        n_shots,
+                        nz,
+                        ny,
+                        nx,
+                        device=device,
+                        dtype=dtype,
+                    )
+                    store_3 = torch.empty(
+                        _CPU_STORAGE_BUFFERS,
+                        n_shots,
+                        nz,
+                        ny,
+                        nx,
+                        device="cpu",
+                        pin_memory=True,
+                        dtype=dtype,
+                    )
+                else:
+                    store_1 = torch.empty(
+                        n_shots, nz, ny, nx, device=device, dtype=dtype
+                    )
+
+            backward_storage_filename_arrays.append(filenames_arr)
+            filenames_ptr = (
+                ctypes.cast(filenames_arr, ctypes.c_void_p)
+                if storage_mode == STORAGE_DISK
+                else 0
+            )
+            return store_1, store_3, filenames_ptr
+
+        store_ex, store_ex_host, store_ex_filenames_ptr = alloc_storage(ca_requires_grad)
+        store_ey, store_ey_host, store_ey_filenames_ptr = alloc_storage(ca_requires_grad)
+        store_ez, store_ez_host, store_ez_filenames_ptr = alloc_storage(ca_requires_grad)
+        store_curl_x, store_curl_x_host, store_curl_x_filenames_ptr = alloc_storage(
+            cb_requires_grad
+        )
+        store_curl_y, store_curl_y_host, store_curl_y_filenames_ptr = alloc_storage(
+            cb_requires_grad
+        )
+        store_curl_z, store_curl_z_host, store_curl_z_filenames_ptr = alloc_storage(
+            cb_requires_grad
         )
 
         forward_func = backend_utils.get_backend_function(
             "maxwell_3d", "forward_with_storage", accuracy, dtype, device
         )
+        device_idx = (
+            device.index if device.type == "cuda" and device.index is not None else 0
+        )
         effective_callback_freq = nt if forward_callback is None else callback_frequency
         if effective_callback_freq <= 0:
             effective_callback_freq = nt if nt > 0 else 1
-        def run_chunk(step: int, step_count: int) -> None:
+
+        for step in range(0, nt, effective_callback_freq):
             if forward_callback is not None:
                 forward_callback(
                     CallbackState(
@@ -5073,6 +5117,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                     )
                 )
 
+            step_nt = min(nt - step, effective_callback_freq)
             forward_func(
                 backend_utils.tensor_to_ptr(ca),
                 backend_utils.tensor_to_ptr(cb),
@@ -5097,24 +5142,24 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(m_ex_y),
                 backend_utils.tensor_to_ptr(m_ey_x),
                 backend_utils.tensor_to_ptr(receiver_amplitudes),
-                backend_utils.tensor_to_ptr(storage_setup["store_ex"]),
-                backend_utils.tensor_to_ptr(storage_setup["store_ex_host"]),
-                storage_setup["store_ex_filenames_ptr"],
-                backend_utils.tensor_to_ptr(storage_setup["store_ey"]),
-                backend_utils.tensor_to_ptr(storage_setup["store_ey_host"]),
-                storage_setup["store_ey_filenames_ptr"],
-                backend_utils.tensor_to_ptr(storage_setup["store_ez"]),
-                backend_utils.tensor_to_ptr(storage_setup["store_ez_host"]),
-                storage_setup["store_ez_filenames_ptr"],
-                backend_utils.tensor_to_ptr(storage_setup["store_curl_x"]),
-                backend_utils.tensor_to_ptr(storage_setup["store_curl_x_host"]),
-                storage_setup["store_curl_x_filenames_ptr"],
-                backend_utils.tensor_to_ptr(storage_setup["store_curl_y"]),
-                backend_utils.tensor_to_ptr(storage_setup["store_curl_y_host"]),
-                storage_setup["store_curl_y_filenames_ptr"],
-                backend_utils.tensor_to_ptr(storage_setup["store_curl_z"]),
-                backend_utils.tensor_to_ptr(storage_setup["store_curl_z_host"]),
-                storage_setup["store_curl_z_filenames_ptr"],
+                backend_utils.tensor_to_ptr(store_ex),
+                backend_utils.tensor_to_ptr(store_ex_host),
+                store_ex_filenames_ptr,
+                backend_utils.tensor_to_ptr(store_ey),
+                backend_utils.tensor_to_ptr(store_ey_host),
+                store_ey_filenames_ptr,
+                backend_utils.tensor_to_ptr(store_ez),
+                backend_utils.tensor_to_ptr(store_ez_host),
+                store_ez_filenames_ptr,
+                backend_utils.tensor_to_ptr(store_curl_x),
+                backend_utils.tensor_to_ptr(store_curl_x_host),
+                store_curl_x_filenames_ptr,
+                backend_utils.tensor_to_ptr(store_curl_y),
+                backend_utils.tensor_to_ptr(store_curl_y_host),
+                store_curl_y_filenames_ptr,
+                backend_utils.tensor_to_ptr(store_curl_z),
+                backend_utils.tensor_to_ptr(store_curl_z_host),
+                store_curl_z_filenames_ptr,
                 backend_utils.tensor_to_ptr(az),
                 backend_utils.tensor_to_ptr(bz),
                 backend_utils.tensor_to_ptr(az_h),
@@ -5139,7 +5184,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 float(meta["rdy"]),
                 float(meta["rdx"]),
                 dt,
-                step_count,
+                step_nt,
                 n_shots,
                 nz,
                 ny,
@@ -5147,7 +5192,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 n_sources,
                 n_receivers,
                 step_ratio,
-                int(storage_setup["storage_mode"]),
+                storage_mode,
                 shot_bytes_uncomp,
                 ca_requires_grad,
                 cb_requires_grad,
@@ -5164,18 +5209,76 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 source_component_idx,
                 receiver_component_idx,
                 n_threads,
-                parsed["device_idx"],
-                storage_setup["compute_stream_handle"],
-                storage_setup["storage_stream_handle"],
+                device_idx,
+                compute_stream_handle,
+                storage_stream_handle,
             )
+            if forward_callback is not None:
+                callback_wavefields = {
+                    "Ey": Ey,
+                    "Hx": Hx,
+                    "Hz": Hz,
+                    "m_Ey_x": m_Ey_x,
+                    "m_Ey_z": m_Ey_z,
+                    "m_Hx_z": m_Hx_z,
+                    "m_Hz_x": m_Hz_x,
+                }
+                callback_wavefields = _physical_tm2d_callback_wavefields(
+                    callback_wavefields,
+                    scale_ctx=scale_ctx,
+                )
+                forward_callback(
+                    CallbackState(
+                        dt=dt,
+                        step=nt // step_ratio,
+                        nt=nt // step_ratio,
+                        wavefields=callback_wavefields,
+                        models=models,
+                        gradients={},
+                        fd_pad=list(fd_pad),
+                        pml_width=list(pml_width),
+                        is_backward=False,
+                    )
+                )
 
-        execute_stepping_loop(
-            total_steps=nt,
-            chunk_size=effective_callback_freq,
-            run_chunk=run_chunk,
+        ctx.save_for_backward(
+            ca,
+            cb,
+            cq,
+            az,
+            bz,
+            az_h,
+            bz_h,
+            ay,
+            by,
+            ay_h,
+            by_h,
+            ax,
+            bx,
+            ax_h,
+            bx_h,
+            kz,
+            kz_h,
+            ky,
+            ky_h,
+            kx,
+            kx_h,
+            sources_i,
+            receivers_i,
+            store_ex,
+            store_ex_host,
+            store_ey,
+            store_ey_host,
+            store_ez,
+            store_ez_host,
+            store_curl_x,
+            store_curl_x_host,
+            store_curl_y,
+            store_curl_y_host,
+            store_curl_z,
+            store_curl_z_host,
         )
-
-        ctx_meta = {
+        ctx.meta = {
             "dt": dt,
             "nt": nt,
             "n_shots": n_shots,
@@ -5206,49 +5309,11 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             "rdy": float(meta["rdy"]),
             "rdx": float(meta["rdx"]),
             "shot_bytes_uncomp": shot_bytes_uncomp,
+            "storage_mode": storage_mode,
+            "stream_keepalive": stream_keepalive,
         }
-        Maxwell3DForwardFunc._save_ctx(
-            ctx,
-            meta=ctx_meta,
-            storage_setup=storage_setup,
-            tensors=(
-                ca,
-                cb,
-                cq,
-                az,
-                bz,
-                az_h,
-                bz_h,
-                ay,
-                by,
-                ay_h,
-                by_h,
-                ax,
-                bx,
-                ax_h,
-                bx_h,
-                kz,
-                kz_h,
-                ky,
-                ky_h,
-                kx,
-                kx_h,
-                sources_i,
-                receivers_i,
-                storage_setup["store_ex"],
-                storage_setup["store_ex_host"],
-                storage_setup["store_ey"],
-                storage_setup["store_ey_host"],
-                storage_setup["store_ez"],
-                storage_setup["store_ez_host"],
-                storage_setup["store_curl_x"],
-                storage_setup["store_curl_x_host"],
-                storage_setup["store_curl_y"],
-                storage_setup["store_curl_y_host"],
-                storage_setup["store_curl_z"],
-                storage_setup["store_curl_z_host"],
-            ),
-        )
+        ctx.backward_storage_objects = backward_storage_objects
+        ctx.backward_storage_filename_arrays = backward_storage_filename_arrays
 
         return (
             Ex,
@@ -5277,6 +5342,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         ctx: Any, *grad_outputs: torch.Tensor
     ) -> tuple[torch.Tensor | None, ...]:
         from . import backend_utils
+        import ctypes
 
         saved = ctx.saved_tensors
         ca, cb, cq = saved[0], saved[1], saved[2]
@@ -5330,40 +5396,59 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         n_threads = int(meta["n_threads"])
         shot_bytes_uncomp = int(meta["shot_bytes_uncomp"])
         dt = float(meta["dt"])
-        storage_mode = StorageMode(meta["storage_mode"])
-        filename_ptrs = get_storage_filename_ptrs(ctx.storage_manager, storage_mode)
-        grad_state = Maxwell3DForwardFunc._prepare_grad_wavefields(
-            meta=meta,
-            grad_r=grad_outputs[-1],
-            device=device,
-            dtype=dtype,
-        )
-        grad_r = grad_state["grad_r"]
-        lambda_ex = grad_state["lambda_ex"]
-        lambda_ey = grad_state["lambda_ey"]
-        lambda_ez = grad_state["lambda_ez"]
-        lambda_hx = grad_state["lambda_hx"]
-        lambda_hy = grad_state["lambda_hy"]
-        lambda_hz = grad_state["lambda_hz"]
-        m_lambda_ey_z = grad_state["m_lambda_ey_z"]
-        m_lambda_ez_y = grad_state["m_lambda_ez_y"]
-        m_lambda_ez_x = grad_state["m_lambda_ez_x"]
-        m_lambda_ex_z = grad_state["m_lambda_ex_z"]
-        m_lambda_ex_y = grad_state["m_lambda_ex_y"]
-        m_lambda_ey_x = grad_state["m_lambda_ey_x"]
-        m_lambda_hz_y = grad_state["m_lambda_hz_y"]
-        m_lambda_hy_z = grad_state["m_lambda_hy_z"]
-        m_lambda_hx_z = grad_state["m_lambda_hx_z"]
-        m_lambda_hz_x = grad_state["m_lambda_hz_x"]
-        m_lambda_hy_x = grad_state["m_lambda_hy_x"]
-        m_lambda_hx_y = grad_state["m_lambda_hx_y"]
-        grad_f = grad_state["grad_f"]
-        grad_ca = grad_state["grad_ca"]
-        grad_cb = grad_state["grad_cb"]
-        grad_eps = grad_state["grad_eps"]
-        grad_sigma = grad_state["grad_sigma"]
-        grad_ca_shot = grad_state["grad_ca_shot"]
-        grad_cb_shot = grad_state["grad_cb_shot"]
+        storage_mode = int(meta["storage_mode"])
+
+        grad_r = grad_outputs[-1]
+        if grad_r is None or grad_r.numel() == 0:
+            grad_r = torch.zeros(nt, n_shots, n_receivers, device=device, dtype=dtype)
+        else:
+            grad_r = grad_r.contiguous()
+
+        lambda_ex = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+        lambda_ey = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+        lambda_ez = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+        lambda_hx = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+        lambda_hy = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+        lambda_hz = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+
+        m_lambda_ey_z = torch.zeros_like(lambda_ex)
+        m_lambda_ez_y = torch.zeros_like(lambda_ex)
+        m_lambda_ez_x = torch.zeros_like(lambda_ex)
+        m_lambda_ex_z = torch.zeros_like(lambda_ex)
+        m_lambda_ex_y = torch.zeros_like(lambda_ex)
+        m_lambda_ey_x = torch.zeros_like(lambda_ex)
+        m_lambda_hz_y = torch.zeros_like(lambda_ex)
+        m_lambda_hy_z = torch.zeros_like(lambda_ex)
+        m_lambda_hx_z = torch.zeros_like(lambda_ex)
+        m_lambda_hz_x = torch.zeros_like(lambda_ex)
+        m_lambda_hy_x = torch.zeros_like(lambda_ex)
+        m_lambda_hx_y = torch.zeros_like(lambda_ex)
+
+        if n_sources > 0:
+            grad_f = torch.zeros(nt, n_shots, n_sources, device=device, dtype=dtype)
+        else:
+            grad_f = torch.empty(0, device=device, dtype=dtype)
+
+        if ca_requires_grad:
+            grad_ca = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+            grad_ca_shot = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+        else:
+            grad_ca = torch.empty(0, device=device, dtype=dtype)
+            grad_ca_shot = torch.empty(0, device=device, dtype=dtype)
+
+        if cb_requires_grad:
+            grad_cb = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+            grad_cb_shot = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+        else:
+            grad_cb = torch.empty(0, device=device, dtype=dtype)
+            grad_cb_shot = torch.empty(0, device=device, dtype=dtype)
+
+        if ca_requires_grad or cb_requires_grad:
+            grad_eps = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+            grad_sigma = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+        else:
+            grad_eps = torch.empty(0, device=device, dtype=dtype)
+            grad_sigma = torch.empty(0, device=device, dtype=dtype)
 
         backward_func = backend_utils.get_backend_function(
             "maxwell_3d", "backward", accuracy, dtype, device
@@ -5375,11 +5460,14 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             _make_storage_streams(device, storage_mode)
         )
         ctx.stream_keepalive = stream_keepalive
-        effective_callback_freq = nt if backward_callback is None else callback_frequency
+        effective_callback_freq = (
+            nt if backward_callback is None else callback_frequency
+        )
         if effective_callback_freq <= 0:
             effective_callback_freq = nt if nt > 0 else 1
 
-        def run_chunk(step: int, step_count: int) -> None:
+        for step in range(nt, 0, -effective_callback_freq):
+            step_nt = min(step, effective_callback_freq)
             backward_func(
                 backend_utils.tensor_to_ptr(ca),
                 backend_utils.tensor_to_ptr(cb),
@@ -5405,22 +5493,46 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(m_lambda_hx_y),
                 backend_utils.tensor_to_ptr(store_ex),
                 backend_utils.tensor_to_ptr(store_ex_host),
-                filename_ptrs[0] if filename_ptrs else 0,
+                ctypes.cast(
+                    ctx.backward_storage_filename_arrays[0], ctypes.c_void_p
+                )
+                if storage_mode == STORAGE_DISK
+                else 0,
                 backend_utils.tensor_to_ptr(store_ey),
                 backend_utils.tensor_to_ptr(store_ey_host),
-                filename_ptrs[1] if len(filename_ptrs) > 1 else 0,
+                ctypes.cast(
+                    ctx.backward_storage_filename_arrays[1], ctypes.c_void_p
+                )
+                if storage_mode == STORAGE_DISK
+                else 0,
                 backend_utils.tensor_to_ptr(store_ez),
                 backend_utils.tensor_to_ptr(store_ez_host),
-                filename_ptrs[2] if len(filename_ptrs) > 2 else 0,
+                ctypes.cast(
+                    ctx.backward_storage_filename_arrays[2], ctypes.c_void_p
+                )
+                if storage_mode == STORAGE_DISK
+                else 0,
                 backend_utils.tensor_to_ptr(store_curl_x),
                 backend_utils.tensor_to_ptr(store_curl_x_host),
-                filename_ptrs[3] if len(filename_ptrs) > 3 else 0,
+                ctypes.cast(
+                    ctx.backward_storage_filename_arrays[3], ctypes.c_void_p
+                )
+                if storage_mode == STORAGE_DISK
+                else 0,
                 backend_utils.tensor_to_ptr(store_curl_y),
                 backend_utils.tensor_to_ptr(store_curl_y_host),
-                filename_ptrs[4] if len(filename_ptrs) > 4 else 0,
+                ctypes.cast(
+                    ctx.backward_storage_filename_arrays[4], ctypes.c_void_p
+                )
+                if storage_mode == STORAGE_DISK
+                else 0,
                 backend_utils.tensor_to_ptr(store_curl_z),
                 backend_utils.tensor_to_ptr(store_curl_z_host),
-                filename_ptrs[5] if len(filename_ptrs) > 5 else 0,
+                ctypes.cast(
+                    ctx.backward_storage_filename_arrays[5], ctypes.c_void_p
+                )
+                if storage_mode == STORAGE_DISK
+                else 0,
                 backend_utils.tensor_to_ptr(grad_f),
                 backend_utils.tensor_to_ptr(grad_ca),
                 backend_utils.tensor_to_ptr(grad_cb),
@@ -5452,7 +5564,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 float(meta["rdy"]),
                 float(meta["rdx"]),
                 dt,
-                step_count,
+                step_nt,
                 n_shots,
                 nz,
                 ny,
@@ -5460,7 +5572,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 n_sources,
                 n_receivers,
                 step_ratio,
-                int(storage_mode),
+                storage_mode,
                 shot_bytes_uncomp,
                 ca_requires_grad,
                 cb_requires_grad,
@@ -5511,12 +5623,6 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                         is_backward=True,
                     )
                 )
-        execute_stepping_loop(
-            total_steps=nt,
-            chunk_size=effective_callback_freq,
-            run_chunk=run_chunk,
-            reverse=True,
-        )
 
         if n_sources > 0:
             grad_f_flat = grad_f.reshape(nt * n_shots * n_sources)
@@ -5590,7 +5696,7 @@ def maxwell3d_c_cuda(
 ):
     """3D C/CUDA forward propagation path with Python fallback for gradients."""
     from . import backend_utils, staggered
-    from .padding import create_or_pad
+    from .padding import create_or_pad, zero_interior
     import warnings
 
     del (
@@ -5835,67 +5941,57 @@ def maxwell3d_c_cuda(
     has_dispersion = bool(material["has_dispersion"])
     debye = material.get("debye")
     size_with_batch = (n_shots, padded_nz, padded_ny, padded_nx)
-    (
-        Ex,
-        Ey,
-        Ez,
-        Hx,
-        Hy,
-        Hz,
-        m_hz_y,
-        m_hy_z,
-        m_hx_z,
-        m_hz_x,
-        m_hy_x,
-        m_hx_y,
-        m_ey_z,
-        m_ez_y,
-        m_ez_x,
-        m_ex_z,
-        m_ex_y,
-        m_ey_x,
-    ) = prepare_initial_wavefields(
-        [
-            Ex_0,
-            Ey_0,
-            Ez_0,
-            Hx_0,
-            Hy_0,
-            Hz_0,
-            m_hz_y_0,
-            m_hy_z_0,
-            m_hx_z_0,
-            m_hz_x_0,
-            m_hy_x_0,
-            m_hx_y_0,
-            m_ey_z_0,
-            m_ez_y_0,
-            m_ez_x_0,
-            m_ex_z_0,
-            m_ex_y_0,
-            m_ey_x_0,
-        ],
-        n_shots=n_shots,
-        size_with_batch=size_with_batch,
-        fd_pad_list=fd_pad_list,
-        device=device,
-        dtype=dtype,
-        contiguous=True,
-        zero_interior_plan=[
-            (6, 1, pml_width_list),
-            (7, 0, pml_width_list),
-            (8, 0, pml_width_list),
-            (9, 2, pml_width_list),
-            (10, 2, pml_width_list),
-            (11, 1, pml_width_list),
-            (12, 0, pml_width_list),
-            (13, 1, pml_width_list),
-            (14, 2, pml_width_list),
-            (15, 0, pml_width_list),
-            (16, 1, pml_width_list),
-            (17, 2, pml_width_list),
-        ],
-    )
+
+    def init_wavefield(field_0: torch.Tensor | None) -> torch.Tensor:
+        if field_0 is not None:
+            if field_0.ndim == 3:
+                field_0 = field_0[None, :, :, :].expand(n_shots, -1, -1, -1)
+            return create_or_pad(
+                field_0,
+                fd_pad_list,
+                device,
+                dtype,
+                size_with_batch,
+                mode="constant",
+            ).contiguous()
+        return torch.zeros(size_with_batch, device=device, dtype=dtype)
+
+    Ex = init_wavefield(Ex_0)
+    Ey = init_wavefield(Ey_0)
+    Ez = init_wavefield(Ez_0)
+    Hx = init_wavefield(Hx_0)
+    Hy = init_wavefield(Hy_0)
+    Hz = init_wavefield(Hz_0)
+
+    m_hz_y = init_wavefield(m_hz_y_0)
+    m_hy_z = init_wavefield(m_hy_z_0)
+    m_hx_z = init_wavefield(m_hx_z_0)
+    m_hz_x = init_wavefield(m_hz_x_0)
+    m_hy_x = init_wavefield(m_hy_x_0)
+    m_hx_y = init_wavefield(m_hx_y_0)
+    m_ey_z = init_wavefield(m_ey_z_0)
+    m_ez_y = init_wavefield(m_ez_y_0)
+    m_ez_x = init_wavefield(m_ez_x_0)
+    m_ex_z = init_wavefield(m_ex_z_0)
+    m_ex_y = init_wavefield(m_ex_y_0)
+    m_ey_x = init_wavefield(m_ey_x_0)
+
+    pml_aux = [
+        (m_hz_y, 1),
+        (m_hy_z, 0),
+        (m_hx_z, 0),
+        (m_hz_x, 2),
+        (m_hy_x, 2),
+        (m_hx_y, 1),
+        (m_ey_z, 0),
+        (m_ez_y, 1),
+        (m_ez_x, 2),
+        (m_ex_z, 0),
+        (m_ex_y, 1),
+        (m_ey_x, 2),
+    ]
+    for wf, dim in pml_aux:
+        zero_interior(wf, fd_pad_list, pml_width_list, dim)
 
     pml_ab_profiles, pml_k_profiles = staggered.set_pml_profiles_3d(
         pml_width=pml_width_list,
