@@ -28,6 +28,11 @@ Expected:
 - Taylor remainder decreases with step size
 - directional finite-difference checks stay close to adjoint gradients
 
+Notes:
+
+- the script auto-selects CUDA when available
+- append `--device cpu` if you want the same check on CPU
+
 ## Advanced Feature Verification
 
 Run:
@@ -39,6 +44,7 @@ uv run python examples/benchmark_maxwell3d_cuda_graph.py --verify
 Expected:
 
 - graph and non-graph receiver traces match before timing begins
+- benchmark output is printed only after the verification check passes
 
 ## Runtime Notes
 
