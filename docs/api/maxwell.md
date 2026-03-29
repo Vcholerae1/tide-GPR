@@ -58,7 +58,7 @@ Key inputs:
 - epsilon, sigma, mu: shape [nz, ny, nx]
 - source_location: [n_shots, n_sources, 3]
 - receiver_location: [n_shots, n_receivers, 3]
-- source_component and receiver_component: one of ex, ey, ez, hx, hy, hz
+- source_component and receiver_component: one of ex, ey, ez
 
 Return tuple:
 - Ex, Ey, Ez, Hx, Hy, Hz
@@ -69,6 +69,18 @@ Return tuple:
 
 - MaxwellTM and Maxwell3D are torch.nn.Module wrappers that store model tensors and call maxwelltm/maxwell3d in forward.
 - Useful when integrating with training loops that repeatedly propagate on the same model object.
+
+## Choosing The Right Maxwell Entry Point
+
+- Use `maxwelltm` for the fastest onboarding path and most 2D examples.
+- Use `maxwell3d` when component selection and full 3D geometry matter.
+- Use `MaxwellTM` or `Maxwell3D` when you want model tensors stored inside a `torch.nn.Module`.
+
+See:
+
+- `guides/api-orientation.md`
+- `guides/modeling.md`
+- `guides/inversion.md`
 
 ## Advanced or Internal Functions
 - prepare_parameters
