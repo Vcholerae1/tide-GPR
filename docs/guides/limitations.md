@@ -1,5 +1,24 @@
 # Limitations
 
-This page is being expanded as part of the documentation rework.
+This page separates stable behavior from advanced and constrained combinations.
 
-It will document stable, advanced, and constrained feature combinations for TIDE.
+## Stable
+
+- 2D TM forward modeling
+- 2D TM gradients with the documented storage modes
+- 3D forward modeling with documented source and receiver components
+
+## Advanced Or Experimental
+
+- Debye dispersion workflows
+- CUDA graph mode on the 3D CUDA forward path
+- larger inversion workloads that depend heavily on storage tuning
+
+## Known Constraints
+
+- some Python backend modes do not support all storage modes
+- CUDA graph mode does not apply uniformly across all solver paths
+- feature support differs between 2D and 3D runtime paths
+- advanced modes should be validated on a small case before being used broadly
+
+Always pair advanced modes with the checks in `guides/verification.md`.

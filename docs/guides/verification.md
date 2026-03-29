@@ -1,5 +1,47 @@
 # Verification
 
-This page is being expanded as part of the documentation rework.
+Use this page to confirm that your installation and chosen runtime path are behaving as expected.
 
-It will collect install checks, backend checks, gradient sanity checks, and advanced-feature validation commands.
+## Backend Availability
+
+```python
+from tide import backend_utils
+
+print("backend available:", backend_utils.is_backend_available())
+print("library path:", backend_utils.get_library_path())
+```
+
+## Minimal Forward Smoke Test
+
+Run the 2D example from `docs/getting-started.md` and confirm the receiver tensor has shape `[nt, n_shots, n_receivers]`.
+
+## Gradient Sanity
+
+Run:
+
+```bash
+uv run python examples/example_gradient_dot_fd_validation.py --backend c
+```
+
+Expected:
+
+- Taylor remainder decreases with step size
+- directional finite-difference checks stay close to adjoint gradients
+
+## Advanced Feature Verification
+
+Run:
+
+```bash
+uv run python examples/benchmark_maxwell3d_cuda_graph.py --verify
+```
+
+Expected:
+
+- graph and non-graph receiver traces match before timing begins
+
+## Runtime Notes
+
+- this command set is intended for environments where the documented examples can access the required backend
+- CUDA-only verification steps should be skipped on CPU-only hosts
+- larger inversion examples are reference workflows, not required smoke tests

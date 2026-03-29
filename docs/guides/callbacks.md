@@ -41,3 +41,10 @@ Best practices:
 - keep callback work lightweight to avoid slowing propagation
 - avoid mutating tensor shapes or device placement
 - when heavy post-processing is needed, store compact summaries and process offline
+
+## Callback Constraints
+
+- Keep callbacks lightweight and side-effect aware.
+- Do not resize or relocate callback-visible tensors.
+- Prefer summary statistics over heavy per-step plotting.
+- Increase `callback_frequency` when callback overhead dominates runtime.
