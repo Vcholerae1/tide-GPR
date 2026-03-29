@@ -1,5 +1,13 @@
 # Modeling
 
+## Forward Modeling Checklist
+
+- Choose 2D TM or 3D based on the problem geometry.
+- Build `epsilon`, `sigma`, and `mu` on the target device.
+- Confirm source and receiver tensor shapes before long runs.
+- Pick `pml_width` and `stencil` deliberately.
+- Start with a small case before scaling up.
+
 ## Parameters
 - epsilon: relative permittivity (dimensionless).
 - sigma: electrical conductivity (S/m).
@@ -29,6 +37,20 @@ For 3D:
 - Model tensors: [nz, ny, nx]
 - Source/receiver indices: [n_shots, n_points, 3] in [z, y, x]
 
+## Choosing 2D vs 3D
+
+Use 2D TM when:
+
+- the survey is effectively planar,
+- you need faster iteration,
+- you are learning the API for the first time.
+
+Use 3D when:
+
+- component selection matters,
+- the geometry is not well represented in 2D,
+- you are ready to pay the additional compute and memory cost.
+
 ## Constraints and Masks
 
 - `epsilon > 0`, `mu > 0` are required.
@@ -39,3 +61,9 @@ For 3D:
 - stencil: 2 for exploratory runs, 4 or higher for reduced dispersion.
 - pml_width: 8 to 20 depending on frequency content and grid size.
 - dtype: float32 for most workloads, float64 for strict numerical studies.
+
+Related reading:
+
+- `guides/api-orientation.md`
+- `guides/sources-receivers.md`
+- `guides/configuration.md`

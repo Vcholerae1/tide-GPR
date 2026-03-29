@@ -1,54 +1,39 @@
 # Project Overview
 
-TIDE is a PyTorch-first electromagnetic simulation and inversion toolkit centered on finite-difference time-domain Maxwell solvers.
+TIDE is a PyTorch-first electromagnetic modeling and inversion library built around finite-difference time-domain Maxwell solvers.
 
-The project targets research and engineering workflows that need all of the following in one stack:
-- numerically stable wave propagation,
-- autograd-compatible inversion,
-- practical CPU/CUDA performance,
-- flexible memory and storage strategies.
+## What You Can Do With TIDE
 
-## What TIDE Provides
-- A 2D TM Maxwell solver (FDTD) with CPML boundaries.
-- A 3D Maxwell solver with selectable source and receiver field components.
-- Automatic differentiation hooks for inversion workflows.
-- CPU and CUDA execution paths.
-- Storage modes for wavefield snapshots (device/CPU/disk).
+- Run 2D TM forward simulations with `tide.maxwelltm`
+- Run 3D forward simulations with `tide.maxwell3d`
+- Compute gradients with respect to `epsilon` and `sigma`
+- Build inversion loops in raw PyTorch or with `MaxwellTM` / `Maxwell3D`
+- Control memory and runtime with storage, callback, and backend options
 
 ## Core Concepts
-- Model parameters: epsilon (relative permittivity), sigma (conductivity), mu (relative permeability).
-- Grid spacing and time step with CFL constraints and internal resampling when required.
-- Sources and receivers: locations, amplitudes, and batching.
-- PML boundary configuration and padding.
+
+- Model tensors: `epsilon`, `sigma`, and `mu`
+- Source amplitude tensors shaped `[n_shots, n_sources, nt]`
+- Receiver traces returned as `[nt, n_shots, n_receivers]`
+- CPML boundaries, finite-difference stencils, and CFL-driven internal resampling
 
 Coordinate conventions:
-- 2D TM uses [y, x].
-- 3D uses [z, y, x].
 
-## Data Flow
-1. Define model parameters and grid.
-2. Configure sources/receivers.
-3. Run forward modeling to generate synthetic data.
-4. Compute gradients and update model (inversion).
+- 2D TM uses `[y, x]`
+- 3D uses `[z, y, x]`
 
-Pseudo-flow:
+## Typical Workflow
 
-```text
-model -> stability check (CFL) -> optional source upsample
-	-> forward propagation -> receiver traces
-	-> (if gradients needed) snapshot storage + backward propagation
-	-> gradients wrt model parameters
-```
+1. Build model tensors on the target device.
+2. Define source and receiver geometry.
+3. Run forward modeling to produce synthetic traces.
+4. Compute a misfit against observed data.
+5. Backpropagate and update the model in an inversion loop.
 
-## Repository Layout
-- src/tide: Python public API and helpers.
-- src/tide/csrc: C/CUDA kernels and CMake build.
-- examples: runnable scripts and workflows.
-- tests: test suite.
-- outputs: generated outputs (not tracked).
+## Recommended Learning Order
 
-Recommended navigation:
-1. docs/getting-started.md
-2. docs/guides/modeling.md
-3. docs/guides/storage.md
-4. docs/api/maxwell.md
+1. Run a small 2D forward example from `getting-started.md`
+2. Read `guides/api-orientation.md`
+3. Read `guides/modeling.md`
+4. Read `guides/inversion.md`
+5. Review `guides/configuration.md`, `guides/limitations.md`, and `guides/verification.md` before scaling up
