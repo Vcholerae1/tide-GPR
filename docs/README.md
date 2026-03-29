@@ -3,28 +3,38 @@
 This directory is the entry point for user guides, API reference, runnable examples, and developer notes.
 
 Recommended reading order:
-1. overview.md
-2. getting-started.md
+1. getting-started.md
+2. guides/api-orientation.md
 3. guides/modeling.md
-4. guides/sources-receivers.md
-5. guides/storage.md
-6. api/index.md
+4. guides/inversion.md
+5. guides/configuration.md
+6. guides/limitations.md
+7. guides/verification.md
 
 ## Start Here
-- overview.md
 - getting-started.md
+- guides/api-orientation.md
+- overview.md
 
 ## Guides
+- guides/api-orientation.md
 - guides/modeling.md
+- guides/inversion.md
+- guides/configuration.md
 - guides/sources-receivers.md
 - guides/boundaries.md
 - guides/storage.md
 - guides/callbacks.md
-- guides/inversion.md
 - guides/performance.md
 - guides/validation.md
+- guides/limitations.md
+- guides/verification.md
 
 ## Examples
+- examples/index.md
+- examples/example_checkpoint.md
+- examples/example_multiscale_crosscorr_wrong_wavelet.md
+- examples/example_multiscale_joint_eps_sigma.md
 - examples/example_multiscale_filtered.md
 - examples/example_multiscale_random_sources.md
 - examples/wavefield_animation.md
@@ -52,7 +62,7 @@ Recommended reading order:
 
 Notes:
 - Paths in this directory are written for repository-local browsing.
-- The API pages focus on practical signatures, shapes, and constraints rather than implementation internals.
+- The documentation is organized for onboarding first, then workflow guides, then API and advanced operational reference.
 
 ## MkDocs Preview
 

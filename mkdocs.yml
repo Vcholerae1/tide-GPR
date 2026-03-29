@@ -33,14 +33,18 @@ nav:
   - Overview: overview.md
   - Getting Started: getting-started.md
   - Guides:
+      - API Orientation: guides/api-orientation.md
       - Modeling: guides/modeling.md
+      - Inversion Workflow: guides/inversion.md
+      - Configuration Reference: guides/configuration.md
       - Sources and Receivers: guides/sources-receivers.md
       - Boundaries and PML: guides/boundaries.md
       - Storage and Checkpointing: guides/storage.md
       - Callbacks: guides/callbacks.md
-      - Inversion Workflow: guides/inversion.md
       - Performance Tips: guides/performance.md
       - Stability and Validation: guides/validation.md
+      - Limitations: guides/limitations.md
+      - Verification: guides/verification.md
   - API:
       - Index: api/index.md
       - Top-level Module: api/tide.md
@@ -57,6 +61,10 @@ nav:
       - Backend Utils: api/backend_utils.md
       - C/CUDA: api/csrc.md
   - Examples:
+      - Overview: examples/index.md
+      - Checkpointing: examples/example_checkpoint.md
+      - Wrong-Wavelet Inversion: examples/example_multiscale_crosscorr_wrong_wavelet.md
+      - Joint Epsilon + Sigma Inversion: examples/example_multiscale_joint_eps_sigma.md
       - Multiscale Filtered: examples/example_multiscale_filtered.md
       - Random Source Encoding: examples/example_multiscale_random_sources.md
       - Wavefield Animation: examples/wavefield_animation.md
