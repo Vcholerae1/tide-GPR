@@ -6,7 +6,8 @@ import pytest
 import torch
 
 import tide
-from tide import backend_utils, maxwell as maxwell_mod
+from tide import backend_utils
+from tide.maxwell.tm2d_helpers import _make_tm_storage_streams
 from tide.storage import STORAGE_CPU, STORAGE_DEVICE
 
 
@@ -111,7 +112,7 @@ def test_tm_forward_backend_argtypes_include_compute_stream_handle():
 
 
 def test_make_tm_storage_streams_returns_zero_handles_on_cpu():
-    compute_handle, storage_handle, keepalive = maxwell_mod._make_tm_storage_streams(
+    compute_handle, storage_handle, keepalive = _make_tm_storage_streams(
         torch.device("cpu"), STORAGE_CPU
     )
 
@@ -127,7 +128,7 @@ def test_make_tm_storage_streams_uses_current_and_storage_streams(monkeypatch):
     monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: compute_stream)
     monkeypatch.setattr(torch.cuda, "Stream", lambda device=None: storage_stream)
 
-    compute_handle, storage_handle, keepalive = maxwell_mod._make_tm_storage_streams(
+    compute_handle, storage_handle, keepalive = _make_tm_storage_streams(
         torch.device("cuda"), STORAGE_CPU
     )
 
@@ -146,36 +147,13 @@ def test_make_tm_storage_streams_skips_storage_stream_for_device_mode(monkeypatc
         lambda device=None: pytest.fail("storage stream should not be created"),
     )
 
-    compute_handle, storage_handle, keepalive = maxwell_mod._make_tm_storage_streams(
+    compute_handle, storage_handle, keepalive = _make_tm_storage_streams(
         torch.device("cuda"), STORAGE_DEVICE
     )
 
     assert compute_handle == 303
     assert storage_handle == 0
     assert keepalive == (compute_stream,)
-
-
-def test_tm2d_rejects_removed_fp16_scaled_precision():
-    epsilon = torch.ones(8, 8)
-    sigma = torch.zeros_like(epsilon)
-    mu = torch.ones_like(epsilon)
-    source_amplitude = torch.zeros(1, 1, 4)
-    source_location = torch.tensor([[[4, 4]]], dtype=torch.int64)
-    receiver_location = torch.tensor([[[4, 5]]], dtype=torch.int64)
-
-    with pytest.raises(ValueError, match="compute_precision must be 'default'"):
-        tide.maxwelltm(
-            epsilon,
-            sigma,
-            mu,
-            grid_spacing=0.01,
-            dt=1e-11,
-            source_amplitude=source_amplitude,
-            source_location=source_location,
-            receiver_location=receiver_location,
-            compute_precision="fp16_scaled",
-        )
-
 
 def test_snapshot_storage_modes_match():
     if not torch.cuda.is_available():

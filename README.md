@@ -29,7 +29,6 @@ TIDE is a PyTorch-based library for high-frequency electromagnetic wave propagat
 | Snapshot storage modes | `storage_mode=*` | Stable | Device, CPU, disk, none, and auto |
 | Callbacks | `forward_callback`, `backward_callback` | Stable | Keep callback work lightweight |
 | Debye dispersion | `DebyeDispersion` | Advanced | Requires explicit time-step validation |
-| CUDA graph mode | `maxwell3d(..., cuda_graph=True)` | Experimental | Forward-only CUDA path |
 
 ## Installation
 

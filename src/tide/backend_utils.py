@@ -19,7 +19,10 @@ if SO_EXT is None:
 _SUPPORTED_ACCURACIES = (2, 4, 6, 8)
 _SUPPORTED_DEVICES = ("cpu", "cuda")
 _SUPPORTED_BACKEND_DTYPES = ("float", "double")
-_SUPPORTED_PROPAGATORS = ("maxwell_tm", "maxwell_3d")
+_SUPPORTED_PROPAGATORS = (
+    "maxwell_tm",
+    "maxwell_3d",
+)
 _SUPPORTED_PASSES = ("forward", "forward_with_storage", "backward")
 
 # Mapping from torch dtypes to backend dtype strings and from backend dtype strings to C types.

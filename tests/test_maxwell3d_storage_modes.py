@@ -1,15 +1,12 @@
 import ctypes
 import tempfile
 from contextlib import nullcontext
-from importlib import import_module
 
 import pytest
 import torch
 
 import tide
 from tide import backend_utils
-
-maxwell_module = import_module("tide.maxwell")
 
 
 @pytest.mark.parametrize("storage_mode", ["device", "cpu", "disk", "auto"])
@@ -153,7 +150,6 @@ def test_maxwell3d_host_backed_storage_matches_on_custom_current_stream(
 def _run_3d_forward(
     stream: torch.cuda.Stream | None = None,
     *,
-    experimental_cuda_graph: bool = False,
     callback_frequency: int = 1,
     callback_steps: list[int] | None = None,
 ) -> torch.Tensor:
@@ -171,9 +167,7 @@ def _run_3d_forward(
         80e6, nt, 4e-11, peak_time=1.0 / 80e6, dtype=dtype, device=device
     ).view(1, 1, nt)
 
-    kwargs = {
-        "experimental_cuda_graph": experimental_cuda_graph,
-    }
+    kwargs = {}
     if callback_steps is not None:
 
         def _forward_callback(state):
@@ -211,60 +205,3 @@ def test_maxwell3d_plain_forward_matches_on_custom_current_stream():
     rec_stream = _run_3d_forward(stream=torch.cuda.Stream())
 
     torch.testing.assert_close(rec_stream, rec_base, rtol=1e-5, atol=1e-6)
-
-
-def test_maxwell3d_cuda_graph_matches_plain_forward():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for Maxwell3D CUDA Graph tests.")
-
-    rec_plain = _run_3d_forward()
-    rec_graph = _run_3d_forward(experimental_cuda_graph=True)
-
-    torch.testing.assert_close(rec_graph, rec_plain, rtol=1e-5, atol=1e-6)
-
-
-def test_maxwell3d_cuda_graph_matches_with_callback_chunks():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for Maxwell3D CUDA Graph tests.")
-
-    plain_steps: list[int] = []
-    graph_steps: list[int] = []
-
-    rec_plain = _run_3d_forward(callback_frequency=3, callback_steps=plain_steps)
-    rec_graph = _run_3d_forward(
-        experimental_cuda_graph=True,
-        callback_frequency=3,
-        callback_steps=graph_steps,
-    )
-
-    assert plain_steps == [0, 3, 6, 9]
-    assert graph_steps == plain_steps
-    torch.testing.assert_close(rec_graph, rec_plain, rtol=1e-5, atol=1e-6)
-
-
-def test_maxwell3d_cuda_graph_matches_on_custom_current_stream():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for Maxwell3D CUDA Graph tests.")
-
-    rec_base = _run_3d_forward(experimental_cuda_graph=True)
-    rec_stream = _run_3d_forward(
-        stream=torch.cuda.Stream(),
-        experimental_cuda_graph=True,
-    )
-
-    torch.testing.assert_close(rec_stream, rec_base, rtol=1e-5, atol=1e-6)
-
-
-def test_maxwell3d_cuda_graph_cache_persists_across_calls():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for Maxwell3D CUDA Graph tests.")
-
-    maxwell_module._clear_maxwell3d_cuda_graph_cache()
-    assert maxwell_module._maxwell3d_cuda_graph_cache_size() == 0
-
-    _run_3d_forward(experimental_cuda_graph=True, callback_frequency=3, callback_steps=[])
-    size_after_first = maxwell_module._maxwell3d_cuda_graph_cache_size()
-    assert size_after_first == 1
-
-    _run_3d_forward(experimental_cuda_graph=True, callback_frequency=3, callback_steps=[])
-    assert maxwell_module._maxwell3d_cuda_graph_cache_size() == size_after_first

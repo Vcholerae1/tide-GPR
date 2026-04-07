@@ -33,19 +33,6 @@ Notes:
 - the script auto-selects CUDA when available
 - append `--device cpu` if you want the same check on CPU
 
-## Advanced Feature Verification
-
-Run:
-
-```bash
-uv run python examples/benchmark_maxwell3d_cuda_graph.py --verify
-```
-
-Expected:
-
-- graph and non-graph receiver traces match before timing begins
-- benchmark output is printed only after the verification check passes
-
 ## Runtime Notes
 
 - this command set is intended for environments where the documented examples can access the required backend
