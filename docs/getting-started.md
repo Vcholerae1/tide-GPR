@@ -126,7 +126,6 @@ If backend is unavailable, TIDE can still run on Python fallback paths for suppo
 - `guides/api-orientation.md`
 - `guides/modeling.md`
 - `guides/inversion.md`
-- `examples/index.md`
 - `api/index.md`
 
 ## Common Startup Issues

@@ -69,7 +69,6 @@ wheel.py-api = "py3"
 build-dir = "build/{wheel_tag}"
 ninja.make-fallback = true
 sdist.exclude = [
-    "examples/data/**",
     "outputs/**",
     "build/**",
     "dist/**",

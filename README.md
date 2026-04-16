@@ -152,14 +152,6 @@ Notes:
 - `storage_mode` accepts device, cpu, disk, none, and auto.
 - `storage_compression` accepts none or bf16 for TM2D snapshot storage.
 
-## Examples
-
-See the [`examples/`](examples/) directory for complete workflows:
-
-- [`example_multiscale_filtered.py`](examples/example_multiscale_filtered.py): Multi-scale FWI with frequency filtering
-- [`example_multiscale_random_sources.py`](examples/example_multiscale_random_sources.py): FWI with random source encoding
-- [`example_wavefield_animation.py`](examples/example_wavefield_animation.py): Visualize wave propagation
-
 ## Documentation
 
 Recommended reading path:
@@ -169,12 +161,6 @@ Recommended reading path:
 3. `docs/guides/modeling.md` and `docs/guides/inversion.md` for forward modeling and inversion workflows
 4. `docs/guides/configuration.md` for storage, callbacks, backend, and CFL-related controls
 5. `docs/guides/limitations.md` and `docs/guides/verification.md` before enabling advanced features broadly
-
-Key example docs:
-
-- `docs/examples/example_checkpoint.md`
-- `docs/examples/example_multiscale_crosscorr_wrong_wavelet.md`
-- `docs/examples/example_multiscale_joint_eps_sigma.md`
 
 ## Testing
 

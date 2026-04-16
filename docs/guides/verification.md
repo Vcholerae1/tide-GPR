@@ -20,18 +20,18 @@ Run the 2D example from `docs/getting-started.md` and confirm the receiver tenso
 Run:
 
 ```bash
-uv run python examples/example_gradient_dot_fd_validation.py --backend c
+uv run pytest tests/test_gradients.py
 ```
 
 Expected:
 
-- Taylor remainder decreases with step size
-- directional finite-difference checks stay close to adjoint gradients
+- finite-difference and backend-parity checks pass where supported
+- gradient sampling interval regressions stay covered
 
 Notes:
 
-- the script auto-selects CUDA when available
-- append `--device cpu` if you want the same check on CPU
+- some cases are skipped automatically when CUDA is unavailable
+- use `-k` to narrow to a specific gradient scenario during local debugging
 
 ## Runtime Notes
 

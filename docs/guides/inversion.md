@@ -38,8 +38,6 @@ for _ in range(10):
     optimizer.step()
 ```
 
-See `docs/examples/example_multiscale_joint_eps_sigma.md` for a larger staged workflow and `docs/examples/example_multiscale_crosscorr_wrong_wavelet.md` for a wavelet-mismatch-aware objective.
-
 ## Objective Functions
 
 Common choices:

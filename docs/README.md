@@ -1,6 +1,6 @@
 # TIDE Documentation
 
-This directory is the entry point for user guides, API reference, runnable examples, and developer notes.
+This directory is the entry point for user guides, API reference, and developer notes.
 
 Recommended reading order:
 1. getting-started.md
@@ -29,16 +29,6 @@ Recommended reading order:
 - guides/validation.md
 - guides/limitations.md
 - guides/verification.md
-
-## Examples
-- examples/index.md
-- examples/example_checkpoint.md
-- examples/example_multiscale_crosscorr_wrong_wavelet.md
-- examples/example_multiscale_joint_eps_sigma.md
-- examples/example_multiscale_filtered.md
-- examples/example_multiscale_random_sources.md
-- examples/wavefield_animation.md
-- examples/benchmark_maxwell.md
 
 ## API Reference
 - api/index.md
