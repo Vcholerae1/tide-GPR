@@ -81,7 +81,11 @@ def create_or_pad(
     # - 2D spatial padding: 3D or 4D input
     # - 3D spatial padding: 4D or 5D input
     original_ndim = tensor.ndim
-    needs_unsqueeze = original_ndim in {2, 3} and mode != "constant"
+    spatial_ndim = len(pad) // 2
+    needs_unsqueeze = mode != "constant" and original_ndim in {
+        spatial_ndim,
+        spatial_ndim + 1,
+    }
 
     if needs_unsqueeze:
         tensor = tensor.unsqueeze(0)

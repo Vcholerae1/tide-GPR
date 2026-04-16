@@ -1,13 +1,13 @@
 # API Reference
 
-This section documents the public Python API and key internal modules.
+Start here if you already know which workflow you want:
 
-Public API priority order:
-1. tide.maxwelltm and tide.maxwell3d
-2. tide.ricker
-3. tide.CallbackState and create_callback_state
-4. tide.cfl_condition, upsample, downsample
-5. padding and validation helpers
+1. `tide.maxwelltm` for 2D TM forward modeling and inversion
+2. `tide.maxwell3d` for 3D forward modeling and inversion
+3. `tide.MaxwellTM` / `tide.Maxwell3D` for reusable module-based workflows
+4. `tide.ricker` for source generation
+5. `tide.CallbackState` for forward and backward callbacks
+6. `tide.DebyeDispersion` and storage/backend helpers for advanced workflows
 
 ## Public Modules
 - tide (top-level)

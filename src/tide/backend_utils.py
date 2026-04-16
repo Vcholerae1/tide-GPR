@@ -19,7 +19,10 @@ if SO_EXT is None:
 _SUPPORTED_ACCURACIES = (2, 4, 6, 8)
 _SUPPORTED_DEVICES = ("cpu", "cuda")
 _SUPPORTED_BACKEND_DTYPES = ("float", "double")
-_SUPPORTED_PROPAGATORS = ("maxwell_tm", "maxwell_3d")
+_SUPPORTED_PROPAGATORS = (
+    "maxwell_tm",
+    "maxwell_3d",
+)
 _SUPPORTED_PASSES = ("forward", "forward_with_storage", "backward")
 
 # Mapping from torch dtypes to backend dtype strings and from backend dtype strings to C types.
@@ -254,7 +257,7 @@ _3D_BATCHED_FLAGS: _Spec = [
 ]
 
 _3D_STORAGE_TAIL: _Spec = [
-    (_I, 2, "storage_mode, shot_bytes_uncomp"),
+    (_I, 3, "storage_mode, storage_format, shot_bytes_uncomp"),
     (_B, 2, "ca_requires_grad, cb_requires_grad"),
 ]
 

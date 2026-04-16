@@ -34,3 +34,7 @@ Use freq_taper_frac and time_pad_frac to reduce FFT edge artifacts.
 - validate_time_pad_frac
 
 These are simple but effective front-line guards for user-facing numeric controls.
+
+## Operational Verification
+
+Numerical validation helpers are only one part of trust-building. For installation and workflow-level checks, continue with `guides/verification.md`.

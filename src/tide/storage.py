@@ -67,13 +67,7 @@ def _resolve_storage_compression(
     device: torch.device,
     *,
     context: str,
-    compute_precision: str = "default",
 ) -> tuple[str, torch.dtype, int, int]:
-    if compute_precision != "default":
-        raise ValueError(
-            f"{context} only supports compute_precision='default', got {compute_precision!r}."
-        )
-
     storage_kind = _normalize_storage_compression(storage_compression)
     if storage_kind == "none":
         return storage_kind, dtype, dtype.itemsize, STORAGE_FORMAT_FULL

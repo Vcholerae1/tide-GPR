@@ -43,4 +43,4 @@ test.md
 *.html
 !README.md
 
-examples/data/Petrophysical_Models.h5
+examples/

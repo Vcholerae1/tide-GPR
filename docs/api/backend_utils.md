@@ -32,3 +32,12 @@ These templates are cached and assigned lazily by get_backend_function.
 
 - tensor_to_ptr handles wrapped tensors used by torch.func transforms.
 - ensure_contiguous returns contiguous storage when required by native kernels.
+
+## User-Facing Use
+
+Most users only need:
+
+- `is_backend_available()`
+- `get_library_path()`
+
+Use these functions during installation checks and before investigating backend-specific performance behavior.

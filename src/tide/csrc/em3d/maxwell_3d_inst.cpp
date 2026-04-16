@@ -658,6 +658,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(forward_with_storage)(
     int64_t const n_receivers_per_shot,
     int64_t const step_ratio,
     int64_t const storage_mode,
+    int64_t const storage_format,
     int64_t const shot_bytes_uncomp,
     bool const ca_requires_grad,
     bool const cb_requires_grad,
@@ -681,6 +682,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(forward_with_storage)(
   (void)device;
   (void)compute_stream_handle;
   (void)storage_stream_handle;
+  (void)storage_format;
   (void)store_2;
   (void)store_filenames_1;
   (void)store_4;
@@ -708,6 +710,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(forward_with_storage)(
   int64_t const step_ratio_eff = step_ratio > 0 ? step_ratio : 1;
   bool const can_store =
       (storage_mode == STORAGE_DEVICE) &&
+      (storage_format == STORAGE_FORMAT_FULL) &&
       (shot_bytes_uncomp == (int64_t)(shot_numel * (int64_t)sizeof(TIDE_DTYPE))) &&
       ((ca_requires_grad && store_1 != NULL && store_3 != NULL && store_5 != NULL) ||
        (cb_requires_grad && store_7 != NULL && store_9 != NULL && store_11 != NULL));
@@ -996,6 +999,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(backward)(
     int64_t const n_receivers_per_shot,
     int64_t const step_ratio,
     int64_t const storage_mode,
+    int64_t const storage_format,
     int64_t const shot_bytes_uncomp,
     bool const ca_requires_grad,
     bool const cb_requires_grad,
@@ -1018,6 +1022,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(backward)(
   (void)device;
   (void)compute_stream_handle;
   (void)storage_stream_handle;
+  (void)storage_format;
   (void)store_2;
   (void)store_filenames_1;
   (void)store_4;
@@ -1046,6 +1051,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(backward)(
   int64_t const step_ratio_eff = step_ratio > 0 ? step_ratio : 1;
   bool const storage_direct =
       (storage_mode == STORAGE_DEVICE) &&
+      (storage_format == STORAGE_FORMAT_FULL) &&
       (shot_bytes_uncomp == (int64_t)(shot_numel * (int64_t)sizeof(TIDE_DTYPE)));
 
   if (grad_f != NULL && nt > 0 && n_shots > 0 && n_sources_per_shot > 0) {

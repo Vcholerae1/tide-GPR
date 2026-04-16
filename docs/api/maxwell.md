@@ -24,20 +24,24 @@ maxwelltm(
 ```
 
 Key inputs:
-- epsilon, sigma, mu: shape [ny, nx]
-- source_amplitude: [n_shots, n_sources, nt]
-- source_location: [n_shots, n_sources, 2]
-- receiver_location: [n_shots, n_receivers, 2]
+- epsilon, sigma, mu: shape [ny, nx] or [B, ny, nx]
+- source_amplitude: [n_shots, n_sources, nt] or [B, n_shots, n_sources, nt]
+- source_location: [n_shots, n_sources, 2] or [B, n_shots, n_sources, 2]
+- receiver_location: [n_shots, n_receivers, 2] or [B, n_shots, n_receivers, 2]
 
 Return tuple:
 - Ey, Hx, Hz
 - m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x
-- receiver_amplitudes with shape [nt, n_shots, n_receivers]
+- receiver_amplitudes with shape [nt, n_shots, n_receivers] for shared models
+- receiver_amplitudes with shape [nt, B, n_shots, n_receivers] for batched models
 
 Important behavior:
 - TIDE checks CFL stability and may use an internal smaller time step.
 - If internal sub-stepping is used, source signals are upsampled and receiver traces are downsampled automatically.
 - save_snapshots defaults to auto behavior based on gradient requirements.
+- Batched models are supported by the native backend and by `python_backend=True`.
+- In batched-model Python mode, TIDE uses an internal `vmap` over the model axis.
+- Batched-model Python mode does not support forward/backward callbacks.
 
 ## maxwell3d
 
@@ -55,20 +59,33 @@ maxwell3d(
 ```
 
 Key inputs:
-- epsilon, sigma, mu: shape [nz, ny, nx]
-- source_location: [n_shots, n_sources, 3]
-- receiver_location: [n_shots, n_receivers, 3]
-- source_component and receiver_component: one of ex, ey, ez, hx, hy, hz
+- epsilon, sigma, mu: shape [nz, ny, nx] or [B, nz, ny, nx]
+- source_location: [n_shots, n_sources, 3] or [B, n_shots, n_sources, 3]
+- receiver_location: [n_shots, n_receivers, 3] or [B, n_shots, n_receivers, 3]
+- source_component and receiver_component: one of ex, ey, ez
 
 Return tuple:
 - Ex, Ey, Ez, Hx, Hy, Hz
 - 12 CPML memory tensors
-- receiver_amplitudes
+- receiver_amplitudes shaped [nt, n_shots, n_receivers] for shared models
+- receiver_amplitudes shaped [nt, B, n_shots, n_receivers] for batched models
 
 ## Class Wrappers
 
 - MaxwellTM and Maxwell3D are torch.nn.Module wrappers that store model tensors and call maxwelltm/maxwell3d in forward.
 - Useful when integrating with training loops that repeatedly propagate on the same model object.
+
+## Choosing The Right Maxwell Entry Point
+
+- Use `maxwelltm` for the fastest onboarding path and most 2D examples.
+- Use `maxwell3d` when component selection and full 3D geometry matter.
+- Use `MaxwellTM` or `Maxwell3D` when you want model tensors stored inside a `torch.nn.Module`.
+
+See:
+
+- `guides/api-orientation.md`
+- `guides/modeling.md`
+- `guides/inversion.md`
 
 ## Advanced or Internal Functions
 - prepare_parameters

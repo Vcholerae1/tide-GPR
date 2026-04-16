@@ -11,12 +11,24 @@ TIDE is a PyTorch-based library for high-frequency electromagnetic wave propagat
 - **Maxwell Equation Solvers**:
   - 2D TM mode propagation
   - 3D Maxwell propagation
-- **Automatic Differentiation**: Gradient support through PyTorch's autograd
+- **Automatic Differentiation**: Gradient support through PyTorch's autograd hooks
 - **High Performance**: Optimized C/CUDA kernels for critical operations
 - **Flexible Storage**: Device/CPU/disk snapshot modes for gradient computation
 - **Staggered Grid**: Industry-standard FDTD staggered grid implementation
 - **PML Boundaries**: Perfectly Matched Layer absorbing boundaries
 - **Snapshot Compression**: Optional BF16 snapshot compression on the default path
+
+## Feature Matrix
+
+| Capability | Entry Point | Status | Notes |
+| --- | --- | --- | --- |
+| 2D TM forward modeling | `tide.maxwelltm` | Stable | Primary onboarding path |
+| 2D TM inversion / autograd | `tide.maxwelltm`, `MaxwellTM` | Stable | Uses PyTorch autograd |
+| 3D forward modeling | `tide.maxwell3d` | Stable | Supports component selection |
+| 3D inversion / gradients | `tide.maxwell3d`, `Maxwell3D` | Stable with constraints | Check the limitations guide before scaling up |
+| Snapshot storage modes | `storage_mode=*` | Stable | Device, CPU, disk, none, and auto |
+| Callbacks | `forward_callback`, `backward_callback` | Stable | Keep callback work lightweight |
+| Debye dispersion | `DebyeDispersion` | Advanced | Requires explicit time-step validation |
 
 ## Installation
 
@@ -80,8 +92,8 @@ epsilon[50:, :] = 9.0  # Add a layer
 
 # Set up source
 source_amplitude = tide.ricker(
-    freq=1e9,           # 1 GHz
-  length=1000,
+    freq=4e8,           # 400 MHz
+    length=1000,
     dt=1e-11,
     peak_time=5e-10
 ).reshape(1, 1, -1)
@@ -131,17 +143,14 @@ out = tide.maxwelltm(
     source_amplitude=src,
     source_location=src_loc,
     receiver_location=rec_loc,
-    compute_precision="default",
     storage_mode="auto",
     storage_compression="bf16",
 )
 ```
 
 Notes:
-- `compute_precision="default"` supports float32 and float64 paths.
 - `storage_mode` accepts device, cpu, disk, none, and auto.
-- `storage_compression` accepts none or bf16 on the default compute path.
-- The old TM2D fp16_scaled path has been removed from the current API.
+- `storage_compression` accepts none or bf16 for TM2D snapshot storage.
 
 ## Examples
 
@@ -153,13 +162,19 @@ See the [`examples/`](examples/) directory for complete workflows:
 
 ## Documentation
 
-Start with local docs:
+Recommended reading path:
 
-- docs/README.md
-- docs/getting-started.md
-- docs/overview.md
-- docs/api/index.md
-- docs/guides/
+1. `docs/getting-started.md` for installation and the first 2D forward run
+2. `docs/guides/api-orientation.md` for choosing between `tide.maxwelltm`, `tide.maxwell3d`, `MaxwellTM`, and `Maxwell3D`
+3. `docs/guides/modeling.md` and `docs/guides/inversion.md` for forward modeling and inversion workflows
+4. `docs/guides/configuration.md` for storage, callbacks, backend, and CFL-related controls
+5. `docs/guides/limitations.md` and `docs/guides/verification.md` before enabling advanced features broadly
+
+Key example docs:
+
+- `docs/examples/example_checkpoint.md`
+- `docs/examples/example_multiscale_crosscorr_wrong_wavelet.md`
+- `docs/examples/example_multiscale_joint_eps_sigma.md`
 
 ## Testing
 

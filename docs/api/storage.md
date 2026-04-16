@@ -31,3 +31,8 @@ Maps mode strings to backend integer constants used by native kernels.
 - Creates an isolated temporary directory under the specified base path
 - Generates one file path per logical shot buffer
 - Cleans up directory tree on close or object destruction
+
+## See Also
+
+- `guides/configuration.md` for how storage settings interact with memory limits and chunking
+- `guides/limitations.md` for backend-specific constraints

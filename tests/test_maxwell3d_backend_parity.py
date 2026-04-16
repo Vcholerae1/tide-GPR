@@ -1,6 +1,8 @@
 import torch
+import pytest
 
 import tide
+from tide import backend_utils
 
 
 def _case(device: torch.device):
@@ -55,3 +57,46 @@ def test_maxwell3d_backend_parity_via_fallback():
 
     for a, b in zip(out_py, out_backend):
         torch.testing.assert_close(a, b)
+
+
+def test_maxwell3d_native_cuda_matches_python_without_callback():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for native 3D CUDA parity test.")
+    if not backend_utils.is_backend_available():
+        pytest.skip("Native backend is required for native 3D CUDA parity test.")
+
+    device = torch.device("cuda")
+    epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _case(
+        device
+    )
+
+    out_py = tide.maxwell3d(
+        epsilon,
+        sigma,
+        mu,
+        grid_spacing=0.02,
+        dt=4e-11,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        pml_width=2,
+        source_component="ey",
+        receiver_component="ey",
+        python_backend=True,
+    )
+    out_backend = tide.maxwell3d(
+        epsilon,
+        sigma,
+        mu,
+        grid_spacing=0.02,
+        dt=4e-11,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        pml_width=2,
+        source_component="ey",
+        receiver_component="ey",
+        python_backend=False,
+    )
+
+    torch.testing.assert_close(out_backend[-1], out_py[-1], atol=1e-4, rtol=1e-4)

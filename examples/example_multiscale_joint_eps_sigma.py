@@ -1,4 +1,3 @@
-import os
 import time
 from pathlib import Path
 
@@ -17,8 +16,8 @@ print(f"Using device: {device}")
 
 dx = 0.02
 dt = 4e-11
-nt = 1500
-pml_width = 10
+nt = 1800
+pml_width = 16
 air_layer = 3
 
 n_shots = 100
@@ -27,7 +26,6 @@ first_source = 0
 # Shots per batch (batch size).
 batch_size = 8
 model_gradient_sampling_interval = 10
-compute_precision = os.getenv("TIDE_EXAMPLE_COMPUTE_PRECISION", "default")
 
 
 # Empirical conductivity model (sigma) from permittivity (epsilon)
@@ -109,7 +107,6 @@ inversion_schedule = [
 ]
 
 print(f"Base forward frequency: {base_forward_freq / 1e6:.0f} MHz")
-print(f"Compute precision: {compute_precision}")
 print("FIR low-pass schedule on observed data:")
 for key, spec in filter_specs.items():
     print(f"  {key}: {spec['desc']} (cutoff {spec['lowpass_mhz']} MHz)")
@@ -307,7 +304,6 @@ def forward_shots(
         model_gradient_sampling_interval=model_gradient_sampling_interval
         if requires_grad
         else 1,
-        compute_precision=compute_precision,
         # storage_mode='cpu'
     )
     return out[-1]  # [nt, shots_in_batch, 1]

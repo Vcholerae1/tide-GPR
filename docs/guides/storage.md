@@ -34,3 +34,12 @@ TemporaryStorage is responsible for:
 3. If host memory is also constrained, use disk.
 4. For auto mode, set storage_bytes_limit_device and storage_bytes_limit_host.
 5. Use bf16 compression when memory pressure dominates and accuracy remains acceptable.
+
+## Related Controls
+
+See `guides/configuration.md` for:
+
+- `storage_bytes_limit_device`
+- `storage_bytes_limit_host`
+- `storage_chunk_steps`
+- backend-specific storage caveats

@@ -54,3 +54,9 @@ wavelet = tide.ricker(...)
 - maxwelltm and maxwell3d are the recommended functional APIs for most workflows.
 - MaxwellTM and Maxwell3D classes are convenient wrappers when model parameters are reused across calls.
 - Validation and padding helpers are stable utilities used internally and are also safe for user preprocessing.
+
+## Where To Go Next
+
+- Read `guides/api-orientation.md` for choosing functional vs module APIs.
+- Read `guides/configuration.md` before tuning storage or backend behavior.
+- Read `guides/limitations.md` and `guides/verification.md` before relying on advanced combinations.
