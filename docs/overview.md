@@ -1,39 +1,65 @@
 # Project Overview
 
-TIDE is a PyTorch-first electromagnetic modeling and inversion library built around finite-difference time-domain Maxwell solvers.
+TIDE is a PyTorch-first electromagnetic modeling and inversion library built around finite-difference time-domain (FDTD) Maxwell solvers.
 
 ## What You Can Do With TIDE
 
-- Run 2D TM forward simulations with `tide.maxwelltm`
-- Run 3D forward simulations with `tide.maxwell3d`
-- Compute gradients with respect to `epsilon` and `sigma`
-- Build inversion loops in raw PyTorch or with `MaxwellTM` / `Maxwell3D`
-- Control memory and runtime with storage, callback, and backend options
+<div class="grid cards" markdown>
+
+-   :material-numeric-2-box:{ .lg .middle } **2D TM Forward Modeling**
+
+    ---
+    Run 2D TM-mode forward simulations with `tide.maxwelltm`, including CPML absorbing boundaries.
+
+-   :material-numeric-3-box:{ .lg .middle } **3D Forward Modeling**
+
+    ---
+    Run full 3D forward simulations with `tide.maxwell3d` using high-order finite-difference stencils.
+
+-   :material-gradient-horizontal:{ .lg .middle } **Gradient Computation**
+
+    ---
+    Autodiff with respect to `epsilon` and `sigma`, integrating directly with PyTorch optimizers.
+
+-   :material-rotate-3d:{ .lg .middle } **Inversion Loops**
+
+    ---
+    Build complete inversion workflows in raw PyTorch or with `MaxwellTM` / `Maxwell3D` modules.
+
+</div>
 
 ## Core Concepts
 
-- Model tensors: `epsilon`, `sigma`, and `mu`
-- Source amplitude tensors shaped `[n_shots, n_sources, nt]`
-- Receiver traces returned as `[nt, n_shots, n_receivers]`
-- CPML boundaries, finite-difference stencils, and CFL-driven internal resampling
+| Concept | Description |
+|---------|-------------|
+| Model tensors | `epsilon`, `sigma`, `mu` — shaped to match the grid |
+| Source amplitude | Shape `[n_shots, n_sources, nt]` |
+| Receiver traces | Returned as `[nt, n_shots, n_receivers]` |
+| Boundary conditions | CPML absorbing boundaries, finite-difference stencils, CFL-driven internal resampling |
 
-Coordinate conventions:
+### Coordinate Conventions
 
-- 2D TM uses `[y, x]`
-- 3D uses `[z, y, x]`
+!!! info "Axis Ordering"
+    - **2D TM**: uses `[y, x]` layout
+    - **3D**: uses `[z, y, x]` layout
 
 ## Typical Workflow
 
-1. Build model tensors on the target device.
-2. Define source and receiver geometry.
-3. Run forward modeling to produce synthetic traces.
-4. Compute a misfit against observed data.
-5. Backpropagate and update the model in an inversion loop.
+```mermaid
+graph LR
+    A[Build model tensors] --> B[Define source & receiver geometry]
+    B --> C[Forward simulation → synthetic traces]
+    C --> D[Compute misfit against observed data]
+    D --> E[Backpropagate]
+    E --> F[Update model]
+    F -->|iterate| C
+```
 
-## Recommended Learning Order
+## Recommended Learning Path
 
-1. Run a small 2D forward example from `getting-started.md`
-2. Read `guides/api-orientation.md`
-3. Read `guides/modeling.md`
-4. Read `guides/inversion.md`
-5. Review `guides/configuration.md`, `guides/limitations.md`, and `guides/verification.md` before scaling up
+!!! example "Learning Path"
+    1. Run a small 2D forward example from `getting-started.md`
+    2. Read `guides/api-orientation.md`
+    3. Read `guides/modeling.md`
+    4. Read `guides/inversion.md`
+    5. Before scaling up, review `guides/configuration.md`, `guides/limitations.md`, and `guides/verification.md`

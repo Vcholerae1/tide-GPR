@@ -2,46 +2,51 @@
 
 ## Installation
 
-### From PyPI
+=== "From PyPI (recommended)"
 
-```bash
-uv pip install tide-GPR
-```
+    ```bash
+    uv pip install tide-GPR
+    ```
 
-or
+    Or with pip:
 
-```bash
-pip install tide-GPR
-```
+    ```bash
+    pip install tide-GPR
+    ```
 
-If you use CUDA, install a CUDA-enabled PyTorch build first.
+=== "From Source"
 
-### From Source
+    ```bash
+    git clone https://github.com/vcholerae1/tide.git
+    cd tide
+    uv build
+    ```
 
-```bash
-git clone https://github.com/vcholerae1/tide.git
-cd tide
-uv build
-```
+!!! warning "GPU Support"
+    If you use CUDA, install a CUDA-enabled PyTorch build before installing TIDE.
 
-Requirements:
-- Python >= 3.12
-- PyTorch >= 2.9.1
-- CUDA Toolkit (optional, for GPU support)
-- CMake >= 3.28 (optional, for building from source)
+### Requirements
+
+| Dependency | Version |
+|------------|---------|
+| Python | ≥ 3.12 |
+| PyTorch | ≥ 2.9.1 |
+| CUDA Toolkit | optional, for GPU support |
+| CMake | ≥ 3.28, optional, for building from source |
 
 ## First Success Criteria
 
-You are done with this page when you can:
+!!! success "Goals for this page"
+    You are done with this page when you can:
 
-- import `tide`
-- verify backend availability
-- run one small 2D forward simulation
-- identify where inversion and API docs live next
+    - [x] `import tide` successfully
+    - [x] verify backend availability
+    - [x] run one small 2D forward simulation
+    - [x] identify where to find inversion and API docs next
 
 ## Minimal 2D Forward Run
 
-```python
+```python title="2d_forward.py"
 import torch
 import tide
 
@@ -76,7 +81,7 @@ print(receivers.shape)  # [nt, n_shots, n_receivers]
 
 ## Optional 3D Preview
 
-```python
+```python title="3d_forward.py"
 import torch
 import tide
 
@@ -116,25 +121,46 @@ print(rec.shape)
 from tide import backend_utils
 
 print("backend available:", backend_utils.is_backend_available())
-print("library path:", backend_utils.get_library_path())
+print("library path:     ", backend_utils.get_library_path())
 ```
 
-If backend is unavailable, TIDE can still run on Python fallback paths for supported configurations, but performance will be lower.
+!!! note
+    If the backend is unavailable, TIDE can still run on Python fallback paths for supported configurations, but performance will be lower.
 
 ## What To Read Next
 
-- `guides/api-orientation.md`
-- `guides/modeling.md`
-- `guides/inversion.md`
-- `api/index.md`
+<div class="grid cards" markdown>
+
+-   :material-api:{ .lg .middle } **API Orientation**
+
+    ---
+    [:octicons-arrow-right-24: guides/api-orientation.md](guides/api-orientation.md)
+
+-   :material-chart-scatter-plot:{ .lg .middle } **Modeling Guide**
+
+    ---
+    [:octicons-arrow-right-24: guides/modeling.md](guides/modeling.md)
+
+-   :material-sine-wave:{ .lg .middle } **Inversion Workflow**
+
+    ---
+    [:octicons-arrow-right-24: guides/inversion.md](guides/inversion.md)
+
+-   :material-code-braces:{ .lg .middle } **API Reference**
+
+    ---
+    [:octicons-arrow-right-24: api/index.md](api/index.md)
+
+</div>
 
 ## Common Startup Issues
 
-1. Shape mismatch:
-   - Ensure `source_amplitude` is `[n_shots, n_sources, nt]`.
-   - Ensure `source_location` and `receiver_location` are `[n_shots, n_points, ndim]`.
-2. Out-of-bounds indices:
-   - Coordinates must satisfy `0 <= index < model size` for each spatial dimension.
-3. Instability warning:
-   - TIDE auto-adjusts the internal time step using CFL and resamples time signals.
-   - Consider reducing `dt` or coarsening grid spacing.
+??? warning "Shape mismatch"
+    - `source_amplitude` must be `[n_shots, n_sources, nt]`
+    - `source_location` and `receiver_location` must be `[n_shots, n_points, ndim]`
+
+??? warning "Out-of-bounds indices"
+    Coordinates must satisfy `0 <= index < model_size` for each spatial dimension.
+
+??? warning "Instability warning"
+    TIDE auto-adjusts the internal time step using CFL and resamples time signals. Consider reducing `dt` or coarsening grid spacing.

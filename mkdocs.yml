@@ -1,18 +1,54 @@
 site_name: TIDE Documentation
-site_description: Torch-based Inversion & Development Engine documentation
+site_description: Torch-based Inversion & Development Engine — GPU-accelerated FDTD Maxwell solver for electromagnetic inversion in PyTorch
 site_url: https://vcholerae1.github.io/tide-GPR/
 repo_name: Vcholerae1/tide-GPR
 repo_url: https://github.com/Vcholerae1/tide-GPR
 edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2024 TIDE Contributors
 
 theme:
   name: material
-  language: zh
+  language: en
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/lightning-bolt
+  favicon: https://raw.githubusercontent.com/twitter/twemoji/master/assets/svg/26a1.svg
   features:
+    - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
     - navigation.expand
+    - navigation.path
     - navigation.top
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - search.highlight
+    - search.share
+    - search.suggest
     - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - content.tooltips
+    - toc.follow
 
 docs_dir: docs
 site_dir: site
@@ -20,15 +56,46 @@ exclude_docs: |
   README.md
   examples/**
 
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Vcholerae1/tide-GPR
+      name: GitHub
+  generator: false
+
 markdown_extensions:
   - admonition
+  - attr_list
+  - md_in_html
   - tables
+  - def_list
   - toc:
       permalink: true
-  - pymdownx.highlight
-  - pymdownx.superfences
+      permalink_title: Link to this section
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
+  - pymdownx.details
+  - pymdownx.keys
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.snippets
+
+plugins:
+  - search:
+      lang: en
 
 nav:
   - Home: index.md
