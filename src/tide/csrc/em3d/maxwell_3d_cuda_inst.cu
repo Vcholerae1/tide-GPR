@@ -23,6 +23,7 @@
 #undef STAGGERED_GRID_H
 #endif
 #include <cstdint>
+#include <cuda_bf16.h>
 #define TIDE_STAGGERED_GRID_3D 1
 #include "staggered_grid.h"
 #undef TIDE_STAGGERED_GRID_3D
@@ -138,6 +139,36 @@ __device__ __forceinline__ void atomic_add_tide(T *addr, T val) {
                   "atomic_add_tide only supports float/double");
     atomicAdd(addr, val);
   }
+}
+
+template <typename SnapshotT>
+__device__ __forceinline__ SnapshotT encode_snapshot(TIDE_DTYPE value);
+
+template <>
+__device__ __forceinline__ TIDE_DTYPE encode_snapshot<TIDE_DTYPE>(
+    TIDE_DTYPE value) {
+  return value;
+}
+
+template <>
+__device__ __forceinline__ __nv_bfloat16 encode_snapshot<__nv_bfloat16>(
+    TIDE_DTYPE value) {
+  return __float2bfloat16(static_cast<float>(value));
+}
+
+template <typename SnapshotT>
+__device__ __forceinline__ TIDE_DTYPE decode_snapshot(SnapshotT value);
+
+template <>
+__device__ __forceinline__ TIDE_DTYPE decode_snapshot<TIDE_DTYPE>(
+    TIDE_DTYPE value) {
+  return value;
+}
+
+template <>
+__device__ __forceinline__ TIDE_DTYPE decode_snapshot<__nv_bfloat16>(
+    __nv_bfloat16 value) {
+  return static_cast<TIDE_DTYPE>(__bfloat162float(value));
 }
 
 __global__ void add_sources_component(
@@ -547,6 +578,7 @@ __global__ void update_polarization_debye_3d(
                     debye_b[coeff_idx] * (field[field_idx] + prev_field[field_idx]);
 }
 
+template <typename SnapshotT>
 __global__ void forward_kernel_e_with_storage(
     TIDE_DTYPE const *__restrict const ca,
     TIDE_DTYPE const *__restrict const cb,
@@ -571,12 +603,12 @@ __global__ void forward_kernel_e_with_storage(
     TIDE_DTYPE const *__restrict const kz,
     TIDE_DTYPE const *__restrict const ky,
     TIDE_DTYPE const *__restrict const kx,
-    TIDE_DTYPE *__restrict const ex_store,
-    TIDE_DTYPE *__restrict const ey_store,
-    TIDE_DTYPE *__restrict const ez_store,
-    TIDE_DTYPE *__restrict const curl_x_store,
-    TIDE_DTYPE *__restrict const curl_y_store,
-    TIDE_DTYPE *__restrict const curl_z_store,
+    SnapshotT *__restrict const ex_store,
+    SnapshotT *__restrict const ey_store,
+    SnapshotT *__restrict const ez_store,
+    SnapshotT *__restrict const curl_x_store,
+    SnapshotT *__restrict const curl_y_store,
+    SnapshotT *__restrict const curl_z_store,
     bool const ca_requires_grad,
     bool const cb_requires_grad) {
   int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
@@ -641,14 +673,14 @@ __global__ void forward_kernel_e_with_storage(
   TIDE_DTYPE const curl_z = dHx_dy - dHy_dx;
 
   if (ca_requires_grad && ex_store != nullptr) {
-    ex_store[i] = ex[i];
-    ey_store[i] = ey[i];
-    ez_store[i] = ez[i];
+    ex_store[i] = encode_snapshot<SnapshotT>(ex[i]);
+    ey_store[i] = encode_snapshot<SnapshotT>(ey[i]);
+    ez_store[i] = encode_snapshot<SnapshotT>(ez[i]);
   }
   if (cb_requires_grad && curl_x_store != nullptr) {
-    curl_x_store[i] = curl_x;
-    curl_y_store[i] = curl_y;
-    curl_z_store[i] = curl_z;
+    curl_x_store[i] = encode_snapshot<SnapshotT>(curl_x);
+    curl_y_store[i] = encode_snapshot<SnapshotT>(curl_y);
+    curl_z_store[i] = encode_snapshot<SnapshotT>(curl_z);
   }
 
   ex[i] = ca_val * ex[i] + cb_val * curl_x;
@@ -817,6 +849,7 @@ __global__ void backward_kernel_lambda_h(
 #undef LEZ_H
 }
 
+template <typename SnapshotT>
 __global__ void backward_kernel_lambda_e_with_grad(
     TIDE_DTYPE const *__restrict const ca,
     TIDE_DTYPE const *__restrict const cq,
@@ -841,12 +874,12 @@ __global__ void backward_kernel_lambda_e_with_grad(
     TIDE_DTYPE const *__restrict const kz,
     TIDE_DTYPE const *__restrict const ky,
     TIDE_DTYPE const *__restrict const kx,
-    TIDE_DTYPE const *__restrict const ex_store,
-    TIDE_DTYPE const *__restrict const ey_store,
-    TIDE_DTYPE const *__restrict const ez_store,
-    TIDE_DTYPE const *__restrict const curl_x_store,
-    TIDE_DTYPE const *__restrict const curl_y_store,
-    TIDE_DTYPE const *__restrict const curl_z_store,
+    SnapshotT const *__restrict const ex_store,
+    SnapshotT const *__restrict const ey_store,
+    SnapshotT const *__restrict const ez_store,
+    SnapshotT const *__restrict const curl_x_store,
+    SnapshotT const *__restrict const curl_y_store,
+    SnapshotT const *__restrict const curl_z_store,
     TIDE_DTYPE *__restrict const grad_ca,
     TIDE_DTYPE *__restrict const grad_cb,
     bool const grad_ca_step,
@@ -873,8 +906,8 @@ __global__ void backward_kernel_lambda_e_with_grad(
   }
 
 #define LHX_E(dz, dy, dx) lambda_hx[ND_INDEX(i, dz, dy, dx)]
-#define LHY_E(dz, dy, dx) lambda_hy[ND_INDEX(i, dz, dy, dx)]
-#define LHZ_E(dz, dy, dx) lambda_hz[ND_INDEX(i, dz, dy, dx)]
+  #define LHY_E(dz, dy, dx) lambda_hy[ND_INDEX(i, dz, dy, dx)]
+  #define LHZ_E(dz, dy, dx) lambda_hz[ND_INDEX(i, dz, dy, dx)]
 
   TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
 
@@ -922,8 +955,9 @@ __global__ void backward_kernel_lambda_e_with_grad(
 
   if (grad_ca_step && grad_ca != nullptr && ex_store != nullptr && ey_store != nullptr &&
       ez_store != nullptr) {
-    TIDE_DTYPE const acc_ca =
-        lex_curr * ex_store[i] + ley_curr * ey_store[i] + lez_curr * ez_store[i];
+    TIDE_DTYPE const acc_ca = lex_curr * decode_snapshot(ex_store[i]) +
+                              ley_curr * decode_snapshot(ey_store[i]) +
+                              lez_curr * decode_snapshot(ez_store[i]);
     TIDE_DTYPE const scaled = acc_ca * (TIDE_DTYPE)step_ratio_eff;
     if (ca_batched) {
       grad_ca[i] += scaled;
@@ -934,8 +968,9 @@ __global__ void backward_kernel_lambda_e_with_grad(
 
   if (grad_cb_step && grad_cb != nullptr && curl_x_store != nullptr &&
       curl_y_store != nullptr && curl_z_store != nullptr) {
-    TIDE_DTYPE const acc_cb = lex_curr * curl_x_store[i] + ley_curr * curl_y_store[i] +
-                              lez_curr * curl_z_store[i];
+    TIDE_DTYPE const acc_cb = lex_curr * decode_snapshot(curl_x_store[i]) +
+                              ley_curr * decode_snapshot(curl_y_store[i]) +
+                              lez_curr * decode_snapshot(curl_z_store[i]);
     TIDE_DTYPE const scaled = acc_cb * (TIDE_DTYPE)step_ratio_eff;
     if (cb_batched) {
       grad_cb[i] += scaled;
@@ -947,6 +982,103 @@ __global__ void backward_kernel_lambda_e_with_grad(
 #undef LHX_E
 #undef LHY_E
 #undef LHZ_E
+}
+
+__global__ void backward_kernel_lambda_e(
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cq,
+    TIDE_DTYPE const *__restrict const lambda_hx,
+    TIDE_DTYPE const *__restrict const lambda_hy,
+    TIDE_DTYPE const *__restrict const lambda_hz,
+    TIDE_DTYPE *__restrict const lambda_ex,
+    TIDE_DTYPE *__restrict const lambda_ey,
+    TIDE_DTYPE *__restrict const lambda_ez,
+    TIDE_DTYPE *__restrict const m_lambda_hz_y,
+    TIDE_DTYPE *__restrict const m_lambda_hy_z,
+    TIDE_DTYPE *__restrict const m_lambda_hx_z,
+    TIDE_DTYPE *__restrict const m_lambda_hz_x,
+    TIDE_DTYPE *__restrict const m_lambda_hy_x,
+    TIDE_DTYPE *__restrict const m_lambda_hx_y,
+    TIDE_DTYPE const *__restrict const az,
+    TIDE_DTYPE const *__restrict const bz,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const kz,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kx) {
+  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t total = n_shots * shot_numel;
+  if (i >= total) {
+    return;
+  }
+
+  int64_t const shot_idx = i / shot_numel;
+  int64_t const j = i - shot_idx * shot_numel;
+
+  int64_t const yz_stride = ny * nx;
+  int64_t const z = j / yz_stride;
+  int64_t const rem = j - z * yz_stride;
+  int64_t const y = rem / nx;
+  int64_t const x = rem - y * nx;
+
+  if (z < FD_PAD || z >= nz - FD_PAD + 1 || y < FD_PAD || y >= ny - FD_PAD + 1 ||
+      x < FD_PAD || x >= nx - FD_PAD + 1) {
+    return;
+  }
+
+#define LHX_ENG(dz, dy, dx) lambda_hx[ND_INDEX(i, dz, dy, dx)]
+#define LHY_ENG(dz, dy, dx) lambda_hy[ND_INDEX(i, dz, dy, dx)]
+#define LHZ_ENG(dz, dy, dx) lambda_hz[ND_INDEX(i, dz, dy, dx)]
+
+  TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
+
+  bool const pml_z_v = (z < pml_z0) || (z >= pml_z1);
+  bool const pml_y_v = (y < pml_y0) || (y >= pml_y1);
+  bool const pml_x_v = (x < pml_x0) || (x >= pml_x1);
+
+  TIDE_DTYPE dLhy_dz = DIFFZH1_ADJ(CQ_I, LHY_ENG);
+  TIDE_DTYPE dLhz_dy = DIFFYH1_ADJ(CQ_I, LHZ_ENG);
+  TIDE_DTYPE dLhz_dx = DIFFXH1_ADJ(CQ_I, LHZ_ENG);
+  TIDE_DTYPE dLhx_dz = DIFFZH1_ADJ(CQ_I, LHX_ENG);
+  TIDE_DTYPE dLhx_dy = DIFFYH1_ADJ(CQ_I, LHX_ENG);
+  TIDE_DTYPE dLhy_dx = DIFFXH1_ADJ(CQ_I, LHY_ENG);
+
+  if (pml_z_v) {
+    m_lambda_hy_z[i] = bz[z] * m_lambda_hy_z[i] + az[z] * dLhy_dz;
+    dLhy_dz = dLhy_dz / kz[z] + m_lambda_hy_z[i];
+    m_lambda_hx_z[i] = bz[z] * m_lambda_hx_z[i] + az[z] * dLhx_dz;
+    dLhx_dz = dLhx_dz / kz[z] + m_lambda_hx_z[i];
+  }
+  if (pml_y_v) {
+    m_lambda_hz_y[i] = by[y] * m_lambda_hz_y[i] + ay[y] * dLhz_dy;
+    dLhz_dy = dLhz_dy / ky[y] + m_lambda_hz_y[i];
+    m_lambda_hx_y[i] = by[y] * m_lambda_hx_y[i] + ay[y] * dLhx_dy;
+    dLhx_dy = dLhx_dy / ky[y] + m_lambda_hx_y[i];
+  }
+  if (pml_x_v) {
+    m_lambda_hz_x[i] = bx[x] * m_lambda_hz_x[i] + ax[x] * dLhz_dx;
+    dLhz_dx = dLhz_dx / kx[x] + m_lambda_hz_x[i];
+    m_lambda_hy_x[i] = bx[x] * m_lambda_hy_x[i] + ax[x] * dLhy_dx;
+    dLhy_dx = dLhy_dx / kx[x] + m_lambda_hy_x[i];
+  }
+
+  TIDE_DTYPE const curl_lambda_x = dLhy_dz - dLhz_dy;
+  TIDE_DTYPE const curl_lambda_y = dLhz_dx - dLhx_dz;
+  TIDE_DTYPE const curl_lambda_z = dLhx_dy - dLhy_dx;
+
+  TIDE_DTYPE const lex_curr = lambda_ex[i];
+  TIDE_DTYPE const ley_curr = lambda_ey[i];
+  TIDE_DTYPE const lez_curr = lambda_ez[i];
+
+  lambda_ex[i] = ca_val * lex_curr + curl_lambda_x;
+  lambda_ey[i] = ca_val * ley_curr + curl_lambda_y;
+  lambda_ez[i] = ca_val * lez_curr + curl_lambda_z;
+
+#undef LHX_ENG
+#undef LHY_ENG
+#undef LHZ_ENG
 }
 
 __global__ void convert_grad_ca_cb_to_eps_sigma_3d(
@@ -1501,6 +1633,7 @@ extern "C" void FUNC(forward_with_storage)(
     int64_t const n_receivers_per_shot_h,
     int64_t const step_ratio_h,
     int64_t const storage_mode,
+    int64_t const storage_format_h,
     int64_t const shot_bytes_uncomp,
     bool const ca_requires_grad,
     bool const cb_requires_grad,
@@ -1533,12 +1666,18 @@ extern "C" void FUNC(forward_with_storage)(
   int64_t const step_ratio_eff = step_ratio_h > 0 ? step_ratio_h : 1;
   size_t const bytes_per_step_store =
       (size_t)shot_bytes_uncomp * (size_t)n_shots_h;
+  size_t const full_bytes_per_shot = (size_t)shot_numel_h * sizeof(TIDE_DTYPE);
+  size_t const bf16_bytes_per_shot = (size_t)shot_numel_h * sizeof(__nv_bfloat16);
+  bool const storage_bf16 = storage_format_h == STORAGE_FORMAT_BF16;
+  bool const storage_full = storage_format_h == STORAGE_FORMAT_FULL;
   bool const storage_direct =
       (storage_mode == STORAGE_DEVICE) &&
-      (shot_bytes_uncomp == (int64_t)(shot_numel_h * (int64_t)sizeof(TIDE_DTYPE)));
+      ((storage_full && shot_bytes_uncomp == (int64_t)full_bytes_per_shot) ||
+       (storage_bf16 && shot_bytes_uncomp == (int64_t)bf16_bytes_per_shot));
   bool const host_backed_storage =
       (storage_mode == STORAGE_CPU || storage_mode == STORAGE_DISK) &&
-      (shot_bytes_uncomp == (int64_t)(shot_numel_h * (int64_t)sizeof(TIDE_DTYPE)));
+      ((storage_full && shot_bytes_uncomp == (int64_t)full_bytes_per_shot) ||
+       (storage_bf16 && shot_bytes_uncomp == (int64_t)bf16_bytes_per_shot));
   bool const use_storage_pipeline =
       host_backed_storage && (ca_requires_grad || cb_requires_grad) &&
       stream_storage != nullptr && stream_storage != stream_compute;
@@ -1581,10 +1720,10 @@ extern "C" void FUNC(forward_with_storage)(
   ScalarLaunchConfig3D const launch_cfg = make_scalar_launch_config_3d(
       n_shots_h, shot_numel_h, n_sources_per_shot_h, n_receivers_per_shot_h);
 
-  TIDE_DTYPE *const device_stores[6] = {store_1, store_3, store_5,
-                                        store_7, store_9, store_11};
-  TIDE_DTYPE *const host_stores[6] = {store_2, store_4, store_6,
-                                      store_8, store_10, store_12};
+  void *const device_stores[6] = {store_1, store_3, store_5,
+                                  store_7, store_9, store_11};
+  void *const host_stores[6] = {store_2, store_4, store_6,
+                                store_8, store_10, store_12};
   char **const store_filenames[6] = {store_filenames_1, store_filenames_2,
                                      store_filenames_3, store_filenames_4,
                                      store_filenames_5, store_filenames_6};
@@ -1661,71 +1800,108 @@ extern "C" void FUNC(forward_with_storage)(
           store_idx, storage_mode, bytes_per_step_store);
       size_t const host_offset = cpu_linear_storage_offset_bytes(
           store_idx, storage_mode, bytes_per_step_store);
-      TIDE_DTYPE *const ex_store_t =
+      void *const ex_store_t =
           (ca_requires_grad && device_stores[0] != nullptr)
-              ? reinterpret_cast<TIDE_DTYPE *>(
+              ? reinterpret_cast<void *>(
                     reinterpret_cast<uint8_t *>(device_stores[0]) + device_offset)
               : nullptr;
-      TIDE_DTYPE *const ey_store_t =
+      void *const ey_store_t =
           (ca_requires_grad && device_stores[1] != nullptr)
-              ? reinterpret_cast<TIDE_DTYPE *>(
+              ? reinterpret_cast<void *>(
                     reinterpret_cast<uint8_t *>(device_stores[1]) + device_offset)
               : nullptr;
-      TIDE_DTYPE *const ez_store_t =
+      void *const ez_store_t =
           (ca_requires_grad && device_stores[2] != nullptr)
-              ? reinterpret_cast<TIDE_DTYPE *>(
+              ? reinterpret_cast<void *>(
                     reinterpret_cast<uint8_t *>(device_stores[2]) + device_offset)
               : nullptr;
-      TIDE_DTYPE *const curl_x_store_t =
+      void *const curl_x_store_t =
           (cb_requires_grad && device_stores[3] != nullptr)
-              ? reinterpret_cast<TIDE_DTYPE *>(
+              ? reinterpret_cast<void *>(
                     reinterpret_cast<uint8_t *>(device_stores[3]) + device_offset)
               : nullptr;
-      TIDE_DTYPE *const curl_y_store_t =
+      void *const curl_y_store_t =
           (cb_requires_grad && device_stores[4] != nullptr)
-              ? reinterpret_cast<TIDE_DTYPE *>(
+              ? reinterpret_cast<void *>(
                     reinterpret_cast<uint8_t *>(device_stores[4]) + device_offset)
               : nullptr;
-      TIDE_DTYPE *const curl_z_store_t =
+      void *const curl_z_store_t =
           (cb_requires_grad && device_stores[5] != nullptr)
-              ? reinterpret_cast<TIDE_DTYPE *>(
+              ? reinterpret_cast<void *>(
                     reinterpret_cast<uint8_t *>(device_stores[5]) + device_offset)
               : nullptr;
 
-      forward_kernel_e_with_storage<<<(unsigned)launch_cfg.blocks_cells,
-                                      launch_cfg.threads_cells, 0,
-                                      stream_compute>>>(
-          ca,
-          cb,
-          ex,
-          ey,
-          ez,
-          hx,
-          hy,
-          hz,
-          m_hy_z,
-          m_hz_y,
-          m_hz_x,
-          m_hx_z,
-          m_hx_y,
-          m_hy_x,
-          az,
-          bz,
-          ay,
-          by,
-          ax,
-          bx,
-          kz,
-          ky,
-          kx,
-          ex_store_t,
-          ey_store_t,
-          ez_store_t,
-          curl_x_store_t,
-          curl_y_store_t,
-          curl_z_store_t,
-          ca_requires_grad,
-          cb_requires_grad);
+      if (storage_bf16) {
+        forward_kernel_e_with_storage<__nv_bfloat16>
+            <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+               stream_compute>>>(
+                ca,
+                cb,
+                ex,
+                ey,
+                ez,
+                hx,
+                hy,
+                hz,
+                m_hy_z,
+                m_hz_y,
+                m_hz_x,
+                m_hx_z,
+                m_hx_y,
+                m_hy_x,
+                az,
+                bz,
+                ay,
+                by,
+                ax,
+                bx,
+                kz,
+                ky,
+                kx,
+                reinterpret_cast<__nv_bfloat16 *>(ex_store_t),
+                reinterpret_cast<__nv_bfloat16 *>(ey_store_t),
+                reinterpret_cast<__nv_bfloat16 *>(ez_store_t),
+                reinterpret_cast<__nv_bfloat16 *>(curl_x_store_t),
+                reinterpret_cast<__nv_bfloat16 *>(curl_y_store_t),
+                reinterpret_cast<__nv_bfloat16 *>(curl_z_store_t),
+                ca_requires_grad,
+                cb_requires_grad);
+      } else {
+        forward_kernel_e_with_storage<TIDE_DTYPE>
+            <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+               stream_compute>>>(
+                ca,
+                cb,
+                ex,
+                ey,
+                ez,
+                hx,
+                hy,
+                hz,
+                m_hy_z,
+                m_hz_y,
+                m_hz_x,
+                m_hx_z,
+                m_hx_y,
+                m_hy_x,
+                az,
+                bz,
+                ay,
+                by,
+                ax,
+                bx,
+                kz,
+                ky,
+                kx,
+                reinterpret_cast<TIDE_DTYPE *>(ex_store_t),
+                reinterpret_cast<TIDE_DTYPE *>(ey_store_t),
+                reinterpret_cast<TIDE_DTYPE *>(ez_store_t),
+                reinterpret_cast<TIDE_DTYPE *>(curl_x_store_t),
+                reinterpret_cast<TIDE_DTYPE *>(curl_y_store_t),
+                reinterpret_cast<TIDE_DTYPE *>(curl_z_store_t),
+                ca_requires_grad,
+                cb_requires_grad);
+      }
 
       if (host_backed_storage) {
         cudaStream_t save_stream = stream_compute;
@@ -1739,16 +1915,17 @@ extern "C" void FUNC(forward_with_storage)(
           save_stream = stream_storage;
         }
 
-        TIDE_DTYPE *const current_device[6] = {ex_store_t, ey_store_t, ez_store_t,
-                                               curl_x_store_t, curl_y_store_t,
-                                               curl_z_store_t};
+        void *const current_device[6] = {ex_store_t, ey_store_t, ez_store_t,
+                                         curl_x_store_t, curl_y_store_t,
+                                         curl_z_store_t};
         for (int i = 0; i < 6; ++i) {
           if (!component_required[i] || current_device[i] == nullptr ||
               host_stores[i] == nullptr) {
             continue;
           }
-          TIDE_DTYPE *const current_host = reinterpret_cast<TIDE_DTYPE *>(
-              reinterpret_cast<uint8_t *>(host_stores[i]) + host_offset);
+          void *const current_host =
+              reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(host_stores[i]) +
+                                       host_offset);
           if (storage_mode == STORAGE_DISK) {
             int64_t const file_offset =
                 store_idx * (int64_t)bytes_per_step_store;
@@ -1915,6 +2092,7 @@ extern "C" void FUNC(backward)(
     int64_t const n_receivers_per_shot_h,
     int64_t const step_ratio_h,
     int64_t const storage_mode,
+    int64_t const storage_format_h,
     int64_t const shot_bytes_uncomp,
     bool const ca_requires_grad,
     bool const cb_requires_grad,
@@ -1945,12 +2123,18 @@ extern "C" void FUNC(backward)(
   int64_t const step_ratio_eff = step_ratio_h > 0 ? step_ratio_h : 1;
   size_t const bytes_per_step_store =
       (size_t)shot_bytes_uncomp * (size_t)n_shots_h;
+  size_t const full_bytes_per_shot = (size_t)shot_numel_h * sizeof(TIDE_DTYPE);
+  size_t const bf16_bytes_per_shot = (size_t)shot_numel_h * sizeof(__nv_bfloat16);
+  bool const storage_bf16 = storage_format_h == STORAGE_FORMAT_BF16;
+  bool const storage_full = storage_format_h == STORAGE_FORMAT_FULL;
   bool const storage_direct =
       (storage_mode == STORAGE_DEVICE) &&
-      (shot_bytes_uncomp == (int64_t)(shot_numel_h * (int64_t)sizeof(TIDE_DTYPE)));
+      ((storage_full && shot_bytes_uncomp == (int64_t)full_bytes_per_shot) ||
+       (storage_bf16 && shot_bytes_uncomp == (int64_t)bf16_bytes_per_shot));
   bool const host_backed_storage =
       (storage_mode == STORAGE_CPU || storage_mode == STORAGE_DISK) &&
-      (shot_bytes_uncomp == (int64_t)(shot_numel_h * (int64_t)sizeof(TIDE_DTYPE)));
+      ((storage_full && shot_bytes_uncomp == (int64_t)full_bytes_per_shot) ||
+       (storage_bf16 && shot_bytes_uncomp == (int64_t)bf16_bytes_per_shot));
   bool const use_storage_pipeline =
       host_backed_storage && (ca_requires_grad || cb_requires_grad) &&
       stream_storage != nullptr && stream_storage != stream_compute;
@@ -1993,10 +2177,10 @@ extern "C" void FUNC(backward)(
   ScalarLaunchConfig3D const launch_cfg = make_scalar_launch_config_3d(
       n_shots_h, shot_numel_h, n_sources_per_shot_h, n_receivers_per_shot_h);
 
-  TIDE_DTYPE *const device_stores[6] = {store_1, store_3, store_5,
-                                        store_7, store_9, store_11};
-  TIDE_DTYPE *const host_stores[6] = {store_2, store_4, store_6,
-                                      store_8, store_10, store_12};
+  void *const device_stores[6] = {store_1, store_3, store_5,
+                                  store_7, store_9, store_11};
+  void *const host_stores[6] = {store_2, store_4, store_6,
+                                store_8, store_10, store_12};
   char **const store_filenames[6] = {store_filenames_1, store_filenames_2,
                                      store_filenames_3, store_filenames_4,
                                      store_filenames_5, store_filenames_6};
@@ -2047,8 +2231,9 @@ extern "C" void FUNC(backward)(
         if (!component_required[comp] || host_stores[comp] == nullptr) {
           continue;
         }
-        TIDE_DTYPE *const host_ptr = reinterpret_cast<TIDE_DTYPE *>(
-            reinterpret_cast<uint8_t *>(host_stores[comp]) + host_offset);
+        void *const host_ptr =
+            reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(host_stores[comp]) +
+                                     host_offset);
         storage_async_disk_enqueue_read(async_disk_handles[comp], slot, host_ptr,
                                         bytes_per_step_store, file_offset,
                                         nullptr);
@@ -2140,34 +2325,34 @@ extern "C" void FUNC(backward)(
     size_t const host_offset = cpu_linear_storage_offset_bytes(
         store_idx, storage_mode, bytes_per_step_store);
 
-    TIDE_DTYPE const *const ex_store =
+    void const *const ex_store =
         grad_ca_step
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(device_stores[0]) + device_offset)
             : nullptr;
-    TIDE_DTYPE const *const ey_store =
+    void const *const ey_store =
         grad_ca_step
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(device_stores[1]) + device_offset)
             : nullptr;
-    TIDE_DTYPE const *const ez_store =
+    void const *const ez_store =
         grad_ca_step
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(device_stores[2]) + device_offset)
             : nullptr;
-    TIDE_DTYPE const *const curl_x_store =
+    void const *const curl_x_store =
         grad_cb_step
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(device_stores[3]) + device_offset)
             : nullptr;
-    TIDE_DTYPE const *const curl_y_store =
+    void const *const curl_y_store =
         grad_cb_step
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(device_stores[4]) + device_offset)
             : nullptr;
-    TIDE_DTYPE const *const curl_z_store =
+    void const *const curl_z_store =
         grad_cb_step
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(device_stores[5]) + device_offset)
             : nullptr;
 
@@ -2178,29 +2363,29 @@ extern "C" void FUNC(backward)(
             __FILE__, __LINE__);
         load_stream = stream_storage;
       }
-      TIDE_DTYPE *const host_ptrs[6] = {
-          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[0]) +
-                                         host_offset),
-          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[1]) +
-                                         host_offset),
-          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[2]) +
-                                         host_offset),
-          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[3]) +
-                                         host_offset),
-          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[4]) +
-                                         host_offset),
-          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[5]) +
-                                         host_offset),
+      void *const host_ptrs[6] = {
+          reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(host_stores[0]) +
+                                   host_offset),
+          reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(host_stores[1]) +
+                                   host_offset),
+          reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(host_stores[2]) +
+                                   host_offset),
+          reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(host_stores[3]) +
+                                   host_offset),
+          reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(host_stores[4]) +
+                                   host_offset),
+          reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(host_stores[5]) +
+                                   host_offset),
       };
-      TIDE_DTYPE const *const device_ptrs[6] = {ex_store,    ey_store,   ez_store,
-                                                curl_x_store, curl_y_store, curl_z_store};
+      void const *const device_ptrs[6] = {ex_store,    ey_store,   ez_store,
+                                          curl_x_store, curl_y_store, curl_z_store};
       for (int i = 0; i < 6; ++i) {
         if (!component_required[i] || device_ptrs[i] == nullptr ||
             host_stores[i] == nullptr) {
           continue;
         }
         storage_copy_snapshot_h2d(
-            const_cast<TIDE_DTYPE *>(device_ptrs[i]), host_ptrs[i],
+            const_cast<void *>(device_ptrs[i]), host_ptrs[i],
             (size_t)shot_bytes_uncomp, (size_t)n_shots_h, load_stream);
       }
       if (use_storage_pipeline) {
@@ -2215,22 +2400,22 @@ extern "C" void FUNC(backward)(
             __FILE__, __LINE__);
         load_stream = stream_storage;
       }
-      TIDE_DTYPE *const host_ptrs[6] = {
-          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[0]) +
-                                         host_offset),
-          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[1]) +
-                                         host_offset),
-          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[2]) +
-                                         host_offset),
-          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[3]) +
-                                         host_offset),
-          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[4]) +
-                                         host_offset),
-          reinterpret_cast<TIDE_DTYPE *>(reinterpret_cast<uint8_t *>(host_stores[5]) +
-                                         host_offset),
+      void *const host_ptrs[6] = {
+          reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(host_stores[0]) +
+                                   host_offset),
+          reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(host_stores[1]) +
+                                   host_offset),
+          reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(host_stores[2]) +
+                                   host_offset),
+          reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(host_stores[3]) +
+                                   host_offset),
+          reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(host_stores[4]) +
+                                   host_offset),
+          reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(host_stores[5]) +
+                                   host_offset),
       };
-      TIDE_DTYPE const *const device_ptrs[6] = {ex_store,    ey_store,   ez_store,
-                                                curl_x_store, curl_y_store, curl_z_store};
+      void const *const device_ptrs[6] = {ex_store,    ey_store,   ez_store,
+                                          curl_x_store, curl_y_store, curl_z_store};
       for (int i = 0; i < 6; ++i) {
         if (!component_required[i] || device_ptrs[i] == nullptr ||
             host_stores[i] == nullptr) {
@@ -2238,7 +2423,7 @@ extern "C" void FUNC(backward)(
         }
         storage_async_disk_wait_slot(async_disk_handles[i], slot);
         tide::cuda_check_or_abort(
-            cudaMemcpyAsync(const_cast<TIDE_DTYPE *>(device_ptrs[i]), host_ptrs[i],
+            cudaMemcpyAsync(const_cast<void *>(device_ptrs[i]), host_ptrs[i],
                             bytes_per_step_store, cudaMemcpyHostToDevice,
                             load_stream),
             __FILE__, __LINE__);
@@ -2297,43 +2482,111 @@ extern "C" void FUNC(backward)(
         kyh,
         kxh);
 
-    backward_kernel_lambda_e_with_grad<<<(unsigned)launch_cfg.blocks_cells,
-                                         launch_cfg.threads_cells, 0,
-                                         stream_compute>>>(
-        ca,
-        cq,
-        lambda_hx,
-        lambda_hy,
-        lambda_hz,
-        lambda_ex,
-        lambda_ey,
-        lambda_ez,
-        m_lambda_hz_y,
-        m_lambda_hy_z,
-        m_lambda_hx_z,
-        m_lambda_hz_x,
-        m_lambda_hy_x,
-        m_lambda_hx_y,
-        az,
-        bz,
-        ay,
-        by,
-        ax,
-        bx,
-        kz,
-        ky,
-        kx,
-        ex_store,
-        ey_store,
-        ez_store,
-        curl_x_store,
-        curl_y_store,
-        curl_z_store,
-        grad_ca,
-        grad_cb,
-        grad_ca_step,
-        grad_cb_step,
-        step_ratio_eff);
+    if (want_load) {
+      if (storage_bf16) {
+        backward_kernel_lambda_e_with_grad<__nv_bfloat16>
+            <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+               stream_compute>>>(
+                ca,
+                cq,
+                lambda_hx,
+                lambda_hy,
+                lambda_hz,
+                lambda_ex,
+                lambda_ey,
+                lambda_ez,
+                m_lambda_hz_y,
+                m_lambda_hy_z,
+                m_lambda_hx_z,
+                m_lambda_hz_x,
+                m_lambda_hy_x,
+                m_lambda_hx_y,
+                az,
+                bz,
+                ay,
+                by,
+                ax,
+                bx,
+                kz,
+                ky,
+                kx,
+                reinterpret_cast<__nv_bfloat16 const *>(ex_store),
+                reinterpret_cast<__nv_bfloat16 const *>(ey_store),
+                reinterpret_cast<__nv_bfloat16 const *>(ez_store),
+                reinterpret_cast<__nv_bfloat16 const *>(curl_x_store),
+                reinterpret_cast<__nv_bfloat16 const *>(curl_y_store),
+                reinterpret_cast<__nv_bfloat16 const *>(curl_z_store),
+                grad_ca,
+                grad_cb,
+                grad_ca_step,
+                grad_cb_step,
+                step_ratio_eff);
+      } else {
+        backward_kernel_lambda_e_with_grad<TIDE_DTYPE>
+            <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+               stream_compute>>>(
+                ca,
+                cq,
+                lambda_hx,
+                lambda_hy,
+                lambda_hz,
+                lambda_ex,
+                lambda_ey,
+                lambda_ez,
+                m_lambda_hz_y,
+                m_lambda_hy_z,
+                m_lambda_hx_z,
+                m_lambda_hz_x,
+                m_lambda_hy_x,
+                m_lambda_hx_y,
+                az,
+                bz,
+                ay,
+                by,
+                ax,
+                bx,
+                kz,
+                ky,
+                kx,
+                reinterpret_cast<TIDE_DTYPE const *>(ex_store),
+                reinterpret_cast<TIDE_DTYPE const *>(ey_store),
+                reinterpret_cast<TIDE_DTYPE const *>(ez_store),
+                reinterpret_cast<TIDE_DTYPE const *>(curl_x_store),
+                reinterpret_cast<TIDE_DTYPE const *>(curl_y_store),
+                reinterpret_cast<TIDE_DTYPE const *>(curl_z_store),
+                grad_ca,
+                grad_cb,
+                grad_ca_step,
+                grad_cb_step,
+                step_ratio_eff);
+      }
+    } else {
+      backward_kernel_lambda_e<<<(unsigned)launch_cfg.blocks_cells,
+                                 launch_cfg.threads_cells, 0, stream_compute>>>(
+          ca,
+          cq,
+          lambda_hx,
+          lambda_hy,
+          lambda_hz,
+          lambda_ex,
+          lambda_ey,
+          lambda_ez,
+          m_lambda_hz_y,
+          m_lambda_hy_z,
+          m_lambda_hx_z,
+          m_lambda_hz_x,
+          m_lambda_hy_x,
+          m_lambda_hx_y,
+          az,
+          bz,
+          ay,
+          by,
+          ax,
+          bx,
+          kz,
+          ky,
+          kx);
+    }
 
     if (want_load && use_storage_pipeline) {
       tide::cuda_check_or_abort(

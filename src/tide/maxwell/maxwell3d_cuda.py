@@ -6,7 +6,7 @@ import torch
 from ..callbacks import Callback, CallbackState
 from ..dispersion import DebyeDispersion
 from ..grid_utils import _normalize_grid_spacing_3d, _normalize_pml_width_3d
-from ..storage import _normalize_storage_compression
+from ..storage import _normalize_storage_compression, _resolve_storage_compression
 from ..utils import C0, compile_material_coefficients
 from .common import (
     _init_polarization_state,
@@ -78,8 +78,8 @@ def maxwell3d_c_cuda(
         time_taper,
     )
 
-    if epsilon.ndim != 3:
-        raise RuntimeError("epsilon must be 3D")
+    if epsilon.ndim not in {3, 4}:
+        raise RuntimeError("epsilon must be 3D or batched 4D")
     if sigma.shape != epsilon.shape:
         raise RuntimeError("sigma must have same shape as epsilon")
     if mu.shape != epsilon.shape:
@@ -108,6 +108,7 @@ def maxwell3d_c_cuda(
     requires_grad = epsilon.requires_grad or sigma.requires_grad
     functorch_active = torch._C._are_functorch_transforms_active()
     device = epsilon.device
+    storage_bytes_per_elem = epsilon.element_size()
     def _fallback_reason(reason: str):
         fallback_storage_mode = storage_mode
         if str(fallback_storage_mode).lower() in {"cpu", "disk", "auto"}:
@@ -174,8 +175,15 @@ def maxwell3d_c_cuda(
 
     if requires_grad:
         if storage_kind != "none":
-            return _fallback_reason(
-                "3D C/CUDA gradient path currently requires storage_compression=False"
+            if device.type != "cuda":
+                return _fallback_reason(
+                    "3D C backend does not support compressed snapshot storage"
+                )
+            _, _, storage_bytes_per_elem, _ = _resolve_storage_compression(
+                storage_compression,
+                epsilon.dtype,
+                device,
+                context="storage_compression",
             )
         if storage_mode_str == "none":
             return _fallback_reason(
@@ -199,7 +207,8 @@ def maxwell3d_c_cuda(
             )
 
     dtype = epsilon.dtype
-    model_nz, model_ny, model_nx = epsilon.shape
+    model_batched = epsilon.ndim == 4
+    model_nz, model_ny, model_nx = epsilon.shape[-3:]
 
     grid_spacing_list = _normalize_grid_spacing_3d(grid_spacing)
     dz, dy, dx = grid_spacing_list
@@ -226,6 +235,11 @@ def maxwell3d_c_cuda(
     else:
         n_shots = 1
 
+    if model_batched and int(epsilon.shape[0]) != n_shots:
+        raise RuntimeError(
+            "Batched model count must match the effective shot count after normalization."
+        )
+
     effective_storage_mode_str = storage_mode_str
     if requires_grad:
         if device.type == "cpu" and effective_storage_mode_str in {"cpu", "disk"}:
@@ -237,8 +251,8 @@ def maxwell3d_c_cuda(
                 n_stored = (
                     nt_steps + gradient_sampling_interval - 1
                 ) // gradient_sampling_interval
-                shot_numel_est = epsilon.numel()
-                shot_bytes_uncomp_est = shot_numel_est * epsilon.element_size()
+                shot_numel_est = model_nz * model_ny * model_nx
+                shot_bytes_uncomp_est = shot_numel_est * storage_bytes_per_elem
                 total_bytes = n_stored * n_shots * shot_bytes_uncomp_est * 6
                 limit_device = (
                     storage_bytes_limit_device
@@ -277,7 +291,11 @@ def maxwell3d_c_cuda(
     padded_ny = model_ny + total_pad[2] + total_pad[3]
     padded_nx = model_nx + total_pad[4] + total_pad[5]
 
-    padded_size = (padded_nz, padded_ny, padded_nx)
+    padded_size = (
+        (int(epsilon.shape[0]), padded_nz, padded_ny, padded_nx)
+        if model_batched
+        else (padded_nz, padded_ny, padded_nx)
+    )
     epsilon_padded = create_or_pad(
         epsilon, total_pad, device, dtype, padded_size, mode="replicate"
     )
@@ -290,9 +308,9 @@ def maxwell3d_c_cuda(
 
     dispersion_padded = _pad_dispersion_for_model(
         dispersion,
-        model_shape=tuple(epsilon.shape),
+        model_shape=tuple(epsilon.shape[-3:]),
         total_pad=total_pad,
-        padded_size=padded_size,
+        padded_size=(padded_nz, padded_ny, padded_nx),
         device=device,
         dtype=dtype,
     )
@@ -439,7 +457,10 @@ def maxwell3d_c_cuda(
 
     if n_sources > 0 and source_amplitude is not None and source_amplitude.numel() > 0:
         source_coeff = -1.0 / (dx * dy * dz)
-        cb_flat = cb.reshape(1, flat_model_shape).expand(n_shots, -1)
+        if model_batched:
+            cb_flat = cb.reshape(n_shots, flat_model_shape)
+        else:
+            cb_flat = cb.reshape(1, flat_model_shape).expand(n_shots, -1)
         cb_at_src = cb_flat.gather(1, sources_i)
         f = source_amplitude.permute(2, 0, 1).contiguous()
         f = (f * cb_at_src[None, :, :] * source_coeff).reshape(
@@ -456,9 +477,9 @@ def maxwell3d_c_cuda(
     else:
         receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
 
-    ca = ca[None, :, :, :].contiguous()
-    cb = cb[None, :, :, :].contiguous()
-    cq = cq[None, :, :, :].contiguous()
+    ca = ca.contiguous() if model_batched else ca[None, :, :, :].contiguous()
+    cb = cb.contiguous() if model_batched else cb[None, :, :, :].contiguous()
+    cq = cq.contiguous() if model_batched else cq[None, :, :, :].contiguous()
 
     callback_models = {
         "epsilon": epsilon_padded,
@@ -480,7 +501,6 @@ def maxwell3d_c_cuda(
 
     source_component_idx = _COMPONENT_TO_INDEX_3D[source_component]
     receiver_component_idx = _COMPONENT_TO_INDEX_3D[receiver_component]
-    graph_enabled = False
     if has_dispersion and requires_grad:
         return _fallback_reason(
             "3D Debye C/CUDA path currently supports forward inference only"
@@ -532,6 +552,10 @@ def maxwell3d_c_cuda(
             "rdx": 1.0 / dx,
             "storage_mode_str": effective_storage_mode_str,
             "storage_path": storage_path,
+            "storage_compression": storage_compression,
+            "ca_batched": model_batched,
+            "cb_batched": model_batched,
+            "cq_batched": model_batched,
         }
 
         outputs = Maxwell3DForwardFunc.apply(
@@ -725,9 +749,9 @@ def maxwell3d_c_cuda(
                 n_receivers,
                 gradient_sampling_interval,
                 has_dispersion,
-                False,
-                False,
-                False,
+                model_batched,
+                model_batched,
+                model_batched,
                 start_step,
                 pml_z0,
                 pml_y0,
@@ -779,19 +803,19 @@ def maxwell3d_c_cuda(
                         gradients=None,
                         fd_pad=fd_pad_list,
                         pml_width=pml_width_list,
-                            is_backward=False,
-                            grid_spacing=[dz, dy, dx],
-                        )
+                        is_backward=False,
+                        grid_spacing=[dz, dy, dx],
                     )
-
-                window_end = min(nt_steps, window_start + callback_window)
-                _launch_forward(
-                    f,
-                    receiver_amplitudes,
-                    step_nt_local=window_end - window_start,
-                    start_step=window_start,
-                    stream_handle=compute_stream_handle,
                 )
+
+            window_end = min(nt_steps, window_start + callback_window)
+            _launch_forward(
+                f,
+                receiver_amplitudes,
+                step_nt_local=window_end - window_start,
+                start_step=window_start,
+                stream_handle=compute_stream_handle,
+            )
 
     s = (
         slice(None),

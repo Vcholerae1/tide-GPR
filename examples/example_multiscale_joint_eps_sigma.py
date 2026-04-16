@@ -17,10 +17,10 @@ print(f"Using device: {device}")
 dx = 0.02
 dt = 4e-11
 nt = 1800
-pml_width = 10
+pml_width = 16
 air_layer = 3
 
-n_shots = 1
+n_shots = 100
 d_source = 4
 first_source = 0
 # Shots per batch (batch size).

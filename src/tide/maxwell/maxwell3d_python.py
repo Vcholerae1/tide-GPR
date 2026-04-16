@@ -92,6 +92,8 @@ def maxwell3d_python(
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
+    *,
+    validate_material_inputs: bool = True,
 ):
     """3D Python backend propagation with autograd support."""
     del (
@@ -108,6 +110,10 @@ def maxwell3d_python(
         storage_chunk_steps,
         n_threads,
     )
+    if epsilon.ndim == 4:
+        raise NotImplementedError(
+            "Batched models are supported only on the native C/CUDA backend in v1."
+        )
     if epsilon.ndim != 3:
         raise RuntimeError("epsilon must be 3D")
     if sigma.shape != epsilon.shape:
@@ -214,6 +220,7 @@ def maxwell3d_python(
         mu_padded,
         dt,
         dispersion=dispersion_padded,
+        validate_inputs=validate_material_inputs,
     )
     ca = material["ca"]
     cb = material["cb"]
@@ -347,16 +354,7 @@ def maxwell3d_python(
         receivers_i = torch.empty(0, device=device, dtype=torch.long)
         n_receivers = 0
 
-    if n_receivers > 0:
-        receiver_amplitudes = torch.zeros(
-            nt_steps,
-            n_shots,
-            n_receivers,
-            device=device,
-            dtype=dtype,
-        )
-    else:
-        receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
+    receiver_samples: list[torch.Tensor] = []
 
     source_coeff = -1.0 / (dx * dy * dz)
     if n_sources > 0 and source_amplitude is not None and source_amplitude.numel() > 0:
@@ -505,9 +503,14 @@ def maxwell3d_python(
 
         if n_receivers > 0:
             rec_field = _select_e_component(receiver_component, Ex, Ey, Ez)
-            receiver_amplitudes[step] = rec_field.reshape(
-                n_shots, flat_model_shape
-            ).gather(1, receivers_i)
+            receiver_samples.append(
+                rec_field.reshape(n_shots, flat_model_shape).gather(1, receivers_i)
+            )
+
+    if n_receivers > 0:
+        receiver_amplitudes = torch.stack(receiver_samples, dim=0)
+    else:
+        receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
 
     s = (
         slice(None),

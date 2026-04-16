@@ -9,6 +9,7 @@ from ..storage import (
     STORAGE_DEVICE,
     STORAGE_DISK,
     TemporaryStorage,
+    _resolve_storage_compression,
     storage_mode_to_int,
 )
 from .common import _make_storage_streams
@@ -101,6 +102,9 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         pml_width = meta["pml_width"]
         grid_spacing = meta["grid_spacing"]
         dt = float(meta["dt"])
+        ca_batched = bool(meta.get("ca_batched", False))
+        cb_batched = bool(meta.get("cb_batched", False))
+        cq_batched = bool(meta.get("cq_batched", False))
 
         ca_requires_grad = bool(ca.requires_grad)
         cb_requires_grad = bool(cb.requires_grad)
@@ -120,7 +124,13 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         step_ratio = max(1, step_ratio)
         num_steps_stored = (nt + step_ratio - 1) // step_ratio
         shot_numel = nz * ny * nx
-        shot_bytes_uncomp = shot_numel * dtype.itemsize
+        _, store_dtype, _, storage_format = _resolve_storage_compression(
+            meta["storage_compression"],
+            dtype,
+            device,
+            context="storage_compression",
+        )
+        shot_bytes_uncomp = shot_numel * store_dtype.itemsize
         storage_mode_str = str(meta["storage_mode_str"]).lower()
         storage_path = str(meta["storage_path"])
         if device.type == "cpu" and storage_mode_str in {"cpu", "disk"}:
@@ -133,7 +143,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         backward_storage_filename_arrays: list[Any] = []
         char_ptr_type = ctypes.c_char_p
         is_cuda = device.type == "cuda"
-        empty_store = torch.empty(0, device=device, dtype=dtype)
+        empty_store = torch.empty(0, device=device, dtype=store_dtype)
 
         def alloc_storage(requires_grad_cond: bool):
             store_1 = empty_store
@@ -145,7 +155,13 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
 
             if storage_mode == STORAGE_DEVICE:
                 store_1 = torch.empty(
-                    num_steps_stored, n_shots, nz, ny, nx, device=device, dtype=dtype
+                    num_steps_stored,
+                    n_shots,
+                    nz,
+                    ny,
+                    nx,
+                    device=device,
+                    dtype=store_dtype,
                 )
             elif storage_mode == STORAGE_CPU:
                 store_1 = torch.empty(
@@ -155,7 +171,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                     ny,
                     nx,
                     device=device,
-                    dtype=dtype,
+                    dtype=store_dtype,
                 )
                 store_3 = torch.empty(
                     num_steps_stored,
@@ -165,7 +181,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                     nx,
                     device="cpu",
                     pin_memory=True,
-                    dtype=dtype,
+                    dtype=store_dtype,
                 )
             elif storage_mode == STORAGE_DISK:
                 storage_obj = TemporaryStorage(storage_path, 1 if is_cuda else n_shots)
@@ -184,7 +200,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                         ny,
                         nx,
                         device=device,
-                        dtype=dtype,
+                        dtype=store_dtype,
                     )
                     store_3 = torch.empty(
                         _CPU_STORAGE_BUFFERS,
@@ -194,11 +210,11 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                         nx,
                         device="cpu",
                         pin_memory=True,
-                        dtype=dtype,
+                        dtype=store_dtype,
                     )
                 else:
                     store_1 = torch.empty(
-                        n_shots, nz, ny, nx, device=device, dtype=dtype
+                        n_shots, nz, ny, nx, device=device, dtype=store_dtype
                     )
 
             backward_storage_filename_arrays.append(filenames_arr)
@@ -344,12 +360,13 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 n_receivers,
                 step_ratio,
                 storage_mode,
+                storage_format,
                 shot_bytes_uncomp,
                 ca_requires_grad,
                 cb_requires_grad,
-                False,
-                False,
-                False,
+                ca_batched,
+                cb_batched,
+                cq_batched,
                 step,
                 pml_z0,
                 pml_y0,
@@ -469,7 +486,11 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             "rdx": float(meta["rdx"]),
             "shot_bytes_uncomp": shot_bytes_uncomp,
             "storage_mode": storage_mode,
+            "storage_format": storage_format,
             "stream_keepalive": stream_keepalive,
+            "ca_batched": ca_batched,
+            "cb_batched": cb_batched,
+            "cq_batched": cq_batched,
         }
         ctx.backward_storage_objects = backward_storage_objects
         ctx.backward_storage_filename_arrays = backward_storage_filename_arrays
@@ -556,6 +577,10 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         shot_bytes_uncomp = int(meta["shot_bytes_uncomp"])
         dt = float(meta["dt"])
         storage_mode = int(meta["storage_mode"])
+        storage_format = int(meta["storage_format"])
+        ca_batched = bool(meta.get("ca_batched", False))
+        cb_batched = bool(meta.get("cb_batched", False))
+        cq_batched = bool(meta.get("cq_batched", False))
 
         grad_r = grad_outputs[-1]
         if grad_r is None or grad_r.numel() == 0:
@@ -589,22 +614,38 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             grad_f = torch.empty(0, device=device, dtype=dtype)
 
         if ca_requires_grad:
-            grad_ca = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+            grad_ca = (
+                torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+                if ca_batched
+                else torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+            )
             grad_ca_shot = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
         else:
             grad_ca = torch.empty(0, device=device, dtype=dtype)
             grad_ca_shot = torch.empty(0, device=device, dtype=dtype)
 
         if cb_requires_grad:
-            grad_cb = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+            grad_cb = (
+                torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+                if cb_batched
+                else torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+            )
             grad_cb_shot = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
         else:
             grad_cb = torch.empty(0, device=device, dtype=dtype)
             grad_cb_shot = torch.empty(0, device=device, dtype=dtype)
 
         if ca_requires_grad or cb_requires_grad:
-            grad_eps = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
-            grad_sigma = torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+            grad_eps = (
+                torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+                if ca_batched or cb_batched
+                else torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+            )
+            grad_sigma = (
+                torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+                if ca_batched or cb_batched
+                else torch.zeros(nz, ny, nx, device=device, dtype=dtype)
+            )
         else:
             grad_eps = torch.empty(0, device=device, dtype=dtype)
             grad_sigma = torch.empty(0, device=device, dtype=dtype)
@@ -732,12 +773,13 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 n_receivers,
                 step_ratio,
                 storage_mode,
+                storage_format,
                 shot_bytes_uncomp,
                 ca_requires_grad,
                 cb_requires_grad,
-                False,
-                False,
-                False,
+                ca_batched,
+                cb_batched,
+                cq_batched,
                 step,
                 pml_z0,
                 pml_y0,
@@ -788,8 +830,12 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         else:
             grad_f_flat = None
 
-        grad_ca_out = grad_ca.unsqueeze(0) if ca_requires_grad else None
-        grad_cb_out = grad_cb.unsqueeze(0) if cb_requires_grad else None
+        grad_ca_out = (
+            grad_ca.unsqueeze(0) if ca_requires_grad and not ca_batched else grad_ca
+        ) if ca_requires_grad else None
+        grad_cb_out = (
+            grad_cb.unsqueeze(0) if cb_requires_grad and not cb_batched else grad_cb
+        ) if cb_requires_grad else None
         return (
             grad_ca_out,
             grad_cb_out,

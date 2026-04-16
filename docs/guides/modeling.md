@@ -28,14 +28,17 @@ The public API is SI-compatible:
 
 ## Grid and Shapes
 
-- Model tensors: `[ny, nx]`.
-- Sources: `source_amplitude [n_shots, n_sources, nt]`.
-- Source/receiver indices: `[n_shots, n_{src/rec}, 2]`.
-- Returned receiver data: `[nt, n_shots, n_receivers]`.
+- Shared 2D models use `[ny, nx]`; batched 2D models use `[B, ny, nx]`.
+- Shared 3D models use `[nz, ny, nx]`; batched 3D models use `[B, nz, ny, nx]`.
+- Shared shots use `source_amplitude [S, n_sources, nt]` and indices `[S, n_{src/rec}, dim]`.
+- Per-model shots use `source_amplitude [B, S, n_sources, nt]` and indices `[B, S, n_{src/rec}, dim]`.
+- Returned receiver data keeps the legacy shape `[nt, S, n_receivers]` for shared models.
+- Batched-model receiver data is reshaped to `[nt, B, S, n_receivers]`.
+- Batched models work on the native backend and on the Python backend.
+- In batched-model Python mode, callbacks are not supported.
 
 For 3D:
-- Model tensors: [nz, ny, nx]
-- Source/receiver indices: [n_shots, n_points, 3] in [z, y, x]
+- Source/receiver indices use `[z, y, x]` ordering.
 
 ## Choosing 2D vs 3D
 

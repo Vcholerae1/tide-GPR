@@ -7,11 +7,19 @@ from ..cfl import cfl_condition
 from ..dispersion import DebyeDispersion
 from ..grid_utils import _normalize_grid_spacing_3d
 from ..resampling import downsample_and_movedim, upsample
-from ..utils import C0
+from ..utils import C0, validate_material_inputs
 from ..validation import (
     validate_freq_taper_frac,
     validate_model_gradient_sampling_interval,
     validate_time_pad_frac,
+)
+from .common import (
+    _normalize_structured_batch,
+    _reshape_structured_receiver_amplitudes,
+    _reshape_structured_wavefield,
+    _structured_vmap_shot_in_dim,
+    _structured_vmap_state_in_dim,
+    _wrap_structured_callback,
 )
 from .maxwell3d_cuda import maxwell3d_c_cuda
 from .maxwell3d_python import maxwell3d_python
@@ -218,18 +226,92 @@ def maxwell3d(
 
     Coordinate convention is `[z, y, x]`.
     """
+    epsilon_input = epsilon
+    sigma_input = sigma
+    mu_input = mu
+    source_amplitude_input = source_amplitude
+    source_location_input = source_location
+    receiver_location_input = receiver_location
+    Ex_0_input = Ex_0
+    Ey_0_input = Ey_0
+    Ez_0_input = Ez_0
+    Hx_0_input = Hx_0
+    Hy_0_input = Hy_0
+    Hz_0_input = Hz_0
+    m_hz_y_input = m_hz_y
+    m_hy_z_input = m_hy_z
+    m_hx_z_input = m_hx_z
+    m_hz_x_input = m_hz_x
+    m_hy_x_input = m_hy_x
+    m_hx_y_input = m_hx_y
+    m_ey_z_input = m_ey_z
+    m_ez_y_input = m_ez_y
+    m_ez_x_input = m_ez_x
+    m_ex_z_input = m_ex_z
+    m_ex_y_input = m_ex_y
+    m_ey_x_input = m_ey_x
+
+    batch_meta = _normalize_structured_batch(
+        spatial_ndim=3,
+        epsilon=epsilon,
+        sigma=sigma,
+        mu=mu,
+        shot_tensors={
+            "source_amplitude": (source_amplitude, 2),
+            "source_location": (source_location, 2),
+            "receiver_location": (receiver_location, 2),
+        },
+        state_tensors={
+            "Ex_0": Ex_0,
+            "Ey_0": Ey_0,
+            "Ez_0": Ez_0,
+            "Hx_0": Hx_0,
+            "Hy_0": Hy_0,
+            "Hz_0": Hz_0,
+            "m_hz_y": m_hz_y,
+            "m_hy_z": m_hy_z,
+            "m_hx_z": m_hx_z,
+            "m_hz_x": m_hz_x,
+            "m_hy_x": m_hy_x,
+            "m_hx_y": m_hx_y,
+            "m_ey_z": m_ey_z,
+            "m_ez_y": m_ez_y,
+            "m_ez_x": m_ez_x,
+            "m_ex_z": m_ex_z,
+            "m_ex_y": m_ex_y,
+            "m_ey_x": m_ey_x,
+        },
+    )
+    epsilon = batch_meta["epsilon"]
+    sigma = batch_meta["sigma"]
+    mu = batch_meta["mu"]
+    source_amplitude = batch_meta["shot_tensors"]["source_amplitude"]
+    source_location = batch_meta["shot_tensors"]["source_location"]
+    receiver_location = batch_meta["shot_tensors"]["receiver_location"]
+    Ex_0 = batch_meta["state_tensors"]["Ex_0"]
+    Ey_0 = batch_meta["state_tensors"]["Ey_0"]
+    Ez_0 = batch_meta["state_tensors"]["Ez_0"]
+    Hx_0 = batch_meta["state_tensors"]["Hx_0"]
+    Hy_0 = batch_meta["state_tensors"]["Hy_0"]
+    Hz_0 = batch_meta["state_tensors"]["Hz_0"]
+    m_hz_y = batch_meta["state_tensors"]["m_hz_y"]
+    m_hy_z = batch_meta["state_tensors"]["m_hy_z"]
+    m_hx_z = batch_meta["state_tensors"]["m_hx_z"]
+    m_hz_x = batch_meta["state_tensors"]["m_hz_x"]
+    m_hy_x = batch_meta["state_tensors"]["m_hy_x"]
+    m_hx_y = batch_meta["state_tensors"]["m_hx_y"]
+    m_ey_z = batch_meta["state_tensors"]["m_ey_z"]
+    m_ez_y = batch_meta["state_tensors"]["m_ez_y"]
+    m_ez_x = batch_meta["state_tensors"]["m_ez_x"]
+    m_ex_z = batch_meta["state_tensors"]["m_ex_z"]
+    m_ex_y = batch_meta["state_tensors"]["m_ex_y"]
+    m_ey_x = batch_meta["state_tensors"]["m_ey_x"]
+
     model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
         model_gradient_sampling_interval
     )
     freq_taper_frac = validate_freq_taper_frac(freq_taper_frac)
     time_pad_frac = validate_time_pad_frac(time_pad_frac)
-
-    if epsilon.ndim != 3:
-        raise RuntimeError("epsilon must be 3D")
-    if sigma.shape != epsilon.shape:
-        raise RuntimeError("sigma must have same shape as epsilon")
-    if mu.shape != epsilon.shape:
-        raise RuntimeError("mu must have same shape as epsilon")
 
     source_component = _normalize_component_3d(
         source_component, name="source_component"
@@ -294,6 +376,384 @@ def maxwell3d(
             f"python_backend must be bool or str, but got {type(python_backend).__name__}"
         )
 
+    if batch_meta["model_batched"] and use_python:
+        if forward_callback is not None or backward_callback is not None:
+            raise NotImplementedError(
+                "Batched models with python_backend do not support callbacks in v1."
+            )
+        validate_material_inputs(
+            epsilon_input,
+            dispersion=dispersion,
+            dt=inner_dt,
+        )
+
+        source_amplitude_vmap = source_amplitude_input
+        if (
+            step_ratio > 1
+            and source_amplitude_input is not None
+            and source_amplitude_input.numel() > 0
+        ):
+            source_amplitude_vmap = upsample(
+                source_amplitude_input,
+                step_ratio,
+                freq_taper_frac=freq_taper_frac,
+                time_pad_frac=time_pad_frac,
+                time_taper=time_taper,
+            )
+
+        B = int(batch_meta["B"])
+        shot_in_dims = {
+            "source_amplitude": _structured_vmap_shot_in_dim(
+                "source_amplitude",
+                source_amplitude_vmap,
+                B=B,
+                tail_ndim=2,
+            ),
+            "source_location": _structured_vmap_shot_in_dim(
+                "source_location",
+                source_location_input,
+                B=B,
+                tail_ndim=2,
+            ),
+            "receiver_location": _structured_vmap_shot_in_dim(
+                "receiver_location",
+                receiver_location_input,
+                B=B,
+                tail_ndim=2,
+            ),
+        }
+        state_in_dims = {
+            "Ex_0": _structured_vmap_state_in_dim(
+                "Ex_0",
+                Ex_0_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "Ey_0": _structured_vmap_state_in_dim(
+                "Ey_0",
+                Ey_0_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "Ez_0": _structured_vmap_state_in_dim(
+                "Ez_0",
+                Ez_0_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "Hx_0": _structured_vmap_state_in_dim(
+                "Hx_0",
+                Hx_0_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "Hy_0": _structured_vmap_state_in_dim(
+                "Hy_0",
+                Hy_0_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "Hz_0": _structured_vmap_state_in_dim(
+                "Hz_0",
+                Hz_0_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "m_hz_y": _structured_vmap_state_in_dim(
+                "m_hz_y",
+                m_hz_y_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "m_hy_z": _structured_vmap_state_in_dim(
+                "m_hy_z",
+                m_hy_z_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "m_hx_z": _structured_vmap_state_in_dim(
+                "m_hx_z",
+                m_hx_z_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "m_hz_x": _structured_vmap_state_in_dim(
+                "m_hz_x",
+                m_hz_x_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "m_hy_x": _structured_vmap_state_in_dim(
+                "m_hy_x",
+                m_hy_x_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "m_hx_y": _structured_vmap_state_in_dim(
+                "m_hx_y",
+                m_hx_y_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "m_ey_z": _structured_vmap_state_in_dim(
+                "m_ey_z",
+                m_ey_z_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "m_ez_y": _structured_vmap_state_in_dim(
+                "m_ez_y",
+                m_ez_y_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "m_ez_x": _structured_vmap_state_in_dim(
+                "m_ez_x",
+                m_ez_x_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "m_ex_z": _structured_vmap_state_in_dim(
+                "m_ex_z",
+                m_ex_z_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "m_ex_y": _structured_vmap_state_in_dim(
+                "m_ex_y",
+                m_ex_y_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+            "m_ey_x": _structured_vmap_state_in_dim(
+                "m_ey_x",
+                m_ey_x_input,
+                B=B,
+                spatial_ndim=3,
+            ),
+        }
+
+        def _single_model_forward(
+            epsilon_i: torch.Tensor,
+            sigma_i: torch.Tensor,
+            mu_i: torch.Tensor,
+            source_amplitude_i: torch.Tensor | None,
+            source_location_i: torch.Tensor | None,
+            receiver_location_i: torch.Tensor | None,
+            Ex_0_i: torch.Tensor | None,
+            Ey_0_i: torch.Tensor | None,
+            Ez_0_i: torch.Tensor | None,
+            Hx_0_i: torch.Tensor | None,
+            Hy_0_i: torch.Tensor | None,
+            Hz_0_i: torch.Tensor | None,
+            m_hz_y_i: torch.Tensor | None,
+            m_hy_z_i: torch.Tensor | None,
+            m_hx_z_i: torch.Tensor | None,
+            m_hz_x_i: torch.Tensor | None,
+            m_hy_x_i: torch.Tensor | None,
+            m_hx_y_i: torch.Tensor | None,
+            m_ey_z_i: torch.Tensor | None,
+            m_ez_y_i: torch.Tensor | None,
+            m_ez_x_i: torch.Tensor | None,
+            m_ex_z_i: torch.Tensor | None,
+            m_ex_y_i: torch.Tensor | None,
+            m_ey_x_i: torch.Tensor | None,
+        ):
+            return maxwell3d_python(
+                epsilon_i,
+                sigma_i,
+                mu_i,
+                grid_spacing,
+                inner_dt,
+                source_amplitude_i,
+                source_location_i,
+                receiver_location_i,
+                stencil,
+                pml_width,
+                max_vel_computed,
+                Ex_0_i,
+                Ey_0_i,
+                Ez_0_i,
+                Hx_0_i,
+                Hy_0_i,
+                Hz_0_i,
+                m_hz_y_i,
+                m_hy_z_i,
+                m_hx_z_i,
+                m_hz_x_i,
+                m_hy_x_i,
+                m_hx_y_i,
+                m_ey_z_i,
+                m_ez_y_i,
+                m_ez_x_i,
+                m_ex_z_i,
+                m_ex_y_i,
+                m_ey_x_i,
+                nt_internal,
+                model_gradient_sampling_interval,
+                freq_taper_frac,
+                time_pad_frac,
+                time_taper,
+                save_snapshots,
+                None,
+                None,
+                callback_frequency,
+                source_component,
+                receiver_component,
+                execution_backend,
+                storage_mode,
+                storage_path,
+                storage_compression,
+                storage_bytes_limit_device,
+                storage_bytes_limit_host,
+                storage_chunk_steps,
+                n_threads,
+                dispersion,
+                validate_material_inputs=False,
+            )
+
+        result = torch.vmap(
+            _single_model_forward,
+            in_dims=(
+                0,
+                0,
+                0,
+                shot_in_dims["source_amplitude"],
+                shot_in_dims["source_location"],
+                shot_in_dims["receiver_location"],
+                state_in_dims["Ex_0"],
+                state_in_dims["Ey_0"],
+                state_in_dims["Ez_0"],
+                state_in_dims["Hx_0"],
+                state_in_dims["Hy_0"],
+                state_in_dims["Hz_0"],
+                state_in_dims["m_hz_y"],
+                state_in_dims["m_hy_z"],
+                state_in_dims["m_hx_z"],
+                state_in_dims["m_hz_x"],
+                state_in_dims["m_hy_x"],
+                state_in_dims["m_hx_y"],
+                state_in_dims["m_ey_z"],
+                state_in_dims["m_ez_y"],
+                state_in_dims["m_ez_x"],
+                state_in_dims["m_ex_z"],
+                state_in_dims["m_ex_y"],
+                state_in_dims["m_ey_x"],
+            ),
+        )(
+            epsilon_input,
+            sigma_input,
+            mu_input,
+            source_amplitude_vmap,
+            source_location_input,
+            receiver_location_input,
+            Ex_0_input,
+            Ey_0_input,
+            Ez_0_input,
+            Hx_0_input,
+            Hy_0_input,
+            Hz_0_input,
+            m_hz_y_input,
+            m_hy_z_input,
+            m_hx_z_input,
+            m_hz_x_input,
+            m_hy_x_input,
+            m_hx_y_input,
+            m_ey_z_input,
+            m_ez_y_input,
+            m_ez_x_input,
+            m_ex_z_input,
+            m_ex_y_input,
+            m_ey_x_input,
+        )
+
+        (
+            Ex_out,
+            Ey_out,
+            Ez_out,
+            Hx_out,
+            Hy_out,
+            Hz_out,
+            m_hz_y_out,
+            m_hy_z_out,
+            m_hx_z_out,
+            m_hz_x_out,
+            m_hy_x_out,
+            m_hx_y_out,
+            m_ey_z_out,
+            m_ez_y_out,
+            m_ez_x_out,
+            m_ex_z_out,
+            m_ex_y_out,
+            m_ey_x_out,
+            receiver_amplitudes,
+        ) = result
+
+        if receiver_amplitudes.numel() > 0:
+            receiver_amplitudes = torch.movedim(receiver_amplitudes, 1, 0)
+            if step_ratio > 1:
+                receiver_amplitudes = downsample_and_movedim(
+                    receiver_amplitudes,
+                    step_ratio,
+                    freq_taper_frac=freq_taper_frac,
+                    time_pad_frac=time_pad_frac,
+                    time_taper=time_taper,
+                )
+                receiver_amplitudes = torch.movedim(receiver_amplitudes, -1, 0)
+
+        if not batch_meta["structured_output"]:
+            Ex_out = Ex_out.squeeze(0)
+            Ey_out = Ey_out.squeeze(0)
+            Ez_out = Ez_out.squeeze(0)
+            Hx_out = Hx_out.squeeze(0)
+            Hy_out = Hy_out.squeeze(0)
+            Hz_out = Hz_out.squeeze(0)
+            m_hz_y_out = m_hz_y_out.squeeze(0)
+            m_hy_z_out = m_hy_z_out.squeeze(0)
+            m_hx_z_out = m_hx_z_out.squeeze(0)
+            m_hz_x_out = m_hz_x_out.squeeze(0)
+            m_hy_x_out = m_hy_x_out.squeeze(0)
+            m_hx_y_out = m_hx_y_out.squeeze(0)
+            m_ey_z_out = m_ey_z_out.squeeze(0)
+            m_ez_y_out = m_ez_y_out.squeeze(0)
+            m_ez_x_out = m_ez_x_out.squeeze(0)
+            m_ex_z_out = m_ex_z_out.squeeze(0)
+            m_ex_y_out = m_ex_y_out.squeeze(0)
+            m_ey_x_out = m_ey_x_out.squeeze(0)
+            if receiver_amplitudes.ndim > 1:
+                receiver_amplitudes = receiver_amplitudes.squeeze(1)
+
+        return (
+            Ex_out,
+            Ey_out,
+            Ez_out,
+            Hx_out,
+            Hy_out,
+            Hz_out,
+            m_hz_y_out,
+            m_hy_z_out,
+            m_hx_z_out,
+            m_hz_x_out,
+            m_hy_x_out,
+            m_hx_y_out,
+            m_ey_z_out,
+            m_ez_y_out,
+            m_ez_x_out,
+            m_ex_z_out,
+            m_ex_y_out,
+            m_ey_x_out,
+            receiver_amplitudes,
+        )
+
+    forward_callback_wrapped = _wrap_structured_callback(
+        forward_callback,
+        batch_meta=batch_meta,
+    )
+    backward_callback_wrapped = _wrap_structured_callback(
+        backward_callback,
+        batch_meta=batch_meta,
+    )
+
     result = (maxwell3d_python if use_python else maxwell3d_c_cuda)(
         epsilon,
         sigma,
@@ -330,8 +790,8 @@ def maxwell3d(
         time_pad_frac,
         time_taper,
         save_snapshots,
-        forward_callback,
-        backward_callback,
+        forward_callback_wrapped,
+        backward_callback_wrapped,
         callback_frequency,
         source_component,
         receiver_component,
@@ -377,6 +837,29 @@ def maxwell3d(
             time_taper=time_taper,
         )
         receiver_amplitudes = torch.movedim(receiver_amplitudes, -1, 0)
+
+    Ex_out = _reshape_structured_wavefield(Ex_out, batch_meta=batch_meta)
+    Ey_out = _reshape_structured_wavefield(Ey_out, batch_meta=batch_meta)
+    Ez_out = _reshape_structured_wavefield(Ez_out, batch_meta=batch_meta)
+    Hx_out = _reshape_structured_wavefield(Hx_out, batch_meta=batch_meta)
+    Hy_out = _reshape_structured_wavefield(Hy_out, batch_meta=batch_meta)
+    Hz_out = _reshape_structured_wavefield(Hz_out, batch_meta=batch_meta)
+    m_hz_y_out = _reshape_structured_wavefield(m_hz_y_out, batch_meta=batch_meta)
+    m_hy_z_out = _reshape_structured_wavefield(m_hy_z_out, batch_meta=batch_meta)
+    m_hx_z_out = _reshape_structured_wavefield(m_hx_z_out, batch_meta=batch_meta)
+    m_hz_x_out = _reshape_structured_wavefield(m_hz_x_out, batch_meta=batch_meta)
+    m_hy_x_out = _reshape_structured_wavefield(m_hy_x_out, batch_meta=batch_meta)
+    m_hx_y_out = _reshape_structured_wavefield(m_hx_y_out, batch_meta=batch_meta)
+    m_ey_z_out = _reshape_structured_wavefield(m_ey_z_out, batch_meta=batch_meta)
+    m_ez_y_out = _reshape_structured_wavefield(m_ez_y_out, batch_meta=batch_meta)
+    m_ez_x_out = _reshape_structured_wavefield(m_ez_x_out, batch_meta=batch_meta)
+    m_ex_z_out = _reshape_structured_wavefield(m_ex_z_out, batch_meta=batch_meta)
+    m_ex_y_out = _reshape_structured_wavefield(m_ex_y_out, batch_meta=batch_meta)
+    m_ey_x_out = _reshape_structured_wavefield(m_ey_x_out, batch_meta=batch_meta)
+    receiver_amplitudes = _reshape_structured_receiver_amplitudes(
+        receiver_amplitudes,
+        batch_meta=batch_meta,
+    )
 
     return (
         Ex_out,

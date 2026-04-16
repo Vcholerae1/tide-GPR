@@ -77,33 +77,19 @@ def _broadcast_debye_parameter(
     return torch.broadcast_to(tensor, (tensor.shape[0], *model_shape))
 
 
-def compile_material_coefficients(
+def validate_material_inputs(
     epsilon_r: torch.Tensor,
-    sigma: torch.Tensor,
-    mu_r: torch.Tensor,
-    dt: float,
     *,
     dispersion: Any | None = None,
-) -> dict[str, Any]:
-    """Compile material tensors into solver coefficients.
-
-    When `dispersion` is None, this reduces to the existing `(ca, cb, cq)`
-    coefficients. For Debye dispersion, it returns additional coefficients for
-    the polarization-memory update.
-    """
+    dt: float | None = None,
+) -> None:
     if torch.any(epsilon_r <= 0):
         raise ValueError("epsilon must be strictly positive.")
 
-    ca, cb, cq = prepare_parameters(epsilon_r, sigma, mu_r, dt)
-    result: dict[str, Any] = {
-        "ca": ca,
-        "cb": cb,
-        "cq": cq,
-        "dispersion": dispersion,
-        "has_dispersion": False,
-    }
     if dispersion is None:
-        return result
+        return
+    if dt is None:
+        raise ValueError("dt must be provided when validating dispersion inputs.")
 
     delta_epsilon = _broadcast_debye_parameter(
         dispersion.delta_epsilon,
@@ -126,6 +112,47 @@ def compile_material_coefficients(
         raise ValueError(
             f"Debye dispersion requires dt < min(tau), but got dt={dt} and min(tau)={min_tau}."
         )
+
+
+def compile_material_coefficients(
+    epsilon_r: torch.Tensor,
+    sigma: torch.Tensor,
+    mu_r: torch.Tensor,
+    dt: float,
+    *,
+    dispersion: Any | None = None,
+    validate_inputs: bool = True,
+) -> dict[str, Any]:
+    """Compile material tensors into solver coefficients.
+
+    When `dispersion` is None, this reduces to the existing `(ca, cb, cq)`
+    coefficients. For Debye dispersion, it returns additional coefficients for
+    the polarization-memory update.
+    """
+    if validate_inputs:
+        validate_material_inputs(epsilon_r, dispersion=dispersion, dt=dt)
+
+    ca, cb, cq = prepare_parameters(epsilon_r, sigma, mu_r, dt)
+    result: dict[str, Any] = {
+        "ca": ca,
+        "cb": cb,
+        "cq": cq,
+        "dispersion": dispersion,
+        "has_dispersion": False,
+    }
+    if dispersion is None:
+        return result
+
+    delta_epsilon = _broadcast_debye_parameter(
+        dispersion.delta_epsilon,
+        reference=epsilon_r,
+        name="delta_epsilon",
+    )
+    tau = _broadcast_debye_parameter(
+        dispersion.tau,
+        reference=epsilon_r,
+        name="tau",
+    )
 
     epsilon_inf = epsilon_r * EP0
     mu = mu_r * MU0

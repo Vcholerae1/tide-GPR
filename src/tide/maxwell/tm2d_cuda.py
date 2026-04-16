@@ -62,8 +62,8 @@ def maxwell_c_cuda(
     """Performs Maxwell propagation using the native C/CUDA backend."""
     from .. import backend_utils
 
-    if epsilon.ndim != 2:
-        raise RuntimeError("epsilon must be 2D")
+    if epsilon.ndim not in {2, 3}:
+        raise RuntimeError("epsilon must be 2D or batched 3D")
     if sigma.shape != epsilon.shape:
         raise RuntimeError("sigma must have same shape as epsilon")
     if mu.shape != epsilon.shape:
@@ -73,7 +73,8 @@ def maxwell_c_cuda(
     dtype = epsilon.dtype
     original_dtype = dtype
     original_device = device
-    model_ny, model_nx = epsilon.shape
+    model_batched = epsilon.ndim == 3
+    model_ny, model_nx = epsilon.shape[-2:]
 
     backend_device = device
     if device.type not in {"cpu", "cuda"}:
@@ -110,6 +111,11 @@ def maxwell_c_cuda(
     else:
         n_shots = 1
 
+    if model_batched and int(epsilon.shape[0]) != n_shots:
+        raise RuntimeError(
+            "Batched model count must match the effective shot count after normalization."
+        )
+
     if max_vel is None:
         max_vel = float((1.0 / torch.sqrt(epsilon * mu)).max().item()) * C0
     pml_freq = 0.5 / dt
@@ -120,7 +126,11 @@ def maxwell_c_cuda(
 
     padded_ny = model_ny + total_pad[0] + total_pad[1]
     padded_nx = model_nx + total_pad[2] + total_pad[3]
-    padded_size = (padded_ny, padded_nx)
+    padded_size = (
+        (int(epsilon.shape[0]), padded_ny, padded_nx)
+        if model_batched
+        else (padded_ny, padded_nx)
+    )
 
     epsilon_padded = create_or_pad(
         epsilon, total_pad, device, dtype, padded_size, mode="replicate"
@@ -134,9 +144,9 @@ def maxwell_c_cuda(
 
     dispersion_padded = _pad_dispersion_for_model(
         dispersion,
-        model_shape=tuple(epsilon.shape),
+        model_shape=tuple(epsilon.shape[-2:]),
         total_pad=total_pad,
-        padded_size=padded_size,
+        padded_size=(padded_ny, padded_nx),
         device=device,
         dtype=dtype,
     )
@@ -147,9 +157,21 @@ def maxwell_c_cuda(
         dt,
         dispersion=dispersion_padded,
     )
-    ca = material["ca"][None, :, :].contiguous()
-    cb = material["cb"][None, :, :].contiguous()
-    cq = material["cq"][None, :, :].contiguous()
+    ca = (
+        material["ca"].contiguous()
+        if model_batched
+        else material["ca"][None, :, :].contiguous()
+    )
+    cb = (
+        material["cb"].contiguous()
+        if model_batched
+        else material["cb"][None, :, :].contiguous()
+    )
+    cq = (
+        material["cq"].contiguous()
+        if model_batched
+        else material["cq"][None, :, :].contiguous()
+    )
     ca_phys = ca
     cb_phys = cb
     cq_phys = cq
@@ -178,7 +200,10 @@ def maxwell_c_cuda(
     source_coeff = -1.0 / (dx * dy)
     cb_at_src: torch.Tensor | None = None
     if n_sources > 0:
-        cb_flat = cb_phys.expand(n_shots, -1, -1).reshape(n_shots, flat_model_shape)
+        if model_batched:
+            cb_flat = cb_phys.reshape(n_shots, flat_model_shape)
+        else:
+            cb_flat = cb_phys.expand(n_shots, -1, -1).reshape(n_shots, flat_model_shape)
         cb_at_src = cb_flat.gather(1, sources_i)
 
     source_injection, _f_shot = _prepare_tm2d_source_injection(
@@ -349,8 +374,8 @@ def maxwell_c_cuda(
             storage_bytes_limit_host,
             storage_chunk_steps,
             n_threads,
-            False,
             dispersion,
+            validate_material_inputs=False,
         )
 
     if torch._C._are_functorch_transforms_active():
@@ -466,9 +491,9 @@ def maxwell_c_cuda(
             n_receivers,
             gradient_sampling_interval,
             stencil,
-            False,
-            False,
-            False,
+            model_batched,
+            model_batched,
+            model_batched,
             pml_y0,
             pml_x0,
             pml_y1,
@@ -666,9 +691,9 @@ def maxwell_c_cuda(
             n_receivers,
             gradient_sampling_interval,
             has_dispersion,
-            False,
-            False,
-            False,
+            model_batched,
+            model_batched,
+            model_batched,
             step,
             pml_y0,
             pml_x0,

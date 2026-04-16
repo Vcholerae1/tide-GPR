@@ -8,11 +8,19 @@ from ..cfl import cfl_condition
 from ..dispersion import DebyeDispersion
 from ..grid_utils import _normalize_grid_spacing_2d
 from ..resampling import downsample_and_movedim, upsample
-from ..utils import C0
+from ..utils import C0, validate_material_inputs
 from ..validation import (
     validate_freq_taper_frac,
     validate_model_gradient_sampling_interval,
     validate_time_pad_frac,
+)
+from .common import (
+    _normalize_structured_batch,
+    _reshape_structured_receiver_amplitudes,
+    _reshape_structured_wavefield,
+    _structured_vmap_shot_in_dim,
+    _structured_vmap_state_in_dim,
+    _wrap_structured_callback,
 )
 from .tm2d_python import maxwell_func
 from .validation_internal import (
@@ -169,6 +177,63 @@ def maxwelltm(
     dispersion: DebyeDispersion | None = None,
 ):
     """2D TM mode Maxwell equations solver."""
+    epsilon_input = epsilon
+    sigma_input = sigma
+    mu_input = mu
+    source_amplitude_input = source_amplitude
+    source_location_input = source_location
+    receiver_location_input = receiver_location
+    Ey_0_input = Ey_0
+    Hx_0_input = Hx_0
+    Hz_0_input = Hz_0
+    m_Ey_x_input = m_Ey_x
+    m_Ey_z_input = m_Ey_z
+    m_Hx_z_input = m_Hx_z
+    m_Hz_x_input = m_Hz_x
+
+    batch_meta = _normalize_structured_batch(
+        spatial_ndim=2,
+        epsilon=epsilon,
+        sigma=sigma,
+        mu=mu,
+        shot_tensors={
+            "source_amplitude": (source_amplitude, 2),
+            "source_location": (source_location, 2),
+            "receiver_location": (receiver_location, 2),
+        },
+        state_tensors={
+            "Ey_0": Ey_0,
+            "Hx_0": Hx_0,
+            "Hz_0": Hz_0,
+            "m_Ey_x": m_Ey_x,
+            "m_Ey_z": m_Ey_z,
+            "m_Hx_z": m_Hx_z,
+            "m_Hz_x": m_Hz_x,
+        },
+    )
+    epsilon = batch_meta["epsilon"]
+    sigma = batch_meta["sigma"]
+    mu = batch_meta["mu"]
+    source_amplitude = batch_meta["shot_tensors"]["source_amplitude"]
+    source_location = batch_meta["shot_tensors"]["source_location"]
+    receiver_location = batch_meta["shot_tensors"]["receiver_location"]
+    Ey_0 = batch_meta["state_tensors"]["Ey_0"]
+    Hx_0 = batch_meta["state_tensors"]["Hx_0"]
+    Hz_0 = batch_meta["state_tensors"]["Hz_0"]
+    m_Ey_x = batch_meta["state_tensors"]["m_Ey_x"]
+    m_Ey_z = batch_meta["state_tensors"]["m_Ey_z"]
+    m_Hx_z = batch_meta["state_tensors"]["m_Hx_z"]
+    m_Hz_x = batch_meta["state_tensors"]["m_Hz_x"]
+
+    if isinstance(python_backend, bool):
+        use_python = python_backend
+    elif isinstance(python_backend, str):
+        use_python = True
+    else:
+        raise TypeError(
+            f"python_backend must be bool or str, but got {type(python_backend).__name__}"
+        )
+
     model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
         model_gradient_sampling_interval
     )
@@ -215,6 +280,239 @@ def maxwelltm(
     elif source_amplitude_internal is not None:
         nt_internal = source_amplitude_internal.shape[-1]
 
+    if batch_meta["model_batched"] and use_python:
+        if forward_callback is not None or backward_callback is not None:
+            raise NotImplementedError(
+                "Batched models with python_backend do not support callbacks in v1."
+            )
+        validate_material_inputs(
+            epsilon_input,
+            dispersion=dispersion,
+            dt=inner_dt,
+        )
+
+        source_amplitude_vmap = source_amplitude_input
+        if (
+            step_ratio > 1
+            and source_amplitude_input is not None
+            and source_amplitude_input.numel() > 0
+        ):
+            source_amplitude_vmap = upsample(
+                source_amplitude_input,
+                step_ratio,
+                freq_taper_frac=freq_taper_frac,
+                time_pad_frac=time_pad_frac,
+                time_taper=time_taper,
+            )
+
+        B = int(batch_meta["B"])
+        shot_in_dims = {
+            "source_amplitude": _structured_vmap_shot_in_dim(
+                "source_amplitude",
+                source_amplitude_vmap,
+                B=B,
+                tail_ndim=2,
+            ),
+            "source_location": _structured_vmap_shot_in_dim(
+                "source_location",
+                source_location_input,
+                B=B,
+                tail_ndim=2,
+            ),
+            "receiver_location": _structured_vmap_shot_in_dim(
+                "receiver_location",
+                receiver_location_input,
+                B=B,
+                tail_ndim=2,
+            ),
+        }
+        state_in_dims = {
+            "Ey_0": _structured_vmap_state_in_dim(
+                "Ey_0",
+                Ey_0_input,
+                B=B,
+                spatial_ndim=2,
+            ),
+            "Hx_0": _structured_vmap_state_in_dim(
+                "Hx_0",
+                Hx_0_input,
+                B=B,
+                spatial_ndim=2,
+            ),
+            "Hz_0": _structured_vmap_state_in_dim(
+                "Hz_0",
+                Hz_0_input,
+                B=B,
+                spatial_ndim=2,
+            ),
+            "m_Ey_x": _structured_vmap_state_in_dim(
+                "m_Ey_x",
+                m_Ey_x_input,
+                B=B,
+                spatial_ndim=2,
+            ),
+            "m_Ey_z": _structured_vmap_state_in_dim(
+                "m_Ey_z",
+                m_Ey_z_input,
+                B=B,
+                spatial_ndim=2,
+            ),
+            "m_Hx_z": _structured_vmap_state_in_dim(
+                "m_Hx_z",
+                m_Hx_z_input,
+                B=B,
+                spatial_ndim=2,
+            ),
+            "m_Hz_x": _structured_vmap_state_in_dim(
+                "m_Hz_x",
+                m_Hz_x_input,
+                B=B,
+                spatial_ndim=2,
+            ),
+        }
+
+        def _single_model_forward(
+            epsilon_i: torch.Tensor,
+            sigma_i: torch.Tensor,
+            mu_i: torch.Tensor,
+            source_amplitude_i: torch.Tensor | None,
+            source_location_i: torch.Tensor | None,
+            receiver_location_i: torch.Tensor | None,
+            Ey_0_i: torch.Tensor | None,
+            Hx_0_i: torch.Tensor | None,
+            Hz_0_i: torch.Tensor | None,
+            m_Ey_x_i: torch.Tensor | None,
+            m_Ey_z_i: torch.Tensor | None,
+            m_Hx_z_i: torch.Tensor | None,
+            m_Hz_x_i: torch.Tensor | None,
+        ):
+            return maxwell_func(
+                python_backend,
+                epsilon_i,
+                sigma_i,
+                mu_i,
+                grid_spacing,
+                inner_dt,
+                source_amplitude_i,
+                source_location_i,
+                receiver_location_i,
+                stencil,
+                pml_width,
+                max_vel_computed,
+                Ey_0_i,
+                Hx_0_i,
+                Hz_0_i,
+                m_Ey_x_i,
+                m_Ey_z_i,
+                m_Hx_z_i,
+                m_Hz_x_i,
+                nt_internal,
+                model_gradient_sampling_interval,
+                freq_taper_frac,
+                time_pad_frac,
+                time_taper,
+                save_snapshots,
+                None,
+                None,
+                callback_frequency,
+                storage_mode,
+                storage_path,
+                storage_compression,
+                storage_bytes_limit_device,
+                storage_bytes_limit_host,
+                storage_chunk_steps,
+                n_threads,
+                dispersion,
+                validate_material_inputs=False,
+            )
+
+        result = torch.vmap(
+            _single_model_forward,
+            in_dims=(
+                0,
+                0,
+                0,
+                shot_in_dims["source_amplitude"],
+                shot_in_dims["source_location"],
+                shot_in_dims["receiver_location"],
+                state_in_dims["Ey_0"],
+                state_in_dims["Hx_0"],
+                state_in_dims["Hz_0"],
+                state_in_dims["m_Ey_x"],
+                state_in_dims["m_Ey_z"],
+                state_in_dims["m_Hx_z"],
+                state_in_dims["m_Hz_x"],
+            ),
+        )(
+            epsilon_input,
+            sigma_input,
+            mu_input,
+            source_amplitude_vmap,
+            source_location_input,
+            receiver_location_input,
+            Ey_0_input,
+            Hx_0_input,
+            Hz_0_input,
+            m_Ey_x_input,
+            m_Ey_z_input,
+            m_Hx_z_input,
+            m_Hz_x_input,
+        )
+
+        (
+            Ey_out,
+            Hx_out,
+            Hz_out,
+            m_Ey_x_out,
+            m_Ey_z_out,
+            m_Hx_z_out,
+            m_Hz_x_out,
+            receiver_amplitudes,
+        ) = result
+
+        if receiver_amplitudes.numel() > 0:
+            receiver_amplitudes = torch.movedim(receiver_amplitudes, 1, 0)
+            if step_ratio > 1:
+                receiver_amplitudes = downsample_and_movedim(
+                    receiver_amplitudes,
+                    step_ratio,
+                    freq_taper_frac=freq_taper_frac,
+                    time_pad_frac=time_pad_frac,
+                    time_taper=time_taper,
+                )
+                receiver_amplitudes = torch.movedim(receiver_amplitudes, -1, 0)
+
+        if not batch_meta["structured_output"]:
+            Ey_out = Ey_out.squeeze(0)
+            Hx_out = Hx_out.squeeze(0)
+            Hz_out = Hz_out.squeeze(0)
+            m_Ey_x_out = m_Ey_x_out.squeeze(0)
+            m_Ey_z_out = m_Ey_z_out.squeeze(0)
+            m_Hx_z_out = m_Hx_z_out.squeeze(0)
+            m_Hz_x_out = m_Hz_x_out.squeeze(0)
+            if receiver_amplitudes.ndim > 1:
+                receiver_amplitudes = receiver_amplitudes.squeeze(1)
+
+        return (
+            Ey_out,
+            Hx_out,
+            Hz_out,
+            m_Ey_x_out,
+            m_Ey_z_out,
+            m_Hx_z_out,
+            m_Hz_x_out,
+            receiver_amplitudes,
+        )
+
+    forward_callback_wrapped = _wrap_structured_callback(
+        forward_callback,
+        batch_meta=batch_meta,
+    )
+    backward_callback_wrapped = _wrap_structured_callback(
+        backward_callback,
+        batch_meta=batch_meta,
+    )
+
     result = maxwell_func(
         python_backend,
         epsilon,
@@ -241,8 +539,8 @@ def maxwelltm(
         time_pad_frac,
         time_taper,
         save_snapshots,
-        forward_callback,
-        backward_callback,
+        forward_callback_wrapped,
+        backward_callback_wrapped,
         callback_frequency,
         storage_mode,
         storage_path,
@@ -274,6 +572,18 @@ def maxwelltm(
             time_taper=time_taper,
         )
         receiver_amplitudes = torch.movedim(receiver_amplitudes, -1, 0)
+
+    Ey_out = _reshape_structured_wavefield(Ey_out, batch_meta=batch_meta)
+    Hx_out = _reshape_structured_wavefield(Hx_out, batch_meta=batch_meta)
+    Hz_out = _reshape_structured_wavefield(Hz_out, batch_meta=batch_meta)
+    m_Ey_x_out = _reshape_structured_wavefield(m_Ey_x_out, batch_meta=batch_meta)
+    m_Ey_z_out = _reshape_structured_wavefield(m_Ey_z_out, batch_meta=batch_meta)
+    m_Hx_z_out = _reshape_structured_wavefield(m_Hx_z_out, batch_meta=batch_meta)
+    m_Hz_x_out = _reshape_structured_wavefield(m_Hz_x_out, batch_meta=batch_meta)
+    receiver_amplitudes = _reshape_structured_receiver_amplitudes(
+        receiver_amplitudes,
+        batch_meta=batch_meta,
+    )
 
     return (
         Ey_out,

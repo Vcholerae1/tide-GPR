@@ -246,7 +246,7 @@ def forward_single_batch(
         source_component="ey",
         receiver_component="ey",
         save_snapshots=True,
-        model_gradient_sampling_interval=int(model_gradient_sampling_interval),
+        model_gradient_sampling_interval=int(model_gradient`_`sampling_interval),
        
     )
     return out_b[-1]

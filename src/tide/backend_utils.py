@@ -257,7 +257,7 @@ _3D_BATCHED_FLAGS: _Spec = [
 ]
 
 _3D_STORAGE_TAIL: _Spec = [
-    (_I, 2, "storage_mode, shot_bytes_uncomp"),
+    (_I, 3, "storage_mode, storage_format, shot_bytes_uncomp"),
     (_B, 2, "ca_requires_grad, cb_requires_grad"),
 ]
 

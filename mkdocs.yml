@@ -63,6 +63,7 @@ nav:
   - Examples:
       - Overview: examples/index.md
       - Checkpointing: examples/example_checkpoint.md
+      - Fourier-Reparametrized IFWI: examples/example_ifwi_gpr_eps_fr_ifwi.md
       - Wrong-Wavelet Inversion: examples/example_multiscale_crosscorr_wrong_wavelet.md
       - Joint Epsilon + Sigma Inversion: examples/example_multiscale_joint_eps_sigma.md
       - Multiscale Filtered: examples/example_multiscale_filtered.md

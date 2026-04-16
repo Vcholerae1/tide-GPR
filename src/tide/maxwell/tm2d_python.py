@@ -29,6 +29,7 @@ _update_H_opt: Callable | None = None
 def maxwell_func(
     python_backend: bool | str,
     *args,
+    validate_material_inputs: bool = True,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -101,7 +102,7 @@ def maxwell_func(
         else:
             raise ValueError(f"Unknown python_backend value {mode!r}.")
 
-        return maxwell_python(*args)
+        return maxwell_python(*args, validate_material_inputs=validate_material_inputs)
 
     from .tm2d_cuda import maxwell_c_cuda
 
@@ -144,6 +145,8 @@ def maxwell_python(
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
+    *,
+    validate_material_inputs: bool = True,
 ):
     """Performs the forward propagation of the 2D TM Maxwell equations."""
     del backward_callback
@@ -158,6 +161,10 @@ def maxwell_python(
     assert _update_E_opt is not None, "_update_E_opt must be set by maxwell_func"
     assert _update_H_opt is not None, "_update_H_opt must be set by maxwell_func"
 
+    if epsilon.ndim == 3:
+        raise NotImplementedError(
+            "Batched models are supported only on the native C/CUDA backend in v1."
+        )
     if epsilon.ndim != 2:
         raise RuntimeError("epsilon must be 2D")
     if sigma.shape != epsilon.shape:
@@ -245,6 +252,7 @@ def maxwell_python(
         mu_padded,
         dt,
         dispersion=dispersion_padded,
+        validate_inputs=validate_material_inputs,
     )
     ca = material["ca"][None, :, :]
     cb = material["cb"][None, :, :]
@@ -375,12 +383,7 @@ def maxwell_python(
         receivers_i = torch.empty(0, device=device, dtype=torch.long)
         n_receivers = 0
 
-    if n_receivers > 0:
-        receiver_amplitudes = torch.zeros(
-            nt_steps, n_shots, n_receivers, device=device, dtype=dtype
-        )
-    else:
-        receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
+    receiver_samples: list[torch.Tensor] = []
 
     callback_models = {
         "epsilon": epsilon_padded,
@@ -499,9 +502,14 @@ def maxwell_python(
             )
 
         if n_receivers > 0:
-            receiver_amplitudes[step] = Ey.reshape(n_shots, flat_model_shape).gather(
-                1, receivers_i
+            receiver_samples.append(
+                Ey.reshape(n_shots, flat_model_shape).gather(1, receivers_i)
             )
+
+    if n_receivers > 0:
+        receiver_amplitudes = torch.stack(receiver_samples, dim=0)
+    else:
+        receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
 
     s = (
         slice(None),

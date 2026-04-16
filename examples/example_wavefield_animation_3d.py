@@ -198,9 +198,6 @@ def main() -> None:
         stencil=args.stencil,
         source_component=args.source_component,
         receiver_component=args.receiver_component,
-        python_backend=True,
-        forward_callback=save_snapshot,
-        callback_frequency=args.snapshot_interval,
     )
     sim_time = time.perf_counter() - t0
     receiver_amplitudes = out[-1].detach().cpu().numpy()[:, 0, :]
