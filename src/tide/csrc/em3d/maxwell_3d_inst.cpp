@@ -6,8 +6,7 @@
  *
  * Notes:
  * - forward_with_storage currently reuses forward behavior.
- * - backward remains a zero-gradient scaffold and is not used when
- *   Python dispatch selects gradient-capable fallback.
+ * - backward implements the native 3D adjoint used by the autograd path.
  */
 
 #undef DIFFZ1
@@ -119,6 +118,26 @@ constexpr TIDE_DTYPE kEp0 = (TIDE_DTYPE)8.8541878128e-12;
 static inline void tide_zero_if_not_null(void *ptr, size_t bytes) {
   if (ptr != NULL && bytes > 0) {
     memset(ptr, 0, bytes);
+  }
+}
+
+static void combine_grad_shot_3d(
+    TIDE_DTYPE *__restrict const grad,
+    TIDE_DTYPE const *__restrict const grad_shot,
+    int64_t const n_shots,
+    int64_t const shot_numel) {
+  if (grad == NULL || grad_shot == NULL || n_shots <= 0 || shot_numel <= 0) {
+    return;
+  }
+
+  TIDE_OMP_INDEX idx;
+TIDE_OMP_PARALLEL_FOR
+  for (idx = 0; idx < shot_numel; ++idx) {
+    TIDE_DTYPE sum = 0;
+    for (int64_t shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
+      sum += grad_shot[shot_idx * shot_numel + idx];
+    }
+    grad[idx] += sum;
   }
 }
 
@@ -349,10 +368,12 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(forward)(
     int64_t const receiver_component,
     int64_t const n_threads,
     int64_t const device,
+    int64_t const execution_backend,
     void *const compute_stream_handle) {
   (void)dt;
   (void)step_ratio;
   (void)device;
+  (void)execution_backend;
   (void)compute_stream_handle;
 
 #ifdef _OPENMP
@@ -676,10 +697,12 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(forward_with_storage)(
     int64_t const receiver_component,
     int64_t const n_threads,
     int64_t const device,
+    int64_t const execution_backend,
     void *const compute_stream_handle,
     void *const storage_stream_handle) {
   (void)dt;
   (void)device;
+  (void)execution_backend;
   (void)compute_stream_handle;
   (void)storage_stream_handle;
   (void)storage_format;
@@ -966,6 +989,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(backward)(
     TIDE_DTYPE *__restrict const grad_sigma,
     TIDE_DTYPE *__restrict const grad_ca_shot,
     TIDE_DTYPE *__restrict const grad_cb_shot,
+    bool const zero_grad_on_entry,
     TIDE_DTYPE const *__restrict const az,
     TIDE_DTYPE const *__restrict const bz,
     TIDE_DTYPE const *__restrict const azh,
@@ -1017,9 +1041,11 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(backward)(
     int64_t const receiver_component,
     int64_t const n_threads,
     int64_t const device,
+    int64_t const execution_backend,
     void *const compute_stream_handle,
     void *const storage_stream_handle) {
   (void)device;
+  (void)execution_backend;
   (void)compute_stream_handle;
   (void)storage_stream_handle;
   (void)storage_format;
@@ -1053,34 +1079,40 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(backward)(
       (storage_mode == STORAGE_DEVICE) &&
       (storage_format == STORAGE_FORMAT_FULL) &&
       (shot_bytes_uncomp == (int64_t)(shot_numel * (int64_t)sizeof(TIDE_DTYPE)));
+  bool const reduce_grad_ca =
+      ca_requires_grad && !ca_batched && grad_ca != NULL && grad_ca_shot != NULL;
+  bool const reduce_grad_cb =
+      cb_requires_grad && !cb_batched && grad_cb != NULL && grad_cb_shot != NULL;
+  TIDE_DTYPE *__restrict grad_ca_accum = reduce_grad_ca ? grad_ca_shot : grad_ca;
+  TIDE_DTYPE *__restrict grad_cb_accum = reduce_grad_cb ? grad_cb_shot : grad_cb;
 
-  if (grad_f != NULL && nt > 0 && n_shots > 0 && n_sources_per_shot > 0) {
-    size_t numel = (size_t)nt * (size_t)n_shots * (size_t)n_sources_per_shot;
-    tide_zero_if_not_null(grad_f, numel * sizeof(TIDE_DTYPE));
+  if (zero_grad_on_entry) {
+    if (grad_f != NULL && nt > 0 && n_shots > 0 && n_sources_per_shot > 0) {
+      size_t numel = (size_t)nt * (size_t)n_shots * (size_t)n_sources_per_shot;
+      tide_zero_if_not_null(grad_f, numel * sizeof(TIDE_DTYPE));
+    }
+    if (ca_requires_grad && grad_ca != NULL) {
+      size_t n = (size_t)(ca_batched ? n_shots : 1) * (size_t)shot_numel;
+      tide_zero_if_not_null(grad_ca, n * sizeof(TIDE_DTYPE));
+    }
+    if (cb_requires_grad && grad_cb != NULL) {
+      size_t n = (size_t)(cb_batched ? n_shots : 1) * (size_t)shot_numel;
+      tide_zero_if_not_null(grad_cb, n * sizeof(TIDE_DTYPE));
+    }
+    if ((ca_requires_grad || cb_requires_grad) && grad_eps != NULL) {
+      size_t n = (size_t)(ca_batched ? n_shots : 1) * (size_t)shot_numel;
+      tide_zero_if_not_null(grad_eps, n * sizeof(TIDE_DTYPE));
+    }
+    if ((ca_requires_grad || cb_requires_grad) && grad_sigma != NULL) {
+      size_t n = (size_t)(ca_batched ? n_shots : 1) * (size_t)shot_numel;
+      tide_zero_if_not_null(grad_sigma, n * sizeof(TIDE_DTYPE));
+    }
   }
-  if (ca_requires_grad && grad_ca != NULL) {
-    size_t n = (size_t)(ca_batched ? n_shots : 1) * (size_t)shot_numel;
-    tide_zero_if_not_null(grad_ca, n * sizeof(TIDE_DTYPE));
+  if (reduce_grad_ca) {
+    tide_zero_if_not_null(grad_ca_shot, (size_t)store_size * sizeof(TIDE_DTYPE));
   }
-  if (cb_requires_grad && grad_cb != NULL) {
-    size_t n = (size_t)(cb_batched ? n_shots : 1) * (size_t)shot_numel;
-    tide_zero_if_not_null(grad_cb, n * sizeof(TIDE_DTYPE));
-  }
-  if ((ca_requires_grad || cb_requires_grad) && grad_eps != NULL) {
-    size_t n = (size_t)(ca_batched ? n_shots : 1) * (size_t)shot_numel;
-    tide_zero_if_not_null(grad_eps, n * sizeof(TIDE_DTYPE));
-  }
-  if ((ca_requires_grad || cb_requires_grad) && grad_sigma != NULL) {
-    size_t n = (size_t)(ca_batched ? n_shots : 1) * (size_t)shot_numel;
-    tide_zero_if_not_null(grad_sigma, n * sizeof(TIDE_DTYPE));
-  }
-  if (grad_ca_shot != NULL) {
-    size_t n = (size_t)n_shots * (size_t)shot_numel;
-    tide_zero_if_not_null(grad_ca_shot, n * sizeof(TIDE_DTYPE));
-  }
-  if (grad_cb_shot != NULL) {
-    size_t n = (size_t)n_shots * (size_t)shot_numel;
-    tide_zero_if_not_null(grad_cb_shot, n * sizeof(TIDE_DTYPE));
+  if (reduce_grad_cb) {
+    tide_zero_if_not_null(grad_cb_shot, (size_t)store_size * sizeof(TIDE_DTYPE));
   }
 
   TIDE_DTYPE *__restrict lambda_src_field = lambda_ey;
@@ -1285,8 +1317,8 @@ TIDE_OMP_PARALLEL_FOR
                   lex_curr * ex_store[idx_shot] +
                   ley_curr * ey_store[idx_shot] +
                   lez_curr * ez_store[idx_shot];
-              if (ca_batched) {
-                grad_ca[idx_shot] += acc_ca * (TIDE_DTYPE)step_ratio_eff;
+              if (ca_batched || reduce_grad_ca) {
+                grad_ca_accum[idx_shot] += acc_ca * (TIDE_DTYPE)step_ratio_eff;
               } else {
 #ifdef _OPENMP
 #pragma omp atomic
@@ -1299,8 +1331,8 @@ TIDE_OMP_PARALLEL_FOR
                   lex_curr * curl_x_store[idx_shot] +
                   ley_curr * curl_y_store[idx_shot] +
                   lez_curr * curl_z_store[idx_shot];
-              if (cb_batched) {
-                grad_cb[idx_shot] += acc_cb * (TIDE_DTYPE)step_ratio_eff;
+              if (cb_batched || reduce_grad_cb) {
+                grad_cb_accum[idx_shot] += acc_cb * (TIDE_DTYPE)step_ratio_eff;
               } else {
 #ifdef _OPENMP
 #pragma omp atomic
@@ -1312,6 +1344,13 @@ TIDE_OMP_PARALLEL_FOR
         }
       }
     }
+  }
+
+  if (reduce_grad_ca) {
+    combine_grad_shot_3d(grad_ca, grad_ca_shot, n_shots, shot_numel);
+  }
+  if (reduce_grad_cb) {
+    combine_grad_shot_3d(grad_cb, grad_cb_shot, n_shots, shot_numel);
   }
 
   convert_grad_ca_cb_to_eps_sigma_3d(

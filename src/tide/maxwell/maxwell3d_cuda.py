@@ -17,6 +17,7 @@ from .maxwell3d_autograd import Maxwell3DForwardFunc
 from .maxwell3d_python import maxwell3d_python
 from .validation_internal import _COMPONENT_TO_INDEX_3D
 
+
 def maxwell3d_c_cuda(
     epsilon: torch.Tensor,
     sigma: torch.Tensor,
@@ -97,6 +98,7 @@ def maxwell3d_c_cuda(
             "execution_backend must be 'standard', "
             f"but got {execution_backend!r}"
         )
+    execution_backend_id = 0
 
     n_threads_val = 0
     if n_threads is not None:
@@ -553,6 +555,7 @@ def maxwell3d_c_cuda(
             "storage_mode_str": effective_storage_mode_str,
             "storage_path": storage_path,
             "storage_compression": storage_compression,
+            "execution_backend_id": execution_backend_id,
             "ca_batched": model_batched,
             "cb_batched": model_batched,
             "cq_batched": model_batched,
@@ -763,6 +766,7 @@ def maxwell3d_c_cuda(
                 receiver_component_idx,
                 n_threads_val,
                 device_idx,
+                execution_backend_id,
                 stream_handle,
             )
 

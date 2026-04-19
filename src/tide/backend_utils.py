@@ -254,6 +254,7 @@ _3D_BATCHED_FLAGS: _Spec = [
     (_I, 2, "source_component, receiver_component"),
     (_I, 1, "n_threads"),
     (_I, 1, "device"),
+    (_I, 1, "execution_backend"),
 ]
 
 _3D_STORAGE_TAIL: _Spec = [
@@ -337,6 +338,7 @@ _3D_BACKWARD_SPEC: _Spec = [
     (_P, 1, "grad_f"),
     (_P, 4, "grad_ca, grad_cb, grad_eps, grad_sigma"),
     (_P, 2, "grad_ca_shot, grad_cb_shot"),
+    (_B, 1, "zero_grad_on_entry"),
     *_3D_PML_PROFILES,
     *_3D_COMMON_TAIL,
     *_3D_STORAGE_TAIL,

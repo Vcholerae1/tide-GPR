@@ -60,3 +60,58 @@ def test_maxwell3d_backend_gradient_matches_python():
         rtol=2e-4,
         atol=1e-3,
     )
+
+
+def test_maxwell3d_backend_shared_model_multishot_gradient_matches_shot_sum():
+    epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _case()
+
+    source_location = torch.tensor(
+        [[[2, 2, 2]], [[2, 3, 2]]], dtype=torch.long, device=epsilon.device
+    )
+    receiver_location = torch.tensor(
+        [[[2, 2, 4]], [[2, 3, 4]]], dtype=torch.long, device=epsilon.device
+    )
+    source_amplitude = source_amplitude.repeat(2, 1, 1)
+    source_amplitude[1] *= 0.7
+
+    eps_shared = epsilon.clone().detach().requires_grad_(True)
+    out_shared = tide.maxwell3d(
+        eps_shared,
+        sigma,
+        mu,
+        grid_spacing=0.02,
+        dt=4e-11,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        pml_width=2,
+        python_backend=False,
+    )[-1]
+    out_shared.pow(2).sum().backward()
+    assert eps_shared.grad is not None
+
+    grad_sum = torch.zeros_like(epsilon)
+    for shot_idx in range(source_amplitude.shape[0]):
+        eps_single = epsilon.clone().detach().requires_grad_(True)
+        out_single = tide.maxwell3d(
+            eps_single,
+            sigma,
+            mu,
+            grid_spacing=0.02,
+            dt=4e-11,
+            source_amplitude=source_amplitude[shot_idx : shot_idx + 1],
+            source_location=source_location[shot_idx : shot_idx + 1],
+            receiver_location=receiver_location[shot_idx : shot_idx + 1],
+            pml_width=2,
+            python_backend=False,
+        )[-1]
+        out_single.pow(2).sum().backward()
+        assert eps_single.grad is not None
+        grad_sum += eps_single.grad
+
+    torch.testing.assert_close(
+        eps_shared.grad,
+        grad_sum,
+        rtol=2e-4,
+        atol=1e-3,
+    )

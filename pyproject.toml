@@ -38,9 +38,7 @@ classifiers = [
     "Operating System :: MacOS",
 ]
 dependencies = [
-    "matplotlib>=3.10.7",
     "numpy>=2.3.5",
-    "pot>=0.9.6.post1",
     "scipy>=1.16.3",
     "torch>=2.9.1",
 ]
@@ -108,11 +106,6 @@ test-command = "pytest {project}/tests"
 
 [tool.cibuildwheel.macos]
 test-command = "pytest {project}/tests"
-
-[tool.uv.workspace]
-members = [
-    "Fast-GPR-FWI/src",
-]
 
 [dependency-groups]
 dev = [

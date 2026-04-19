@@ -685,8 +685,10 @@ static TIDE_HOST_DEVICE void backward_kernel_lambda_e_with_grad_core(
 
   int const FD_PAD = tide::StencilTraits<STENCIL_ORDER>::FD_PAD;
 
-  if (y >= FD_PAD && x >= FD_PAD && y < params.ny - FD_PAD + 1 &&
-      x < params.nx - FD_PAD + 1 && shot_idx < params.n_shots) {
+  // diff_yh1/diff_xh1 read y+1/x+1, so the adjoint E update needs the
+  // positive-side halo and cannot touch the last interior row/column.
+  if (y >= FD_PAD && x >= FD_PAD && y < params.ny - FD_PAD &&
+      x < params.nx - FD_PAD && shot_idx < params.n_shots) {
     int64_t j = y * params.nx + x;
     int64_t i = shot_idx * params.shot_numel + j;
 

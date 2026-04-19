@@ -94,6 +94,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         pml_x1 = int(meta["pml_x1"])
         source_component_idx = int(meta["source_component_idx"])
         receiver_component_idx = int(meta["receiver_component_idx"])
+        execution_backend_id = int(meta.get("execution_backend_id", 0))
         n_threads = int(meta["n_threads"])
         callback_frequency = int(meta["callback_frequency"])
         forward_callback = meta["forward_callback"]
@@ -378,6 +379,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 receiver_component_idx,
                 n_threads,
                 device_idx,
+                execution_backend_id,
                 compute_stream_handle,
                 storage_stream_handle,
             )
@@ -473,6 +475,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             "pml_x1": pml_x1,
             "source_component_idx": source_component_idx,
             "receiver_component_idx": receiver_component_idx,
+            "execution_backend_id": execution_backend_id,
             "ca_requires_grad": ca_requires_grad,
             "cb_requires_grad": cb_requires_grad,
             "models": models,
@@ -566,6 +569,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         pml_x1 = int(meta["pml_x1"])
         source_component_idx = int(meta["source_component_idx"])
         receiver_component_idx = int(meta["receiver_component_idx"])
+        execution_backend_id = int(meta.get("execution_backend_id", 0))
         ca_requires_grad = bool(meta["ca_requires_grad"])
         cb_requires_grad = bool(meta["cb_requires_grad"])
         backward_callback = meta["backward_callback"]
@@ -619,7 +623,11 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 if ca_batched
                 else torch.zeros(nz, ny, nx, device=device, dtype=dtype)
             )
-            grad_ca_shot = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+            grad_ca_shot = (
+                torch.empty(0, device=device, dtype=dtype)
+                if ca_batched
+                else torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+            )
         else:
             grad_ca = torch.empty(0, device=device, dtype=dtype)
             grad_ca_shot = torch.empty(0, device=device, dtype=dtype)
@@ -630,7 +638,11 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 if cb_batched
                 else torch.zeros(nz, ny, nx, device=device, dtype=dtype)
             )
-            grad_cb_shot = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+            grad_cb_shot = (
+                torch.empty(0, device=device, dtype=dtype)
+                if cb_batched
+                else torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
+            )
         else:
             grad_cb = torch.empty(0, device=device, dtype=dtype)
             grad_cb_shot = torch.empty(0, device=device, dtype=dtype)
@@ -666,7 +678,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         if effective_callback_freq <= 0:
             effective_callback_freq = nt if nt > 0 else 1
 
-        for step in range(nt, 0, -effective_callback_freq):
+        for chunk_idx, step in enumerate(range(nt, 0, -effective_callback_freq)):
             step_nt = min(step, effective_callback_freq)
             backward_func(
                 backend_utils.tensor_to_ptr(ca),
@@ -740,6 +752,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(grad_sigma),
                 backend_utils.tensor_to_ptr(grad_ca_shot),
                 backend_utils.tensor_to_ptr(grad_cb_shot),
+                chunk_idx == 0,
                 backend_utils.tensor_to_ptr(az),
                 backend_utils.tensor_to_ptr(bz),
                 backend_utils.tensor_to_ptr(az_h),
@@ -791,6 +804,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 receiver_component_idx,
                 n_threads,
                 device_idx,
+                execution_backend_id,
                 compute_stream_handle,
                 storage_stream_handle,
             )
