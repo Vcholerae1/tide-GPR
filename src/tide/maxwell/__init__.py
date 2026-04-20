@@ -1,15 +1,15 @@
-from .maxwell3d_born import born3d, born3d_adjoint
+from .maxwell3d_born import Born3D, born3d
 from .maxwell3d import Maxwell3D, maxwell3d
-from .tm2d_born import borntm, borntm_adjoint
+from .tm2d_born import BornTM, borntm
 from .tm2d import MaxwellTM, maxwelltm
 
 __all__ = [
+    "Born3D",
+    "BornTM",
     "Maxwell3D",
     "MaxwellTM",
     "born3d",
-    "born3d_adjoint",
     "borntm",
-    "borntm_adjoint",
     "maxwell3d",
     "maxwelltm",
 ]

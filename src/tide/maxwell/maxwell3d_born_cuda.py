@@ -83,6 +83,24 @@ def born3d_c_cuda(
     stencil: int,
     pml_width: int | Sequence[int],
     max_vel: float | None,
+    Ex_0: torch.Tensor | None,
+    Ey_0: torch.Tensor | None,
+    Ez_0: torch.Tensor | None,
+    Hx_0: torch.Tensor | None,
+    Hy_0: torch.Tensor | None,
+    Hz_0: torch.Tensor | None,
+    m_hz_y_0: torch.Tensor | None,
+    m_hy_z_0: torch.Tensor | None,
+    m_hx_z_0: torch.Tensor | None,
+    m_hz_x_0: torch.Tensor | None,
+    m_hy_x_0: torch.Tensor | None,
+    m_hx_y_0: torch.Tensor | None,
+    m_ey_z_0: torch.Tensor | None,
+    m_ez_y_0: torch.Tensor | None,
+    m_ez_x_0: torch.Tensor | None,
+    m_ex_z_0: torch.Tensor | None,
+    m_ex_y_0: torch.Tensor | None,
+    m_ey_x_0: torch.Tensor | None,
     dEx_0: torch.Tensor | None,
     dEy_0: torch.Tensor | None,
     dEz_0: torch.Tensor | None,
@@ -129,6 +147,51 @@ def born3d_c_cuda(
             f"got {parameterization!r}."
         )
 
+    source_requires_grad = bool(
+        source_amplitude is not None and source_amplitude.requires_grad
+    )
+    state_requires_grad = any(
+        tensor is not None and tensor.requires_grad
+        for tensor in (
+            Ex_0,
+            Ey_0,
+            Ez_0,
+            Hx_0,
+            Hy_0,
+            Hz_0,
+            m_hz_y_0,
+            m_hy_z_0,
+            m_hx_z_0,
+            m_hz_x_0,
+            m_hy_x_0,
+            m_hx_y_0,
+            m_ey_z_0,
+            m_ez_y_0,
+            m_ez_x_0,
+            m_ex_z_0,
+            m_ex_y_0,
+            m_ey_x_0,
+            dEx_0,
+            dEy_0,
+            dEz_0,
+            dHx_0,
+            dHy_0,
+            dHz_0,
+            dm_hz_y_0,
+            dm_hy_z_0,
+            dm_hx_z_0,
+            dm_hz_x_0,
+            dm_hy_x_0,
+            dm_hx_y_0,
+            dm_ey_z_0,
+            dm_ez_y_0,
+            dm_ez_x_0,
+            dm_ex_z_0,
+            dm_ex_y_0,
+            dm_ey_x_0,
+        )
+    )
+
     if epsilon.requires_grad or sigma.requires_grad or mu.requires_grad:
         warnings.warn(
             "Native born3d treats the background model as fixed. "
@@ -149,9 +212,95 @@ def born3d_c_cuda(
             source_amplitude,
             source_location,
             receiver_location,
+            None,
             stencil=stencil,
             pml_width=pml_width,
             max_vel=max_vel,
+            Ex_0=Ex_0,
+            Ey_0=Ey_0,
+            Ez_0=Ez_0,
+            Hx_0=Hx_0,
+            Hy_0=Hy_0,
+            Hz_0=Hz_0,
+            m_hz_y_0=m_hz_y_0,
+            m_hy_z_0=m_hy_z_0,
+            m_hx_z_0=m_hx_z_0,
+            m_hz_x_0=m_hz_x_0,
+            m_hy_x_0=m_hy_x_0,
+            m_hx_y_0=m_hx_y_0,
+            m_ey_z_0=m_ey_z_0,
+            m_ez_y_0=m_ez_y_0,
+            m_ez_x_0=m_ez_x_0,
+            m_ex_z_0=m_ex_z_0,
+            m_ex_y_0=m_ex_y_0,
+            m_ey_x_0=m_ey_x_0,
+            dEx_0=dEx_0,
+            dEy_0=dEy_0,
+            dEz_0=dEz_0,
+            dHx_0=dHx_0,
+            dHy_0=dHy_0,
+            dHz_0=dHz_0,
+            dm_hz_y_0=dm_hz_y_0,
+            dm_hy_z_0=dm_hy_z_0,
+            dm_hx_z_0=dm_hx_z_0,
+            dm_hz_x_0=dm_hz_x_0,
+            dm_hy_x_0=dm_hy_x_0,
+            dm_hx_y_0=dm_hx_y_0,
+            dm_ey_z_0=dm_ey_z_0,
+            dm_ez_y_0=dm_ez_y_0,
+            dm_ez_x_0=dm_ez_x_0,
+            dm_ex_z_0=dm_ex_z_0,
+            dm_ex_y_0=dm_ex_y_0,
+            dm_ey_x_0=dm_ey_x_0,
+            nt=nt,
+            parameterization=parameterization,
+            linearize_source=linearize_source,
+            source_component=source_component,
+            receiver_component=receiver_component,
+        )
+
+    if source_requires_grad or state_requires_grad:
+        warnings.warn(
+            "Native born3d does not support gradients with respect to source "
+            "amplitudes or initial wavefields. Falling back to the Python "
+            "reference path.",
+            RuntimeWarning,
+        )
+        return born3d_python(
+            epsilon,
+            sigma,
+            mu,
+            depsilon,
+            dsigma,
+            dca,
+            dcb,
+            grid_spacing,
+            dt,
+            source_amplitude,
+            source_location,
+            receiver_location,
+            None,
+            stencil=stencil,
+            pml_width=pml_width,
+            max_vel=max_vel,
+            Ex_0=Ex_0,
+            Ey_0=Ey_0,
+            Ez_0=Ez_0,
+            Hx_0=Hx_0,
+            Hy_0=Hy_0,
+            Hz_0=Hz_0,
+            m_hz_y_0=m_hz_y_0,
+            m_hy_z_0=m_hy_z_0,
+            m_hx_z_0=m_hx_z_0,
+            m_hz_x_0=m_hz_x_0,
+            m_hy_x_0=m_hy_x_0,
+            m_hx_y_0=m_hx_y_0,
+            m_ey_z_0=m_ey_z_0,
+            m_ez_y_0=m_ez_y_0,
+            m_ez_x_0=m_ez_x_0,
+            m_ex_z_0=m_ex_z_0,
+            m_ex_y_0=m_ex_y_0,
+            m_ey_x_0=m_ey_x_0,
             dEx_0=dEx_0,
             dEy_0=dEy_0,
             dEz_0=dEz_0,
@@ -359,7 +508,7 @@ def born3d_c_cuda(
 
     size_with_batch = (n_shots, padded_nz, padded_ny, padded_nx)
     Ex = _init_wavefield_3d(
-        None,
+        Ex_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -368,7 +517,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     Ey = _init_wavefield_3d(
-        None,
+        Ey_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -377,7 +526,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     Ez = _init_wavefield_3d(
-        None,
+        Ez_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -386,7 +535,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     Hx = _init_wavefield_3d(
-        None,
+        Hx_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -395,7 +544,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     Hy = _init_wavefield_3d(
-        None,
+        Hy_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -404,7 +553,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     Hz = _init_wavefield_3d(
-        None,
+        Hz_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -414,7 +563,7 @@ def born3d_c_cuda(
     )
 
     m_hz_y = _init_wavefield_3d(
-        None,
+        m_hz_y_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -423,7 +572,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_hy_z = _init_wavefield_3d(
-        None,
+        m_hy_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -432,7 +581,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_hx_z = _init_wavefield_3d(
-        None,
+        m_hx_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -441,7 +590,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_hz_x = _init_wavefield_3d(
-        None,
+        m_hz_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -450,7 +599,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_hy_x = _init_wavefield_3d(
-        None,
+        m_hy_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -459,7 +608,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_hx_y = _init_wavefield_3d(
-        None,
+        m_hx_y_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -468,7 +617,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_ey_z = _init_wavefield_3d(
-        None,
+        m_ey_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -477,7 +626,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_ez_y = _init_wavefield_3d(
-        None,
+        m_ez_y_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -486,7 +635,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_ez_x = _init_wavefield_3d(
-        None,
+        m_ez_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -495,7 +644,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_ex_z = _init_wavefield_3d(
-        None,
+        m_ex_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -504,7 +653,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_ex_y = _init_wavefield_3d(
-        None,
+        m_ex_y_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -513,7 +662,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_ey_x = _init_wavefield_3d(
-        None,
+        m_ey_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -1194,6 +1343,24 @@ def born3d_c_cuda(
         ),
     )
     return (
+        Ex[s],
+        Ey[s],
+        Ez[s],
+        Hx[s],
+        Hy[s],
+        Hz[s],
+        m_hz_y[s],
+        m_hy_z[s],
+        m_hx_z[s],
+        m_hz_x[s],
+        m_hy_x[s],
+        m_hx_y[s],
+        m_ey_z[s],
+        m_ez_y[s],
+        m_ez_x[s],
+        m_ex_z[s],
+        m_ex_y[s],
+        m_ey_x[s],
         dEx_out[s],
         dEy_out[s],
         dEz_out[s],

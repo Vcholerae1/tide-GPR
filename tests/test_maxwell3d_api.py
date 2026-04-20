@@ -22,6 +22,8 @@ def _build_small_case(device: torch.device):
 def test_maxwell3d_available_from_tide():
     assert hasattr(tide, "maxwell3d")
     assert hasattr(tide, "Maxwell3D")
+    assert hasattr(tide, "born3d")
+    assert hasattr(tide, "Born3D")
 
 
 def test_maxwell3d_output_shape_and_order_cpu():
@@ -49,6 +51,51 @@ def test_maxwell3d_output_shape_and_order_cpu():
     for field in out[:-1]:
         assert field.ndim == 4
         assert field.shape[0] == 1
+
+
+def test_born3d_module_matches_functional_cpu():
+    device = torch.device("cpu")
+    epsilon, sigma, mu, source_amplitude, source_location, receiver_location, _ = (
+        _build_small_case(device)
+    )
+    depsilon = torch.full_like(epsilon, 0.05)
+
+    model = tide.Born3D(
+        epsilon,
+        sigma,
+        mu,
+        grid_spacing=[0.03, 0.02, 0.02],
+        depsilon=depsilon,
+    )
+
+    out_module = model(
+        dt=4e-11,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        pml_width=[2, 2, 2, 2, 2, 2],
+        source_component="ey",
+        receiver_component="ey",
+        python_backend=True,
+    )
+    out_func = tide.born3d(
+        epsilon,
+        sigma,
+        mu,
+        grid_spacing=[0.03, 0.02, 0.02],
+        dt=4e-11,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        depsilon=depsilon,
+        pml_width=[2, 2, 2, 2, 2, 2],
+        source_component="ey",
+        receiver_component="ey",
+        python_backend=True,
+    )
+
+    for mod_out, fn_out in zip(out_module, out_func):
+        torch.testing.assert_close(mod_out, fn_out)
 
 
 def test_maxwell3d_component_validation():

@@ -118,9 +118,17 @@ def borntm_python(
     source_amplitude: torch.Tensor | None,
     source_location: torch.Tensor | None,
     receiver_location: torch.Tensor | None,
+    bg_receiver_location: torch.Tensor | None = None,
     stencil: int = 2,
     pml_width: int | Sequence[int] = 20,
     max_vel: float | None = None,
+    Ey_0: torch.Tensor | None = None,
+    Hx_0: torch.Tensor | None = None,
+    Hz_0: torch.Tensor | None = None,
+    m_Ey_x_0: torch.Tensor | None = None,
+    m_Ey_z_0: torch.Tensor | None = None,
+    m_Hx_z_0: torch.Tensor | None = None,
+    m_Hz_x_0: torch.Tensor | None = None,
     dEy_0: torch.Tensor | None = None,
     dHx_0: torch.Tensor | None = None,
     dHz_0: torch.Tensor | None = None,
@@ -132,6 +140,14 @@ def borntm_python(
     parameterization: str = "epsilon_sigma",
     linearize_source: bool = True,
 ) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
@@ -165,6 +181,12 @@ def borntm_python(
         receiver_location,
         shape=(model_ny, model_nx),
         name="Receiver location",
+        check_lower_bound=False,
+    )
+    _validate_location_bounds(
+        bg_receiver_location,
+        shape=(model_ny, model_nx),
+        name="Background receiver location",
         check_lower_bound=False,
     )
 
@@ -271,7 +293,7 @@ def borntm_python(
 
     size_with_batch = (n_shots, padded_ny, padded_nx)
     Ey = _init_tm_wavefield(
-        None,
+        Ey_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -279,7 +301,7 @@ def borntm_python(
         dtype=dtype,
     )
     Hx = _init_tm_wavefield(
-        None,
+        Hx_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -287,7 +309,7 @@ def borntm_python(
         dtype=dtype,
     )
     Hz = _init_tm_wavefield(
-        None,
+        Hz_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -295,7 +317,7 @@ def borntm_python(
         dtype=dtype,
     )
     m_Ey_x = _init_tm_wavefield(
-        None,
+        m_Ey_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -303,7 +325,7 @@ def borntm_python(
         dtype=dtype,
     )
     m_Ey_z = _init_tm_wavefield(
-        None,
+        m_Ey_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -311,7 +333,7 @@ def borntm_python(
         dtype=dtype,
     )
     m_Hx_z = _init_tm_wavefield(
-        None,
+        m_Hx_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -319,7 +341,7 @@ def borntm_python(
         dtype=dtype,
     )
     m_Hz_x = _init_tm_wavefield(
-        None,
+        m_Hz_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -440,6 +462,15 @@ def borntm_python(
         receivers_i = torch.empty(0, device=device, dtype=torch.long)
         n_receivers = 0
 
+    if bg_receiver_location is not None and bg_receiver_location.numel() > 0:
+        bg_receiver_y = bg_receiver_location[..., 0] + total_pad[0]
+        bg_receiver_x = bg_receiver_location[..., 1] + total_pad[2]
+        bg_receivers_i = (bg_receiver_y * padded_nx + bg_receiver_x).long()
+        n_bg_receivers = int(bg_receiver_location.shape[1])
+    else:
+        bg_receivers_i = torch.empty(0, device=device, dtype=torch.long)
+        n_bg_receivers = 0
+
     source_coeff = -1.0 / (dx * dy)
     if source_amplitude is not None and source_amplitude.numel() > 0 and n_sources > 0:
         cb_flat = cb.reshape(1, flat_model_shape).expand(n_shots, -1)
@@ -454,6 +485,7 @@ def borntm_python(
         cb_at_src = torch.empty(0, device=device, dtype=dtype)
         dcb_at_src = torch.empty(0, device=device, dtype=dtype)
 
+    bg_receiver_samples: list[torch.Tensor] = []
     receiver_samples: list[torch.Tensor] = []
 
     for step in range(nt_steps):
@@ -539,10 +571,20 @@ def borntm_python(
                     .reshape(size_with_batch)
                 )
 
+        if n_bg_receivers > 0:
+            bg_receiver_samples.append(
+                Ey.reshape(n_shots, flat_model_shape).gather(1, bg_receivers_i)
+            )
+
         if n_receivers > 0:
             receiver_samples.append(
                 dEy.reshape(n_shots, flat_model_shape).gather(1, receivers_i)
             )
+
+    if n_bg_receivers > 0:
+        bg_receiver_amplitudes = torch.stack(bg_receiver_samples, dim=0)
+    else:
+        bg_receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
 
     if n_receivers > 0:
         receiver_amplitudes = torch.stack(receiver_samples, dim=0)
@@ -560,6 +602,13 @@ def borntm_python(
     )
 
     return (
+        Ey[s],
+        Hx[s],
+        Hz[s],
+        m_Ey_x[s],
+        m_Ey_z[s],
+        m_Hx_z[s],
+        m_Hz_x[s],
         dEy[s],
         dHx[s],
         dHz[s],
@@ -567,6 +616,7 @@ def borntm_python(
         dm_Ey_z[s],
         dm_Hx_z[s],
         dm_Hz_x[s],
+        bg_receiver_amplitudes,
         receiver_amplitudes,
     )
 

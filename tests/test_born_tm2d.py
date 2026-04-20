@@ -54,12 +54,14 @@ def born_tm_setup() -> dict[str, object]:
     }
 
 
-def _born_receivers(
+def _born_outputs(
     setup: dict[str, object],
     *,
     depsilon: torch.Tensor,
     linearize_source: bool,
-) -> torch.Tensor:
+    python_backend: bool,
+    bg_receiver_location: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, ...]:
     return tide.borntm(
         setup["epsilon"],
         setup["sigma"],
@@ -69,18 +71,37 @@ def _born_receivers(
         source_amplitude=setup["source_amplitude"],
         source_location=setup["source_location"],
         receiver_location=setup["receiver_location"],
+        bg_receiver_location=bg_receiver_location,
         depsilon=depsilon,
         pml_width=setup["pml_width"],
         stencil=setup["stencil"],
         linearize_source=linearize_source,
+        python_backend=python_backend,
+    )
+
+
+def _born_receivers(
+    setup: dict[str, object],
+    *,
+    depsilon: torch.Tensor,
+    linearize_source: bool,
+    python_backend: bool,
+) -> torch.Tensor:
+    return _born_outputs(
+        setup,
+        depsilon=depsilon,
+        linearize_source=linearize_source,
+        python_backend=python_backend,
     )[-1]
 
 
-def _maxwell_receivers(
+def _maxwell_outputs(
     setup: dict[str, object],
     *,
     epsilon: torch.Tensor,
-) -> torch.Tensor:
+    receiver_location: torch.Tensor,
+    python_backend: bool,
+) -> tuple[torch.Tensor, ...]:
     return tide.maxwelltm(
         epsilon,
         setup["sigma"],
@@ -89,10 +110,23 @@ def _maxwell_receivers(
         dt=setup["dt"],
         source_amplitude=setup["source_amplitude"],
         source_location=setup["source_location"],
-        receiver_location=setup["receiver_location"],
+        receiver_location=receiver_location,
         pml_width=setup["pml_width"],
         stencil=setup["stencil"],
         model_gradient_sampling_interval=1,
+        python_backend=python_backend,
+    )
+
+
+def _maxwell_receivers(
+    setup: dict[str, object],
+    *,
+    epsilon: torch.Tensor,
+) -> torch.Tensor:
+    return _maxwell_outputs(
+        setup,
+        epsilon=epsilon,
+        receiver_location=setup["receiver_location"],
         python_backend=True,
     )[-1]
 
@@ -112,13 +146,18 @@ def test_borntm_is_linear_in_depsilon(born_tm_setup):
         setup,
         depsilon=a * m1 + b * m2,
         linearize_source=False,
+        python_backend=True,
     )
     rhs = a * _born_receivers(
-        setup, depsilon=m1, linearize_source=False
+        setup,
+        depsilon=m1,
+        linearize_source=False,
+        python_backend=True,
     ) + b * _born_receivers(
         setup,
         depsilon=m2,
         linearize_source=False,
+        python_backend=True,
     )
 
     assert torch.allclose(lhs, rhs, atol=1e-10, rtol=1e-8)
@@ -134,7 +173,12 @@ def test_borntm_matches_maxwelltm_taylor_expansion(born_tm_setup):
     dm = 0.1 * dm / dm.abs().amax()
 
     base = _maxwell_receivers(setup, epsilon=epsilon)
-    born = _born_receivers(setup, depsilon=dm, linearize_source=True)
+    born = _born_receivers(
+        setup,
+        depsilon=dm,
+        linearize_source=True,
+        python_backend=True,
+    )
 
     errors = []
     for h in (1e-1, 5e-2, 2.5e-2):
@@ -145,6 +189,34 @@ def test_borntm_matches_maxwelltm_taylor_expansion(born_tm_setup):
     assert errors[2] < 0.35 * errors[1]
 
 
+def test_borntm_returns_background_wavefields_and_receivers(born_tm_setup):
+    torch.manual_seed(3)
+    setup = born_tm_setup
+    epsilon = setup["epsilon"]
+    receiver_location = setup["receiver_location"]
+    assert isinstance(epsilon, torch.Tensor)
+    assert isinstance(receiver_location, torch.Tensor)
+
+    dm = 0.05 * torch.randn_like(epsilon)
+    born = _born_outputs(
+        setup,
+        depsilon=dm,
+        linearize_source=True,
+        python_backend=True,
+        bg_receiver_location=receiver_location,
+    )
+    maxwell = _maxwell_outputs(
+        setup,
+        epsilon=epsilon,
+        receiver_location=receiver_location,
+        python_backend=True,
+    )
+
+    for born_out, maxwell_out in zip(born[:7], maxwell[:-1]):
+        torch.testing.assert_close(born_out, maxwell_out)
+    torch.testing.assert_close(born[-2], maxwell[-1])
+
+
 def test_native_borntm_matches_python_reference(born_tm_setup):
     if not backend_utils.is_backend_available():
         pytest.skip("native backend not available")
@@ -152,75 +224,60 @@ def test_native_borntm_matches_python_reference(born_tm_setup):
     torch.manual_seed(11)
     setup = born_tm_setup
     epsilon = setup["epsilon"]
+    receiver_location = setup["receiver_location"]
     assert isinstance(epsilon, torch.Tensor)
+    assert isinstance(receiver_location, torch.Tensor)
 
     dm = 0.05 * torch.randn_like(epsilon)
 
-    native = tide.borntm(
-        setup["epsilon"],
-        setup["sigma"],
-        setup["mu"],
-        grid_spacing=setup["grid_spacing"],
-        dt=setup["dt"],
-        source_amplitude=setup["source_amplitude"],
-        source_location=setup["source_location"],
-        receiver_location=setup["receiver_location"],
+    native = _born_outputs(
+        setup,
         depsilon=dm,
-        pml_width=setup["pml_width"],
-        stencil=setup["stencil"],
         linearize_source=True,
         python_backend=False,
-    )[-1]
-    reference = tide.borntm(
-        setup["epsilon"],
-        setup["sigma"],
-        setup["mu"],
-        grid_spacing=setup["grid_spacing"],
-        dt=setup["dt"],
-        source_amplitude=setup["source_amplitude"],
-        source_location=setup["source_location"],
-        receiver_location=setup["receiver_location"],
+        bg_receiver_location=receiver_location,
+    )
+    reference = _born_outputs(
+        setup,
         depsilon=dm,
-        pml_width=setup["pml_width"],
-        stencil=setup["stencil"],
         linearize_source=True,
         python_backend=True,
-    )[-1]
+        bg_receiver_location=receiver_location,
+    )
 
-    assert torch.allclose(native, reference, atol=1e-10, rtol=1e-8)
+    for native_out, reference_out in zip(native, reference):
+        torch.testing.assert_close(native_out, reference_out, atol=1e-10, rtol=1e-8)
 
 
 @pytest.mark.parametrize("linearize_source", [True, False])
-def test_borntm_adjoint_passes_dot_product_test(born_tm_setup, linearize_source: bool):
+def test_borntm_autograd_passes_dot_product_test(
+    born_tm_setup, linearize_source: bool
+):
     torch.manual_seed(2)
     setup = born_tm_setup
     epsilon = setup["epsilon"]
     assert isinstance(epsilon, torch.Tensor)
 
     dm = 0.05 * torch.randn_like(epsilon)
-    residual = torch.randn_like(
-        _born_receivers(setup, depsilon=dm, linearize_source=linearize_source)
-    )
-
-    lhs = torch.sum(
-        _born_receivers(setup, depsilon=dm, linearize_source=linearize_source)
-        * residual
-    )
-    grad_eps, _ = tide.borntm_adjoint(
-        setup["epsilon"],
-        setup["sigma"],
-        setup["mu"],
-        grid_spacing=setup["grid_spacing"],
-        dt=setup["dt"],
-        source_amplitude=setup["source_amplitude"],
-        source_location=setup["source_location"],
-        receiver_location=setup["receiver_location"],
-        residual=residual,
-        pml_width=setup["pml_width"],
-        stencil=setup["stencil"],
+    depsilon = torch.zeros_like(epsilon, requires_grad=True)
+    pred = _born_receivers(
+        setup,
+        depsilon=depsilon,
         linearize_source=linearize_source,
         python_backend=True,
     )
+    residual = torch.randn_like(pred.detach())
+
+    lhs = torch.sum(
+        _born_receivers(
+            setup,
+            depsilon=dm,
+            linearize_source=linearize_source,
+            python_backend=True,
+        )
+        * residual
+    )
+    grad_eps = torch.autograd.grad(torch.sum(pred * residual), depsilon)[0]
     rhs = torch.sum(dm * grad_eps)
     rel_error = torch.abs(lhs - rhs) / torch.maximum(
         torch.maximum(torch.abs(lhs), torch.abs(rhs)),
@@ -231,7 +288,7 @@ def test_borntm_adjoint_passes_dot_product_test(born_tm_setup, linearize_source:
 
 
 @pytest.mark.parametrize("linearize_source", [True, False])
-def test_native_borntm_adjoint_passes_dot_product_test(
+def test_native_borntm_autograd_passes_dot_product_test(
     born_tm_setup, linearize_source: bool
 ):
     if not backend_utils.is_backend_available():
@@ -243,57 +300,25 @@ def test_native_borntm_adjoint_passes_dot_product_test(
     assert isinstance(epsilon, torch.Tensor)
 
     dm = 0.05 * torch.randn_like(epsilon)
-    residual = torch.randn_like(
-        tide.borntm(
-            setup["epsilon"],
-            setup["sigma"],
-            setup["mu"],
-            grid_spacing=setup["grid_spacing"],
-            dt=setup["dt"],
-            source_amplitude=setup["source_amplitude"],
-            source_location=setup["source_location"],
-            receiver_location=setup["receiver_location"],
-            depsilon=dm,
-            pml_width=setup["pml_width"],
-            stencil=setup["stencil"],
-            linearize_source=linearize_source,
-            python_backend=False,
-        )[-1]
-    )
-
-    lhs = torch.sum(
-        tide.borntm(
-            setup["epsilon"],
-            setup["sigma"],
-            setup["mu"],
-            grid_spacing=setup["grid_spacing"],
-            dt=setup["dt"],
-            source_amplitude=setup["source_amplitude"],
-            source_location=setup["source_location"],
-            receiver_location=setup["receiver_location"],
-            depsilon=dm,
-            pml_width=setup["pml_width"],
-            stencil=setup["stencil"],
-            linearize_source=linearize_source,
-            python_backend=False,
-        )[-1]
-        * residual
-    )
-    grad_eps, _ = tide.borntm_adjoint(
-        setup["epsilon"],
-        setup["sigma"],
-        setup["mu"],
-        grid_spacing=setup["grid_spacing"],
-        dt=setup["dt"],
-        source_amplitude=setup["source_amplitude"],
-        source_location=setup["source_location"],
-        receiver_location=setup["receiver_location"],
-        residual=residual,
-        pml_width=setup["pml_width"],
-        stencil=setup["stencil"],
+    depsilon = torch.zeros_like(epsilon, requires_grad=True)
+    pred = _born_receivers(
+        setup,
+        depsilon=depsilon,
         linearize_source=linearize_source,
         python_backend=False,
     )
+    residual = torch.randn_like(pred.detach())
+
+    lhs = torch.sum(
+        _born_receivers(
+            setup,
+            depsilon=dm,
+            linearize_source=linearize_source,
+            python_backend=False,
+        )
+        * residual
+    )
+    grad_eps = torch.autograd.grad(torch.sum(pred * residual), depsilon)[0]
     rhs = torch.sum(dm * grad_eps)
     rel_error = torch.abs(lhs - rhs) / torch.maximum(
         torch.maximum(torch.abs(lhs), torch.abs(rhs)),
@@ -303,83 +328,73 @@ def test_native_borntm_adjoint_passes_dot_product_test(
     assert rel_error.item() < 1e-6
 
 
-def test_borntm_adjoint_matches_maxwelltm_autograd_gradient(born_tm_setup):
-    torch.manual_seed(3)
+def test_borntm_autograd_matches_maxwelltm_autograd_gradient(born_tm_setup):
+    torch.manual_seed(7)
     setup = born_tm_setup
+    epsilon = setup["epsilon"]
+    assert isinstance(epsilon, torch.Tensor)
+
     residual = torch.randn(
         24,
         1,
         2,
-        device=setup["epsilon"].device,
-        dtype=setup["epsilon"].dtype,
+        device=epsilon.device,
+        dtype=epsilon.dtype,
     )
 
-    epsilon = setup["epsilon"].clone().detach().requires_grad_(True)
-    pred = _maxwell_receivers(setup, epsilon=epsilon)
-    grad_ref = torch.autograd.grad(torch.sum(pred * residual), epsilon)[0]
+    epsilon_ref = epsilon.clone().detach().requires_grad_(True)
+    pred_ref = _maxwell_receivers(setup, epsilon=epsilon_ref)
+    grad_ref = torch.autograd.grad(torch.sum(pred_ref * residual), epsilon_ref)[0]
 
-    grad_eps, _ = tide.borntm_adjoint(
-        setup["epsilon"],
-        setup["sigma"],
-        setup["mu"],
-        grid_spacing=setup["grid_spacing"],
-        dt=setup["dt"],
-        source_amplitude=setup["source_amplitude"],
-        source_location=setup["source_location"],
-        receiver_location=setup["receiver_location"],
-        residual=residual,
-        pml_width=setup["pml_width"],
-        stencil=setup["stencil"],
+    depsilon = torch.zeros_like(epsilon, requires_grad=True)
+    pred = _born_receivers(
+        setup,
+        depsilon=depsilon,
         linearize_source=True,
         python_backend=True,
     )
+    grad_eps = torch.autograd.grad(torch.sum(pred * residual), depsilon)[0]
 
-    assert torch.allclose(grad_eps, grad_ref, atol=1e-9, rtol=1e-8)
+    torch.testing.assert_close(grad_eps, grad_ref, atol=1e-9, rtol=1e-8)
 
 
-def test_native_borntm_adjoint_matches_python_reference(born_tm_setup):
+def test_native_borntm_autograd_matches_python_reference(born_tm_setup):
     if not backend_utils.is_backend_available():
         pytest.skip("native backend not available")
 
-    torch.manual_seed(7)
+    torch.manual_seed(13)
     setup = born_tm_setup
+    epsilon = setup["epsilon"]
+    assert isinstance(epsilon, torch.Tensor)
+
     residual = torch.randn(
         24,
         1,
         2,
-        device=setup["epsilon"].device,
-        dtype=setup["epsilon"].dtype,
+        device=epsilon.device,
+        dtype=epsilon.dtype,
     )
 
-    grad_native, _ = tide.borntm_adjoint(
-        setup["epsilon"],
-        setup["sigma"],
-        setup["mu"],
-        grid_spacing=setup["grid_spacing"],
-        dt=setup["dt"],
-        source_amplitude=setup["source_amplitude"],
-        source_location=setup["source_location"],
-        receiver_location=setup["receiver_location"],
-        residual=residual,
-        pml_width=setup["pml_width"],
-        stencil=setup["stencil"],
+    depsilon_native = torch.zeros_like(epsilon, requires_grad=True)
+    pred_native = _born_receivers(
+        setup,
+        depsilon=depsilon_native,
         linearize_source=True,
         python_backend=False,
     )
-    grad_reference, _ = tide.borntm_adjoint(
-        setup["epsilon"],
-        setup["sigma"],
-        setup["mu"],
-        grid_spacing=setup["grid_spacing"],
-        dt=setup["dt"],
-        source_amplitude=setup["source_amplitude"],
-        source_location=setup["source_location"],
-        receiver_location=setup["receiver_location"],
-        residual=residual,
-        pml_width=setup["pml_width"],
-        stencil=setup["stencil"],
+    grad_native = torch.autograd.grad(
+        torch.sum(pred_native * residual), depsilon_native
+    )[0]
+
+    depsilon_reference = torch.zeros_like(epsilon, requires_grad=True)
+    pred_reference = _born_receivers(
+        setup,
+        depsilon=depsilon_reference,
         linearize_source=True,
         python_backend=True,
     )
+    grad_reference = torch.autograd.grad(
+        torch.sum(pred_reference * residual), depsilon_reference
+    )[0]
 
-    assert torch.allclose(grad_native, grad_reference, atol=1e-9, rtol=1e-8)
+    torch.testing.assert_close(grad_native, grad_reference, atol=1e-9, rtol=1e-8)

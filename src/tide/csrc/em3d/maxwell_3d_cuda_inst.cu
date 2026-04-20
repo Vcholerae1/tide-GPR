@@ -216,6 +216,41 @@ __host__ __device__ __forceinline__ T tide_min(T a, T b) {
   return a < b ? a : b;
 }
 
+struct LinearCellIndex3D {
+  int shot_idx;
+  int j;
+  int z;
+  int y;
+  int x;
+  int nz_i;
+  int ny_i;
+  int nx_i;
+};
+
+__device__ __forceinline__ LinearCellIndex3D decode_linear_cell_index_3d(
+    int64_t const linear_idx) {
+  LinearCellIndex3D idx{};
+  idx.nz_i = static_cast<int>(nz);
+  idx.ny_i = static_cast<int>(ny);
+  idx.nx_i = static_cast<int>(nx);
+  int64_t const shot_idx64 = linear_idx / shot_numel;
+  int64_t const j64 = linear_idx - shot_idx64 * shot_numel;
+  idx.shot_idx = static_cast<int>(shot_idx64);
+  idx.j = static_cast<int>(j64);
+  int const yz_stride = idx.ny_i * idx.nx_i;
+  idx.z = idx.j / yz_stride;
+  int const rem = idx.j - idx.z * yz_stride;
+  idx.y = rem / idx.nx_i;
+  idx.x = rem - idx.y * idx.nx_i;
+  return idx;
+}
+
+__device__ __forceinline__ bool is_active_cell_3d(LinearCellIndex3D const &idx) {
+  return idx.z >= FD_PAD && idx.z < idx.nz_i - FD_PAD + 1 && idx.y >= FD_PAD &&
+         idx.y < idx.ny_i - FD_PAD + 1 && idx.x >= FD_PAD &&
+         idx.x < idx.nx_i - FD_PAD + 1;
+}
+
 __global__ void forward_kernel_h(
     TIDE_DTYPE const *__restrict const cq,
     TIDE_DTYPE const *__restrict const ex,
@@ -245,17 +280,13 @@ __global__ void forward_kernel_h(
     return;
   }
 
-  int64_t const shot_idx = i / shot_numel;
-  int64_t const j = i - shot_idx * shot_numel;
+  LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
 
-  int64_t const yz_stride = ny * nx;
-  int64_t const z = j / yz_stride;
-  int64_t const rem = j - z * yz_stride;
-  int64_t const y = rem / nx;
-  int64_t const x = rem - y * nx;
-
-  if (z < FD_PAD || z >= nz - FD_PAD + 1 || y < FD_PAD || y >= ny - FD_PAD + 1 ||
-      x < FD_PAD || x >= nx - FD_PAD + 1) {
+  if (!is_active_cell_3d(idx)) {
     return;
   }
 
@@ -265,12 +296,12 @@ __global__ void forward_kernel_h(
 
   TIDE_DTYPE const cq_val = cq_batched ? cq[i] : cq[j];
 
-  int64_t const pml_z0h = pml_z0;
-  int64_t const pml_z1h = tide_max(pml_z0, pml_z1 - 1);
-  int64_t const pml_y0h = pml_y0;
-  int64_t const pml_y1h = tide_max(pml_y0, pml_y1 - 1);
-  int64_t const pml_x0h = pml_x0;
-  int64_t const pml_x1h = tide_max(pml_x0, pml_x1 - 1);
+  int const pml_z0h = static_cast<int>(pml_z0);
+  int const pml_z1h = tide_max(pml_z0h, static_cast<int>(pml_z1) - 1);
+  int const pml_y0h = static_cast<int>(pml_y0);
+  int const pml_y1h = tide_max(pml_y0h, static_cast<int>(pml_y1) - 1);
+  int const pml_x0h = static_cast<int>(pml_x0);
+  int const pml_x1h = tide_max(pml_x0h, static_cast<int>(pml_x1) - 1);
 
   bool const pml_z_h = (z < pml_z0h) || (z >= pml_z1h);
   bool const pml_y_h = (y < pml_y0h) || (y >= pml_y1h);
@@ -283,7 +314,7 @@ __global__ void forward_kernel_h(
   TIDE_DTYPE dEx_dy_pml = 0;
   TIDE_DTYPE dEy_dx_pml = 0;
 
-  if (z < nz - FD_PAD) {
+  if (z < idx.nz_i - FD_PAD) {
     TIDE_DTYPE dEy_dz = DIFFZH1(EY_L);
     if (pml_z_h) {
       m_ey_z[i] = bzh[z] * m_ey_z[i] + azh[z] * dEy_dz;
@@ -292,7 +323,7 @@ __global__ void forward_kernel_h(
     dEy_dz_pml = dEy_dz;
   }
 
-  if (y < ny - FD_PAD) {
+  if (y < idx.ny_i - FD_PAD) {
     TIDE_DTYPE dEz_dy = DIFFYH1(EZ_L);
     if (pml_y_h) {
       m_ez_y[i] = byh[y] * m_ez_y[i] + ayh[y] * dEz_dy;
@@ -301,7 +332,7 @@ __global__ void forward_kernel_h(
     dEz_dy_pml = dEz_dy;
   }
 
-  if (x < nx - FD_PAD) {
+  if (x < idx.nx_i - FD_PAD) {
     TIDE_DTYPE dEz_dx = DIFFXH1(EZ_L);
     if (pml_x_h) {
       m_ez_x[i] = bxh[x] * m_ez_x[i] + axh[x] * dEz_dx;
@@ -310,7 +341,7 @@ __global__ void forward_kernel_h(
     dEz_dx_pml = dEz_dx;
   }
 
-  if (z < nz - FD_PAD) {
+  if (z < idx.nz_i - FD_PAD) {
     TIDE_DTYPE dEx_dz = DIFFZH1(EX_L);
     if (pml_z_h) {
       m_ex_z[i] = bzh[z] * m_ex_z[i] + azh[z] * dEx_dz;
@@ -319,7 +350,7 @@ __global__ void forward_kernel_h(
     dEx_dz_pml = dEx_dz;
   }
 
-  if (y < ny - FD_PAD) {
+  if (y < idx.ny_i - FD_PAD) {
     TIDE_DTYPE dEx_dy = DIFFYH1(EX_L);
     if (pml_y_h) {
       m_ex_y[i] = byh[y] * m_ex_y[i] + ayh[y] * dEx_dy;
@@ -328,7 +359,7 @@ __global__ void forward_kernel_h(
     dEx_dy_pml = dEx_dy;
   }
 
-  if (x < nx - FD_PAD) {
+  if (x < idx.nx_i - FD_PAD) {
     TIDE_DTYPE dEy_dx = DIFFXH1(EY_L);
     if (pml_x_h) {
       m_ey_x[i] = bxh[x] * m_ey_x[i] + axh[x] * dEy_dx;
@@ -376,17 +407,13 @@ __global__ void forward_kernel_e(
     return;
   }
 
-  int64_t const shot_idx = i / shot_numel;
-  int64_t const j = i - shot_idx * shot_numel;
+  LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
 
-  int64_t const yz_stride = ny * nx;
-  int64_t const z = j / yz_stride;
-  int64_t const rem = j - z * yz_stride;
-  int64_t const y = rem / nx;
-  int64_t const x = rem - y * nx;
-
-  if (z < FD_PAD || z >= nz - FD_PAD + 1 || y < FD_PAD || y >= ny - FD_PAD + 1 ||
-      x < FD_PAD || x >= nx - FD_PAD + 1) {
+  if (!is_active_cell_3d(idx)) {
     return;
   }
 
@@ -397,9 +424,15 @@ __global__ void forward_kernel_e(
   TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
   TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];
 
-  bool const pml_z_v = (z < pml_z0) || (z >= pml_z1);
-  bool const pml_y_v = (y < pml_y0) || (y >= pml_y1);
-  bool const pml_x_v = (x < pml_x0) || (x >= pml_x1);
+  int const pml_z0i = static_cast<int>(pml_z0);
+  int const pml_z1i = static_cast<int>(pml_z1);
+  int const pml_y0i = static_cast<int>(pml_y0);
+  int const pml_y1i = static_cast<int>(pml_y1);
+  int const pml_x0i = static_cast<int>(pml_x0);
+  int const pml_x1i = static_cast<int>(pml_x1);
+  bool const pml_z_v = (z < pml_z0i) || (z >= pml_z1i);
+  bool const pml_y_v = (y < pml_y0i) || (y >= pml_y1i);
+  bool const pml_x_v = (x < pml_x0i) || (x >= pml_x1i);
 
   TIDE_DTYPE dHy_dz = DIFFZ1(HY_L);
   TIDE_DTYPE dHz_dy = DIFFY1(HZ_L);
@@ -479,17 +512,13 @@ __global__ void forward_kernel_e_debye(
     return;
   }
 
-  int64_t const shot_idx = i / shot_numel;
-  int64_t const j = i - shot_idx * shot_numel;
+  LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
 
-  int64_t const yz_stride = ny * nx;
-  int64_t const z = j / yz_stride;
-  int64_t const rem = j - z * yz_stride;
-  int64_t const y = rem / nx;
-  int64_t const x = rem - y * nx;
-
-  if (z < FD_PAD || z >= nz - FD_PAD + 1 || y < FD_PAD || y >= ny - FD_PAD + 1 ||
-      x < FD_PAD || x >= nx - FD_PAD + 1) {
+  if (!is_active_cell_3d(idx)) {
     return;
   }
 
@@ -500,9 +529,15 @@ __global__ void forward_kernel_e_debye(
   TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
   TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];
 
-  bool const pml_z_v = (z < pml_z0) || (z >= pml_z1);
-  bool const pml_y_v = (y < pml_y0) || (y >= pml_y1);
-  bool const pml_x_v = (x < pml_x0) || (x >= pml_x1);
+  int const pml_z0i = static_cast<int>(pml_z0);
+  int const pml_z1i = static_cast<int>(pml_z1);
+  int const pml_y0i = static_cast<int>(pml_y0);
+  int const pml_y1i = static_cast<int>(pml_y1);
+  int const pml_x0i = static_cast<int>(pml_x0);
+  int const pml_x1i = static_cast<int>(pml_x1);
+  bool const pml_z_v = (z < pml_z0i) || (z >= pml_z1i);
+  bool const pml_y_v = (y < pml_y0i) || (y >= pml_y1i);
+  bool const pml_x_v = (x < pml_x0i) || (x >= pml_x1i);
 
   TIDE_DTYPE dHy_dz = DIFFZ1(HY_L);
   TIDE_DTYPE dHz_dy = DIFFY1(HZ_L);
@@ -542,9 +577,11 @@ __global__ void forward_kernel_e_debye(
   TIDE_DTYPE pol_term_x = 0;
   TIDE_DTYPE pol_term_y = 0;
   TIDE_DTYPE pol_term_z = 0;
-  for (int64_t pole = 0; pole < n_poles; ++pole) {
+  int const n_poles_i = static_cast<int>(n_poles);
+  for (int pole = 0; pole < n_poles_i; ++pole) {
     int64_t const coeff_idx = pole * shot_numel + j;
-    int64_t const pol_idx = ((int64_t)shot_idx * n_poles + pole) * shot_numel + j;
+    int64_t const pol_idx =
+        ((int64_t)idx.shot_idx * n_poles_i + pole) * shot_numel + j;
     TIDE_DTYPE const cp = debye_cp[coeff_idx];
     pol_term_x += cp * pol_ex[pol_idx];
     pol_term_y += cp * pol_ey[pol_idx];
@@ -623,17 +660,13 @@ __global__ void forward_kernel_e_with_storage(
     return;
   }
 
-  int64_t const shot_idx = i / shot_numel;
-  int64_t const j = i - shot_idx * shot_numel;
+  LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
 
-  int64_t const yz_stride = ny * nx;
-  int64_t const z = j / yz_stride;
-  int64_t const rem = j - z * yz_stride;
-  int64_t const y = rem / nx;
-  int64_t const x = rem - y * nx;
-
-  if (z < FD_PAD || z >= nz - FD_PAD + 1 || y < FD_PAD || y >= ny - FD_PAD + 1 ||
-      x < FD_PAD || x >= nx - FD_PAD + 1) {
+  if (!is_active_cell_3d(idx)) {
     return;
   }
 
@@ -644,9 +677,15 @@ __global__ void forward_kernel_e_with_storage(
   TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
   TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];
 
-  bool const pml_z_v = (z < pml_z0) || (z >= pml_z1);
-  bool const pml_y_v = (y < pml_y0) || (y >= pml_y1);
-  bool const pml_x_v = (x < pml_x0) || (x >= pml_x1);
+  int const pml_z0i = static_cast<int>(pml_z0);
+  int const pml_z1i = static_cast<int>(pml_z1);
+  int const pml_y0i = static_cast<int>(pml_y0);
+  int const pml_y1i = static_cast<int>(pml_y1);
+  int const pml_x0i = static_cast<int>(pml_x0);
+  int const pml_x1i = static_cast<int>(pml_x1);
+  bool const pml_z_v = (z < pml_z0i) || (z >= pml_z1i);
+  bool const pml_y_v = (y < pml_y0i) || (y >= pml_y1i);
+  bool const pml_x_v = (x < pml_x0i) || (x >= pml_x1i);
 
   TIDE_DTYPE dHy_dz = DIFFZ1(HY_S);
   TIDE_DTYPE dHz_dy = DIFFY1(HZ_S);
@@ -727,17 +766,13 @@ __global__ void born_forward_kernel_h(
     return;
   }
 
-  int64_t const shot_idx = i / shot_numel;
-  int64_t const j = i - shot_idx * shot_numel;
+  LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
 
-  int64_t const yz_stride = ny * nx;
-  int64_t const z = j / yz_stride;
-  int64_t const rem = j - z * yz_stride;
-  int64_t const y = rem / nx;
-  int64_t const x = rem - y * nx;
-
-  if (z < FD_PAD || z >= nz - FD_PAD + 1 || y < FD_PAD || y >= ny - FD_PAD + 1 ||
-      x < FD_PAD || x >= nx - FD_PAD + 1) {
+  if (!is_active_cell_3d(idx)) {
     return;
   }
 
@@ -747,12 +782,12 @@ __global__ void born_forward_kernel_h(
 
   TIDE_DTYPE const cq_val = CQ_I(0, 0, 0);
 
-  int64_t const pml_z0h = pml_z0;
-  int64_t const pml_z1h = tide_max(pml_z0, pml_z1 - 1);
-  int64_t const pml_y0h = pml_y0;
-  int64_t const pml_y1h = tide_max(pml_y0, pml_y1 - 1);
-  int64_t const pml_x0h = pml_x0;
-  int64_t const pml_x1h = tide_max(pml_x0, pml_x1 - 1);
+  int const pml_z0h = static_cast<int>(pml_z0);
+  int const pml_z1h = tide_max(pml_z0h, static_cast<int>(pml_z1) - 1);
+  int const pml_y0h = static_cast<int>(pml_y0);
+  int const pml_y1h = tide_max(pml_y0h, static_cast<int>(pml_y1) - 1);
+  int const pml_x0h = static_cast<int>(pml_x0);
+  int const pml_x1h = tide_max(pml_x0h, static_cast<int>(pml_x1) - 1);
 
   bool const pml_z_h = (z < pml_z0h) || (z >= pml_z1h);
   bool const pml_y_h = (y < pml_y0h) || (y >= pml_y1h);
@@ -765,7 +800,7 @@ __global__ void born_forward_kernel_h(
   TIDE_DTYPE dDEx_dy_pml = 0;
   TIDE_DTYPE dDEy_dx_pml = 0;
 
-  if (z < nz - FD_PAD) {
+  if (z < idx.nz_i - FD_PAD) {
     TIDE_DTYPE dDEy_dz = DIFFZH1(DEY_L);
     if (pml_z_h) {
       dm_ey_z[i] = bzh[z] * dm_ey_z[i] + azh[z] * dDEy_dz;
@@ -773,7 +808,7 @@ __global__ void born_forward_kernel_h(
     }
     dDEy_dz_pml = dDEy_dz;
   }
-  if (y < ny - FD_PAD) {
+  if (y < idx.ny_i - FD_PAD) {
     TIDE_DTYPE dDEz_dy = DIFFYH1(DEZ_L);
     if (pml_y_h) {
       dm_ez_y[i] = byh[y] * dm_ez_y[i] + ayh[y] * dDEz_dy;
@@ -781,7 +816,7 @@ __global__ void born_forward_kernel_h(
     }
     dDEz_dy_pml = dDEz_dy;
   }
-  if (x < nx - FD_PAD) {
+  if (x < idx.nx_i - FD_PAD) {
     TIDE_DTYPE dDEz_dx = DIFFXH1(DEZ_L);
     if (pml_x_h) {
       dm_ez_x[i] = bxh[x] * dm_ez_x[i] + axh[x] * dDEz_dx;
@@ -789,7 +824,7 @@ __global__ void born_forward_kernel_h(
     }
     dDEz_dx_pml = dDEz_dx;
   }
-  if (z < nz - FD_PAD) {
+  if (z < idx.nz_i - FD_PAD) {
     TIDE_DTYPE dDEx_dz = DIFFZH1(DEX_L);
     if (pml_z_h) {
       dm_ex_z[i] = bzh[z] * dm_ex_z[i] + azh[z] * dDEx_dz;
@@ -797,7 +832,7 @@ __global__ void born_forward_kernel_h(
     }
     dDEx_dz_pml = dDEx_dz;
   }
-  if (y < ny - FD_PAD) {
+  if (y < idx.ny_i - FD_PAD) {
     TIDE_DTYPE dDEx_dy = DIFFYH1(DEX_L);
     if (pml_y_h) {
       dm_ex_y[i] = byh[y] * dm_ex_y[i] + ayh[y] * dDEx_dy;
@@ -805,7 +840,7 @@ __global__ void born_forward_kernel_h(
     }
     dDEx_dy_pml = dDEx_dy;
   }
-  if (x < nx - FD_PAD) {
+  if (x < idx.nx_i - FD_PAD) {
     TIDE_DTYPE dDEy_dx = DIFFXH1(DEY_L);
     if (pml_x_h) {
       dm_ey_x[i] = bxh[x] * dm_ey_x[i] + axh[x] * dDEy_dx;
@@ -867,17 +902,13 @@ __global__ void born_forward_kernel_e(
     return;
   }
 
-  int64_t const shot_idx = i / shot_numel;
-  int64_t const j = i - shot_idx * shot_numel;
+  LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
 
-  int64_t const yz_stride = ny * nx;
-  int64_t const z = j / yz_stride;
-  int64_t const rem = j - z * yz_stride;
-  int64_t const y = rem / nx;
-  int64_t const x = rem - y * nx;
-
-  if (z < FD_PAD || z >= nz - FD_PAD + 1 || y < FD_PAD || y >= ny - FD_PAD + 1 ||
-      x < FD_PAD || x >= nx - FD_PAD + 1) {
+  if (!is_active_cell_3d(idx)) {
     return;
   }
 
@@ -893,9 +924,15 @@ __global__ void born_forward_kernel_e(
   TIDE_DTYPE const dca_val = dca[j];
   TIDE_DTYPE const dcb_val = dcb[j];
 
-  bool const pml_z_v = (z < pml_z0) || (z >= pml_z1);
-  bool const pml_y_v = (y < pml_y0) || (y >= pml_y1);
-  bool const pml_x_v = (x < pml_x0) || (x >= pml_x1);
+  int const pml_z0i = static_cast<int>(pml_z0);
+  int const pml_z1i = static_cast<int>(pml_z1);
+  int const pml_y0i = static_cast<int>(pml_y0);
+  int const pml_y1i = static_cast<int>(pml_y1);
+  int const pml_x0i = static_cast<int>(pml_x0);
+  int const pml_x1i = static_cast<int>(pml_x1);
+  bool const pml_z_v = (z < pml_z0i) || (z >= pml_z1i);
+  bool const pml_y_v = (y < pml_y0i) || (y >= pml_y1i);
+  bool const pml_x_v = (x < pml_x0i) || (x >= pml_x1i);
 
   TIDE_DTYPE dHy_dz = DIFFZ1(HY_S);
   TIDE_DTYPE dHz_dy = DIFFY1(HZ_S);
@@ -1030,17 +1067,13 @@ __global__ void born_forward_kernel_e_with_storage(
     return;
   }
 
-  int64_t const shot_idx = i / shot_numel;
-  int64_t const j = i - shot_idx * shot_numel;
+  LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
 
-  int64_t const yz_stride = ny * nx;
-  int64_t const z = j / yz_stride;
-  int64_t const rem = j - z * yz_stride;
-  int64_t const y = rem / nx;
-  int64_t const x = rem - y * nx;
-
-  if (z < FD_PAD || z >= nz - FD_PAD + 1 || y < FD_PAD || y >= ny - FD_PAD + 1 ||
-      x < FD_PAD || x >= nx - FD_PAD + 1) {
+  if (!is_active_cell_3d(idx)) {
     return;
   }
 
@@ -1056,9 +1089,15 @@ __global__ void born_forward_kernel_e_with_storage(
   TIDE_DTYPE const dca_val = dca[j];
   TIDE_DTYPE const dcb_val = dcb[j];
 
-  bool const pml_z_v = (z < pml_z0) || (z >= pml_z1);
-  bool const pml_y_v = (y < pml_y0) || (y >= pml_y1);
-  bool const pml_x_v = (x < pml_x0) || (x >= pml_x1);
+  int const pml_z0i = static_cast<int>(pml_z0);
+  int const pml_z1i = static_cast<int>(pml_z1);
+  int const pml_y0i = static_cast<int>(pml_y0);
+  int const pml_y1i = static_cast<int>(pml_y1);
+  int const pml_x0i = static_cast<int>(pml_x0);
+  int const pml_x1i = static_cast<int>(pml_x1);
+  bool const pml_z_v = (z < pml_z0i) || (z >= pml_z1i);
+  bool const pml_y_v = (y < pml_y0i) || (y >= pml_y1i);
+  bool const pml_x_v = (x < pml_x0i) || (x >= pml_x1i);
 
   TIDE_DTYPE dHy_dz = DIFFZ1(HY_S);
   TIDE_DTYPE dHz_dy = DIFFY1(HZ_S);
@@ -1214,17 +1253,13 @@ __global__ void backward_kernel_lambda_h(
     return;
   }
 
-  int64_t const shot_idx = i / shot_numel;
-  int64_t const j = i - shot_idx * shot_numel;
+  LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
 
-  int64_t const yz_stride = ny * nx;
-  int64_t const z = j / yz_stride;
-  int64_t const rem = j - z * yz_stride;
-  int64_t const y = rem / nx;
-  int64_t const x = rem - y * nx;
-
-  if (z < FD_PAD || z >= nz - FD_PAD + 1 || y < FD_PAD || y >= ny - FD_PAD + 1 ||
-      x < FD_PAD || x >= nx - FD_PAD + 1) {
+  if (!is_active_cell_3d(idx)) {
     return;
   }
 
@@ -1232,12 +1267,12 @@ __global__ void backward_kernel_lambda_h(
 #define LEY_H(dz, dy, dx) lambda_ey[ND_INDEX(i, dz, dy, dx)]
 #define LEZ_H(dz, dy, dx) lambda_ez[ND_INDEX(i, dz, dy, dx)]
 
-  int64_t const pml_z0h = pml_z0;
-  int64_t const pml_z1h = tide_max(pml_z0, pml_z1 - 1);
-  int64_t const pml_y0h = pml_y0;
-  int64_t const pml_y1h = tide_max(pml_y0, pml_y1 - 1);
-  int64_t const pml_x0h = pml_x0;
-  int64_t const pml_x1h = tide_max(pml_x0, pml_x1 - 1);
+  int const pml_z0h = static_cast<int>(pml_z0);
+  int const pml_z1h = tide_max(pml_z0h, static_cast<int>(pml_z1) - 1);
+  int const pml_y0h = static_cast<int>(pml_y0);
+  int const pml_y1h = tide_max(pml_y0h, static_cast<int>(pml_y1) - 1);
+  int const pml_x0h = static_cast<int>(pml_x0);
+  int const pml_x1h = tide_max(pml_x0h, static_cast<int>(pml_x1) - 1);
 
   bool const pml_z_h = (z < pml_z0h) || (z >= pml_z1h);
   bool const pml_y_h = (y < pml_y0h) || (y >= pml_y1h);
@@ -1250,7 +1285,7 @@ __global__ void backward_kernel_lambda_h(
   TIDE_DTYPE dLex_dy_pml = 0;
   TIDE_DTYPE dLey_dx_pml = 0;
 
-  if (z < nz - FD_PAD) {
+  if (z < idx.nz_i - FD_PAD) {
     TIDE_DTYPE dLey_dz = -DIFFZ1_ADJ(CB_I, LEY_H);
     if (pml_z_h) {
       m_lambda_ey_z[i] = bzh[z] * m_lambda_ey_z[i] + azh[z] * dLey_dz;
@@ -1258,7 +1293,7 @@ __global__ void backward_kernel_lambda_h(
     }
     dLey_dz_pml = dLey_dz;
   }
-  if (y < ny - FD_PAD) {
+  if (y < idx.ny_i - FD_PAD) {
     TIDE_DTYPE dLez_dy = -DIFFY1_ADJ(CB_I, LEZ_H);
     if (pml_y_h) {
       m_lambda_ez_y[i] = byh[y] * m_lambda_ez_y[i] + ayh[y] * dLez_dy;
@@ -1266,7 +1301,7 @@ __global__ void backward_kernel_lambda_h(
     }
     dLez_dy_pml = dLez_dy;
   }
-  if (x < nx - FD_PAD) {
+  if (x < idx.nx_i - FD_PAD) {
     TIDE_DTYPE dLez_dx = -DIFFX1_ADJ(CB_I, LEZ_H);
     if (pml_x_h) {
       m_lambda_ez_x[i] = bxh[x] * m_lambda_ez_x[i] + axh[x] * dLez_dx;
@@ -1274,7 +1309,7 @@ __global__ void backward_kernel_lambda_h(
     }
     dLez_dx_pml = dLez_dx;
   }
-  if (z < nz - FD_PAD) {
+  if (z < idx.nz_i - FD_PAD) {
     TIDE_DTYPE dLex_dz = -DIFFZ1_ADJ(CB_I, LEX_H);
     if (pml_z_h) {
       m_lambda_ex_z[i] = bzh[z] * m_lambda_ex_z[i] + azh[z] * dLex_dz;
@@ -1282,7 +1317,7 @@ __global__ void backward_kernel_lambda_h(
     }
     dLex_dz_pml = dLex_dz;
   }
-  if (y < ny - FD_PAD) {
+  if (y < idx.ny_i - FD_PAD) {
     TIDE_DTYPE dLex_dy = -DIFFY1_ADJ(CB_I, LEX_H);
     if (pml_y_h) {
       m_lambda_ex_y[i] = byh[y] * m_lambda_ex_y[i] + ayh[y] * dLex_dy;
@@ -1290,7 +1325,7 @@ __global__ void backward_kernel_lambda_h(
     }
     dLex_dy_pml = dLex_dy;
   }
-  if (x < nx - FD_PAD) {
+  if (x < idx.nx_i - FD_PAD) {
     TIDE_DTYPE dLey_dx = -DIFFX1_ADJ(CB_I, LEY_H);
     if (pml_x_h) {
       m_lambda_ey_x[i] = bxh[x] * m_lambda_ey_x[i] + axh[x] * dLey_dx;
@@ -1352,29 +1387,31 @@ __global__ void backward_kernel_lambda_e_with_grad(
     return;
   }
 
-  int64_t const shot_idx = i / shot_numel;
-  int64_t const j = i - shot_idx * shot_numel;
+  LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
 
-  int64_t const yz_stride = ny * nx;
-  int64_t const z = j / yz_stride;
-  int64_t const rem = j - z * yz_stride;
-  int64_t const y = rem / nx;
-  int64_t const x = rem - y * nx;
-
-  if (z < FD_PAD || z >= nz - FD_PAD + 1 || y < FD_PAD || y >= ny - FD_PAD + 1 ||
-      x < FD_PAD || x >= nx - FD_PAD + 1) {
+  if (!is_active_cell_3d(idx)) {
     return;
   }
 
 #define LHX_E(dz, dy, dx) lambda_hx[ND_INDEX(i, dz, dy, dx)]
-  #define LHY_E(dz, dy, dx) lambda_hy[ND_INDEX(i, dz, dy, dx)]
-  #define LHZ_E(dz, dy, dx) lambda_hz[ND_INDEX(i, dz, dy, dx)]
+#define LHY_E(dz, dy, dx) lambda_hy[ND_INDEX(i, dz, dy, dx)]
+#define LHZ_E(dz, dy, dx) lambda_hz[ND_INDEX(i, dz, dy, dx)]
 
   TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
 
-  bool const pml_z_v = (z < pml_z0) || (z >= pml_z1);
-  bool const pml_y_v = (y < pml_y0) || (y >= pml_y1);
-  bool const pml_x_v = (x < pml_x0) || (x >= pml_x1);
+  int const pml_z0i = static_cast<int>(pml_z0);
+  int const pml_z1i = static_cast<int>(pml_z1);
+  int const pml_y0i = static_cast<int>(pml_y0);
+  int const pml_y1i = static_cast<int>(pml_y1);
+  int const pml_x0i = static_cast<int>(pml_x0);
+  int const pml_x1i = static_cast<int>(pml_x1);
+  bool const pml_z_v = (z < pml_z0i) || (z >= pml_z1i);
+  bool const pml_y_v = (y < pml_y0i) || (y >= pml_y1i);
+  bool const pml_x_v = (x < pml_x0i) || (x >= pml_x1i);
 
   TIDE_DTYPE dLhy_dz = DIFFZH1_ADJ(CQ_I, LHY_E);
   TIDE_DTYPE dLhz_dy = DIFFYH1_ADJ(CQ_I, LHZ_E);
@@ -1495,17 +1532,13 @@ __global__ void backward_kernel_lambda_e(
     return;
   }
 
-  int64_t const shot_idx = i / shot_numel;
-  int64_t const j = i - shot_idx * shot_numel;
+  LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
 
-  int64_t const yz_stride = ny * nx;
-  int64_t const z = j / yz_stride;
-  int64_t const rem = j - z * yz_stride;
-  int64_t const y = rem / nx;
-  int64_t const x = rem - y * nx;
-
-  if (z < FD_PAD || z >= nz - FD_PAD + 1 || y < FD_PAD || y >= ny - FD_PAD + 1 ||
-      x < FD_PAD || x >= nx - FD_PAD + 1) {
+  if (!is_active_cell_3d(idx)) {
     return;
   }
 
@@ -1515,9 +1548,15 @@ __global__ void backward_kernel_lambda_e(
 
   TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
 
-  bool const pml_z_v = (z < pml_z0) || (z >= pml_z1);
-  bool const pml_y_v = (y < pml_y0) || (y >= pml_y1);
-  bool const pml_x_v = (x < pml_x0) || (x >= pml_x1);
+  int const pml_z0i = static_cast<int>(pml_z0);
+  int const pml_z1i = static_cast<int>(pml_z1);
+  int const pml_y0i = static_cast<int>(pml_y0);
+  int const pml_y1i = static_cast<int>(pml_y1);
+  int const pml_x0i = static_cast<int>(pml_x0);
+  int const pml_x1i = static_cast<int>(pml_x1);
+  bool const pml_z_v = (z < pml_z0i) || (z >= pml_z1i);
+  bool const pml_y_v = (y < pml_y0i) || (y >= pml_y1i);
+  bool const pml_x_v = (x < pml_x0i) || (x >= pml_x1i);
 
   TIDE_DTYPE dLhy_dz = DIFFZH1_ADJ(CQ_I, LHY_ENG);
   TIDE_DTYPE dLhz_dy = DIFFYH1_ADJ(CQ_I, LHZ_ENG);

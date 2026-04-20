@@ -37,6 +37,13 @@ def borntm_c_cuda(
     stencil: int,
     pml_width: int | Sequence[int],
     max_vel: float | None,
+    Ey_0: torch.Tensor | None,
+    Hx_0: torch.Tensor | None,
+    Hz_0: torch.Tensor | None,
+    m_Ey_x_0: torch.Tensor | None,
+    m_Ey_z_0: torch.Tensor | None,
+    m_Hx_z_0: torch.Tensor | None,
+    m_Hz_x_0: torch.Tensor | None,
     dEy_0: torch.Tensor | None,
     dHx_0: torch.Tensor | None,
     dHz_0: torch.Tensor | None,
@@ -68,6 +75,29 @@ def borntm_c_cuda(
             f"got {parameterization!r}."
         )
 
+    source_requires_grad = bool(
+        source_amplitude is not None and source_amplitude.requires_grad
+    )
+    state_requires_grad = any(
+        tensor is not None and tensor.requires_grad
+        for tensor in (
+            Ey_0,
+            Hx_0,
+            Hz_0,
+            m_Ey_x_0,
+            m_Ey_z_0,
+            m_Hx_z_0,
+            m_Hz_x_0,
+            dEy_0,
+            dHx_0,
+            dHz_0,
+            dm_Ey_x_0,
+            dm_Ey_z_0,
+            dm_Hx_z_0,
+            dm_Hz_x_0,
+        )
+    )
+
     if epsilon.requires_grad or sigma.requires_grad or mu.requires_grad:
         warnings.warn(
             "Native borntm treats the background model as fixed. "
@@ -88,9 +118,60 @@ def borntm_c_cuda(
             source_amplitude,
             source_location,
             receiver_location,
+            None,
             stencil=stencil,
             pml_width=pml_width,
             max_vel=max_vel,
+            Ey_0=Ey_0,
+            Hx_0=Hx_0,
+            Hz_0=Hz_0,
+            m_Ey_x_0=m_Ey_x_0,
+            m_Ey_z_0=m_Ey_z_0,
+            m_Hx_z_0=m_Hx_z_0,
+            m_Hz_x_0=m_Hz_x_0,
+            dEy_0=dEy_0,
+            dHx_0=dHx_0,
+            dHz_0=dHz_0,
+            dm_Ey_x_0=dm_Ey_x_0,
+            dm_Ey_z_0=dm_Ey_z_0,
+            dm_Hx_z_0=dm_Hx_z_0,
+            dm_Hz_x_0=dm_Hz_x_0,
+            nt=nt,
+            parameterization=parameterization,
+            linearize_source=linearize_source,
+        )
+
+    if source_requires_grad or state_requires_grad:
+        warnings.warn(
+            "Native borntm does not support gradients with respect to source "
+            "amplitudes or initial wavefields. Falling back to the Python "
+            "reference path.",
+            RuntimeWarning,
+        )
+        return borntm_python(
+            epsilon,
+            sigma,
+            mu,
+            depsilon,
+            dsigma,
+            dca,
+            dcb,
+            grid_spacing,
+            dt,
+            source_amplitude,
+            source_location,
+            receiver_location,
+            None,
+            stencil=stencil,
+            pml_width=pml_width,
+            max_vel=max_vel,
+            Ey_0=Ey_0,
+            Hx_0=Hx_0,
+            Hz_0=Hz_0,
+            m_Ey_x_0=m_Ey_x_0,
+            m_Ey_z_0=m_Ey_z_0,
+            m_Hx_z_0=m_Hx_z_0,
+            m_Hz_x_0=m_Hz_x_0,
             dEy_0=dEy_0,
             dHx_0=dHx_0,
             dHz_0=dHz_0,
@@ -280,7 +361,7 @@ def borntm_c_cuda(
 
     size_with_batch = (n_shots, padded_ny, padded_nx)
     Ey = _init_tm_wavefield(
-        None,
+        Ey_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -289,7 +370,7 @@ def borntm_c_cuda(
         contiguous=True,
     )
     Hx = _init_tm_wavefield(
-        None,
+        Hx_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -298,7 +379,7 @@ def borntm_c_cuda(
         contiguous=True,
     )
     Hz = _init_tm_wavefield(
-        None,
+        Hz_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -307,7 +388,7 @@ def borntm_c_cuda(
         contiguous=True,
     )
     m_Ey_x = _init_tm_wavefield(
-        None,
+        m_Ey_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -316,7 +397,7 @@ def borntm_c_cuda(
         contiguous=True,
     )
     m_Ey_z = _init_tm_wavefield(
-        None,
+        m_Ey_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -325,7 +406,7 @@ def borntm_c_cuda(
         contiguous=True,
     )
     m_Hx_z = _init_tm_wavefield(
-        None,
+        m_Hx_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -334,7 +415,7 @@ def borntm_c_cuda(
         contiguous=True,
     )
     m_Hz_x = _init_tm_wavefield(
-        None,
+        m_Hz_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -677,6 +758,13 @@ def borntm_c_cuda(
         ),
     )
     return (
+        Ey[s],
+        Hx[s],
+        Hz[s],
+        m_Ey_x[s],
+        m_Ey_z[s],
+        m_Hx_z[s],
+        m_Hz_x[s],
         dEy_out[s],
         dHx_out[s],
         dHz_out[s],
