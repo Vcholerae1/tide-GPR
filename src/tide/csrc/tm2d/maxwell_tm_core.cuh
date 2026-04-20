@@ -614,6 +614,266 @@ static TIDE_HOST_DEVICE void forward_kernel_e_with_storage_core(
   }
 }
 
+// Update background and scattered E fields for Born propagation.
+template <typename T, typename StoreT, int STENCIL_ORDER>
+static TIDE_HOST_DEVICE void forward_kernel_e_born_with_storage_core(
+    GridParams<T> const &params, T const *ca_ptr, T const *cb_ptr,
+    T const *dca_ptr, T const *dcb_ptr, T const *hx, T const *hz, T *ey,
+    T *m_hx_z, T *m_hz_x, T const *dhx, T const *dhz, T *dey, T *dm_hx_z,
+    T *dm_hz_x, StoreT *ey_store, StoreT *curl_h_store,
+    bool ca_requires_grad, bool cb_requires_grad, int64_t y, int64_t x,
+    int64_t shot_idx) {
+
+  int const FD_PAD = tide::StencilTraits<STENCIL_ORDER>::FD_PAD;
+
+  if (y >= FD_PAD && x >= FD_PAD && y < params.ny - FD_PAD + 1 &&
+      x < params.nx - FD_PAD + 1 && shot_idx < params.n_shots) {
+    int64_t const j = y * params.nx + x;
+    int64_t const i = shot_idx * params.shot_numel + j;
+
+    T const ca_val = params.ca_batched ? ca_ptr[i] : ca_ptr[j];
+    T const cb_val = params.cb_batched ? cb_ptr[i] : cb_ptr[j];
+    T const dca_val = params.ca_batched ? dca_ptr[i] : dca_ptr[j];
+    T const dcb_val = params.cb_batched ? dcb_ptr[i] : dcb_ptr[j];
+
+    bool const pml_y = y < params.pml_y0 || y >= params.pml_y1;
+    bool const pml_x = x < params.pml_x0 || x >= params.pml_x1;
+
+    GlobalFieldAccessor<T> bg_hz_acc(hz, params.nx);
+    GlobalFieldAccessor<T> bg_hx_acc(hx, params.nx);
+
+    T dhz_dx = DiffForward<STENCIL_ORDER>::diff_x1(
+        bg_hz_acc, shot_idx * params.shot_numel, y, x, params.nx, params.rdx);
+    T dhx_dz = DiffForward<STENCIL_ORDER>::diff_y1(
+        bg_hx_acc, shot_idx * params.shot_numel, y, x, params.nx, params.rdy);
+
+    if (pml_x) {
+      m_hz_x[i] = params.bx[x] * m_hz_x[i] + params.ax[x] * dhz_dx;
+      dhz_dx = dhz_dx / params.kx[x] + m_hz_x[i];
+    }
+
+    if (pml_y) {
+      m_hx_z[i] = params.by[y] * m_hx_z[i] + params.ay[y] * dhx_dz;
+      dhx_dz = dhx_dz / params.ky[y] + m_hx_z[i];
+    }
+
+    T const curl_h = dhz_dx - dhx_dz;
+
+    GlobalFieldAccessor<T> sc_hz_acc(dhz, params.nx);
+    GlobalFieldAccessor<T> sc_hx_acc(dhx, params.nx);
+
+    T ddhz_dx = DiffForward<STENCIL_ORDER>::diff_x1(
+        sc_hz_acc, shot_idx * params.shot_numel, y, x, params.nx, params.rdx);
+    T ddhx_dz = DiffForward<STENCIL_ORDER>::diff_y1(
+        sc_hx_acc, shot_idx * params.shot_numel, y, x, params.nx, params.rdy);
+
+    if (pml_x) {
+      dm_hz_x[i] = params.bx[x] * dm_hz_x[i] + params.ax[x] * ddhz_dx;
+      ddhz_dx = ddhz_dx / params.kx[x] + dm_hz_x[i];
+    }
+
+    if (pml_y) {
+      dm_hx_z[i] = params.by[y] * dm_hx_z[i] + params.ay[y] * ddhx_dz;
+      ddhx_dz = ddhx_dz / params.ky[y] + dm_hx_z[i];
+    }
+
+    T const dcurl_h = ddhz_dx - ddhx_dz;
+    T const ey_n = ey[i];
+
+    if (ca_requires_grad && ey_store != nullptr) {
+      ey_store[i] = encode_snapshot<StoreT, T>(ey_n);
+    }
+    if (cb_requires_grad && curl_h_store != nullptr) {
+      curl_h_store[i] = encode_snapshot<StoreT, T>(curl_h);
+    }
+
+    ey[i] = ca_val * ey_n + cb_val * curl_h;
+    dey[i] = ca_val * dey[i] + cb_val * dcurl_h + dca_val * ey_n +
+             dcb_val * curl_h;
+  }
+}
+
+// Reverse of the scattered E update. Produces transpose fluxes into the
+// scattered H adjoint variables and accumulates gradients with respect to the
+// Born coefficients dca / dcb.
+template <typename T, typename StoreT, int STENCIL_ORDER>
+static TIDE_HOST_DEVICE void born_backward_prepare_e_core(
+    GridParams<T> const &params, T const *ca_ptr, T const *cb_ptr, T *lambda_ey,
+    T *m_lambda_hx_z, T *m_lambda_hz_x, StoreT const *ey_store,
+    StoreT const *curl_h_store, T *grad_ca_shot, T *grad_cb_shot,
+    T *alpha_hz_x, T *alpha_hx_z, bool ca_requires_grad, bool cb_requires_grad,
+    int64_t step_ratio_val, int64_t y, int64_t x, int64_t shot_idx) {
+
+  if (y < 0 || x < 0 || y >= params.ny || x >= params.nx ||
+      shot_idx >= params.n_shots) {
+    return;
+  }
+
+  int const FD_PAD = tide::StencilTraits<STENCIL_ORDER>::FD_PAD;
+  int64_t const j = y * params.nx + x;
+  int64_t const i = shot_idx * params.shot_numel + j;
+  alpha_hz_x[i] = static_cast<T>(0);
+  alpha_hx_z[i] = static_cast<T>(0);
+
+  if (y < FD_PAD || x < FD_PAD || y >= params.ny - FD_PAD + 1 ||
+      x >= params.nx - FD_PAD + 1) {
+    return;
+  }
+
+  T const ca_val = params.ca_batched ? ca_ptr[i] : ca_ptr[j];
+  T const cb_val = params.cb_batched ? cb_ptr[i] : cb_ptr[j];
+  T const lambda_ey_curr = lambda_ey[i];
+
+  if (ca_requires_grad && ey_store != nullptr && grad_ca_shot != nullptr) {
+    T const ey_n = decode_snapshot<StoreT, T>(ey_store[i]);
+    grad_ca_shot[i] +=
+        lambda_ey_curr * ey_n * static_cast<T>(step_ratio_val);
+  }
+
+  if (cb_requires_grad && curl_h_store != nullptr && grad_cb_shot != nullptr) {
+    T const curl_h_n = decode_snapshot<StoreT, T>(curl_h_store[i]);
+    grad_cb_shot[i] +=
+        lambda_ey_curr * curl_h_n * static_cast<T>(step_ratio_val);
+  }
+
+  lambda_ey[i] = ca_val * lambda_ey_curr;
+
+  T beta_x = cb_val * lambda_ey_curr;
+  if (x >= params.pml_x0 && x < params.pml_x1) {
+    alpha_hz_x[i] = beta_x;
+  } else {
+    T const gamma_x = m_lambda_hz_x[i] + beta_x;
+    alpha_hz_x[i] = beta_x / params.kx[x] + params.ax[x] * gamma_x;
+    m_lambda_hz_x[i] = params.bx[x] * gamma_x;
+  }
+
+  T beta_z = -cb_val * lambda_ey_curr;
+  if (y >= params.pml_y0 && y < params.pml_y1) {
+    alpha_hx_z[i] = beta_z;
+  } else {
+    T const gamma_z = m_lambda_hx_z[i] + beta_z;
+    alpha_hx_z[i] = beta_z / params.ky[y] + params.ay[y] * gamma_z;
+    m_lambda_hx_z[i] = params.by[y] * gamma_z;
+  }
+}
+
+// Apply the transposed scattered E update to the scattered H adjoint fields.
+template <typename T, int STENCIL_ORDER>
+static TIDE_HOST_DEVICE void born_backward_apply_e_to_h_core(
+    GridParams<T> const &params, T const *alpha_hz_x, T const *alpha_hx_z,
+    T *lambda_hx, T *lambda_hz, int64_t y, int64_t x, int64_t shot_idx) {
+
+  if (y < 0 || x < 0 || y >= params.ny || x >= params.nx ||
+      shot_idx >= params.n_shots) {
+    return;
+  }
+
+  int const FD_PAD = tide::StencilTraits<STENCIL_ORDER>::FD_PAD;
+  if (y < FD_PAD || x < FD_PAD || y >= params.ny - FD_PAD + 1 ||
+      x >= params.nx - FD_PAD + 1) {
+    return;
+  }
+
+  int64_t const i = shot_idx * params.shot_numel + y * params.nx + x;
+  int64_t const shot_offset = shot_idx * params.shot_numel;
+  GlobalFieldAccessor<T> alpha_x_acc(alpha_hz_x, params.nx);
+  GlobalFieldAccessor<T> alpha_z_acc(alpha_hx_z, params.nx);
+  ConstAccessor ones;
+
+  if (y < params.ny - FD_PAD) {
+    lambda_hx[i] += DiffAdjoint<STENCIL_ORDER>::diff_y1_adj(
+        alpha_z_acc, ones, shot_offset, (int)y, (int)x, params.nx, params.rdy);
+  }
+  if (x < params.nx - FD_PAD) {
+    lambda_hz[i] += DiffAdjoint<STENCIL_ORDER>::diff_x1_adj(
+        alpha_x_acc, ones, shot_offset, (int)y, (int)x, params.nx, params.rdx);
+  }
+}
+
+// Reverse of the scattered H update. Produces transpose fluxes into the
+// scattered E adjoint field.
+template <typename T, int STENCIL_ORDER>
+static TIDE_HOST_DEVICE void born_backward_prepare_h_core(
+    GridParams<T> const &params, T const *cq_ptr, T const *lambda_hx,
+    T const *lambda_hz, T *m_lambda_ey_x, T *m_lambda_ey_z, T *alpha_ey_x,
+    T *alpha_ey_z, int64_t y, int64_t x, int64_t shot_idx) {
+
+  if (y < 0 || x < 0 || y >= params.ny || x >= params.nx ||
+      shot_idx >= params.n_shots) {
+    return;
+  }
+
+  int const FD_PAD = tide::StencilTraits<STENCIL_ORDER>::FD_PAD;
+  int64_t const j = y * params.nx + x;
+  int64_t const i = shot_idx * params.shot_numel + j;
+  alpha_ey_x[i] = static_cast<T>(0);
+  alpha_ey_z[i] = static_cast<T>(0);
+
+  if (y < FD_PAD || x < FD_PAD || y >= params.ny - FD_PAD + 1 ||
+      x >= params.nx - FD_PAD + 1) {
+    return;
+  }
+
+  T const cq_val = params.cq_batched ? cq_ptr[i] : cq_ptr[j];
+  int64_t const pml_y0h = params.pml_y0;
+  int64_t const pml_y1h =
+      params.pml_y1 > params.pml_y0 ? params.pml_y1 - 1 : params.pml_y0;
+  int64_t const pml_x0h = params.pml_x0;
+  int64_t const pml_x1h =
+      params.pml_x1 > params.pml_x0 ? params.pml_x1 - 1 : params.pml_x0;
+
+  if (y < params.ny - FD_PAD) {
+    T const beta_z = -cq_val * lambda_hx[i];
+    if (y >= pml_y0h && y < pml_y1h) {
+      alpha_ey_z[i] = beta_z;
+    } else {
+      T const gamma_z = m_lambda_ey_z[i] + beta_z;
+      alpha_ey_z[i] = beta_z / params.kyh[y] + params.ayh[y] * gamma_z;
+      m_lambda_ey_z[i] = params.byh[y] * gamma_z;
+    }
+  }
+
+  if (x < params.nx - FD_PAD) {
+    T const beta_x = cq_val * lambda_hz[i];
+    if (x >= pml_x0h && x < pml_x1h) {
+      alpha_ey_x[i] = beta_x;
+    } else {
+      T const gamma_x = m_lambda_ey_x[i] + beta_x;
+      alpha_ey_x[i] = beta_x / params.kxh[x] + params.axh[x] * gamma_x;
+      m_lambda_ey_x[i] = params.bxh[x] * gamma_x;
+    }
+  }
+}
+
+// Apply the transposed scattered H update to the scattered E adjoint field.
+template <typename T, int STENCIL_ORDER>
+static TIDE_HOST_DEVICE void born_backward_apply_h_to_e_core(
+    GridParams<T> const &params, T const *alpha_ey_x, T const *alpha_ey_z,
+    T *lambda_ey, int64_t y, int64_t x, int64_t shot_idx) {
+
+  if (y < 0 || x < 0 || y >= params.ny || x >= params.nx ||
+      shot_idx >= params.n_shots) {
+    return;
+  }
+
+  int const FD_PAD = tide::StencilTraits<STENCIL_ORDER>::FD_PAD;
+  if (y < FD_PAD || x < FD_PAD || y >= params.ny - FD_PAD + 1 ||
+      x >= params.nx - FD_PAD + 1) {
+    return;
+  }
+
+  int64_t const i = shot_idx * params.shot_numel + y * params.nx + x;
+  int64_t const shot_offset = shot_idx * params.shot_numel;
+  GlobalFieldAccessor<T> alpha_x_acc(alpha_ey_x, params.nx);
+  GlobalFieldAccessor<T> alpha_z_acc(alpha_ey_z, params.nx);
+  ConstAccessor ones;
+
+  lambda_ey[i] += DiffAdjoint<STENCIL_ORDER>::diff_xh1_adj(
+      alpha_x_acc, ones, shot_offset, (int)y, (int)x, params.nx, params.rdx);
+  lambda_ey[i] += DiffAdjoint<STENCIL_ORDER>::diff_yh1_adj(
+      alpha_z_acc, ones, shot_offset, (int)y, (int)x, params.nx, params.rdy);
+}
+
 // Backward kernel: Update adjoint λ_H fields
 template <typename T, int STENCIL_ORDER>
 static TIDE_HOST_DEVICE void

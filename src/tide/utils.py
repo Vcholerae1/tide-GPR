@@ -182,6 +182,41 @@ def compile_material_coefficients(
     return result
 
 
+def linearize_material_coefficients(
+    epsilon_r: torch.Tensor,
+    sigma: torch.Tensor,
+    ca: torch.Tensor,
+    cb: torch.Tensor,
+    dt: float,
+    depsilon_r: torch.Tensor | None = None,
+    dsigma: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Linearize `(ca, cb)` with respect to `(epsilon_r, sigma)`.
+
+    This is the tangent map used by the Born propagator:
+
+    - `dca = ∂ca/∂epsilon_r * depsilon_r + ∂ca/∂sigma * dsigma`
+    - `dcb = ∂cb/∂epsilon_r * depsilon_r + ∂cb/∂sigma * dsigma`
+    """
+    if depsilon_r is None:
+        depsilon_r = torch.zeros_like(epsilon_r)
+    if dsigma is None:
+        dsigma = torch.zeros_like(sigma)
+
+    dt_tensor = torch.as_tensor(dt, device=cb.device, dtype=cb.dtype)
+    cb_sq = cb * cb
+
+    dca_de_abs = (1.0 - ca) * cb / dt_tensor
+    dcb_de_abs = -cb_sq / dt_tensor
+
+    dca_dsigma = -0.5 * (1.0 + ca) * cb
+    dcb_dsigma = -0.5 * cb_sq
+
+    dca = dca_de_abs * EP0 * depsilon_r + dca_dsigma * dsigma
+    dcb = dcb_de_abs * EP0 * depsilon_r + dcb_dsigma * dsigma
+    return dca, dcb
+
+
 def setup_pml(
     pml_width: Sequence[int],
     pml_start: Sequence[float],

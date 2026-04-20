@@ -542,6 +542,265 @@ __global__ __launch_bounds__(256) void forward_kernel_e_with_storage_bf16(
       ca_requires_grad, cb_requires_grad, y, x, shot_idx);
 }
 
+__global__ __launch_bounds__(256) void born_forward_kernel_e_with_storage(
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const dca,
+    TIDE_DTYPE const *__restrict const dcb,
+    TIDE_DTYPE const *__restrict const hx,
+    TIDE_DTYPE const *__restrict const hz, TIDE_DTYPE *__restrict const ey,
+    TIDE_DTYPE *__restrict const m_hx_z, TIDE_DTYPE *__restrict const m_hz_x,
+    TIDE_DTYPE const *__restrict const dhx,
+    TIDE_DTYPE const *__restrict const dhz, TIDE_DTYPE *__restrict const dey,
+    TIDE_DTYPE *__restrict const dm_hx_z, TIDE_DTYPE *__restrict const dm_hz_x,
+    TIDE_DTYPE *__restrict const ey_store,
+    TIDE_DTYPE *__restrict const curl_h_store,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh, bool const ca_requires_grad,
+    bool const cb_requires_grad) {
+  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
+  int64_t shot_idx =
+      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
+  ::tide::GridParams<TIDE_DTYPE> params = {
+      ay,      ayh,        ax,         axh,        by,     byh,    bx,
+      bxh,     ky,         kyh,        kx,         kxh,
+      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
+      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
+      pml_x1,  ca_batched, cb_batched, false};
+  ::tide::forward_kernel_e_born_with_storage_core<TIDE_DTYPE, TIDE_DTYPE,
+                                                  TIDE_STENCIL>(
+      params, ca, cb, dca, dcb, hx, hz, ey, m_hx_z, m_hz_x, dhx, dhz, dey,
+      dm_hx_z, dm_hz_x, ey_store, curl_h_store, ca_requires_grad,
+      cb_requires_grad, y, x, shot_idx);
+}
+
+__global__ __launch_bounds__(256) void born_forward_kernel_e_with_storage_bf16(
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const dca,
+    TIDE_DTYPE const *__restrict const dcb,
+    TIDE_DTYPE const *__restrict const hx,
+    TIDE_DTYPE const *__restrict const hz, TIDE_DTYPE *__restrict const ey,
+    TIDE_DTYPE *__restrict const m_hx_z, TIDE_DTYPE *__restrict const m_hz_x,
+    TIDE_DTYPE const *__restrict const dhx,
+    TIDE_DTYPE const *__restrict const dhz, TIDE_DTYPE *__restrict const dey,
+    TIDE_DTYPE *__restrict const dm_hx_z, TIDE_DTYPE *__restrict const dm_hz_x,
+    __nv_bfloat16 *__restrict const ey_store,
+    __nv_bfloat16 *__restrict const curl_h_store,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh, bool const ca_requires_grad,
+    bool const cb_requires_grad) {
+  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
+  int64_t shot_idx =
+      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
+  ::tide::GridParams<TIDE_DTYPE> params = {
+      ay,      ayh,        ax,         axh,        by,     byh,    bx,
+      bxh,     ky,         kyh,        kx,         kxh,
+      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
+      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
+      pml_x1,  ca_batched, cb_batched, false};
+  ::tide::forward_kernel_e_born_with_storage_core<TIDE_DTYPE, __nv_bfloat16,
+                                                  TIDE_STENCIL>(
+      params, ca, cb, dca, dcb, hx, hz, ey, m_hx_z, m_hz_x, dhx, dhz, dey,
+      dm_hx_z, dm_hz_x, ey_store, curl_h_store, ca_requires_grad,
+      cb_requires_grad, y, x, shot_idx);
+}
+
+__global__ __launch_bounds__(256) void born_backward_prepare_e_kernel(
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cb, TIDE_DTYPE *__restrict const lambda_ey,
+    TIDE_DTYPE *__restrict const m_lambda_hx_z,
+    TIDE_DTYPE *__restrict const m_lambda_hz_x,
+    TIDE_DTYPE const *__restrict const ey_store,
+    TIDE_DTYPE const *__restrict const curl_h_store,
+    TIDE_DTYPE *__restrict const grad_ca_shot,
+    TIDE_DTYPE *__restrict const grad_cb_shot,
+    TIDE_DTYPE *__restrict const work_x, TIDE_DTYPE *__restrict const work_z,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh, bool const ca_requires_grad,
+    bool const cb_requires_grad, int64_t const step_ratio_val) {
+  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
+  int64_t shot_idx =
+      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
+  ::tide::GridParams<TIDE_DTYPE> params = {
+      ay,      ayh,        ax,         axh,        by,     byh,    bx,
+      bxh,     ky,         kyh,        kx,         kxh,
+      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
+      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
+      pml_x1,  ca_batched, cb_batched, false};
+  ::tide::born_backward_prepare_e_core<TIDE_DTYPE, TIDE_DTYPE, TIDE_STENCIL>(
+      params, ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x, ey_store,
+      curl_h_store, grad_ca_shot, grad_cb_shot, work_x, work_z,
+      ca_requires_grad, cb_requires_grad, step_ratio_val, y, x, shot_idx);
+}
+
+__global__ __launch_bounds__(256) void born_backward_prepare_e_kernel_bf16(
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cb, TIDE_DTYPE *__restrict const lambda_ey,
+    TIDE_DTYPE *__restrict const m_lambda_hx_z,
+    TIDE_DTYPE *__restrict const m_lambda_hz_x,
+    __nv_bfloat16 const *__restrict const ey_store,
+    __nv_bfloat16 const *__restrict const curl_h_store,
+    TIDE_DTYPE *__restrict const grad_ca_shot,
+    TIDE_DTYPE *__restrict const grad_cb_shot,
+    TIDE_DTYPE *__restrict const work_x, TIDE_DTYPE *__restrict const work_z,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh, bool const ca_requires_grad,
+    bool const cb_requires_grad, int64_t const step_ratio_val) {
+  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
+  int64_t shot_idx =
+      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
+  ::tide::GridParams<TIDE_DTYPE> params = {
+      ay,      ayh,        ax,         axh,        by,     byh,    bx,
+      bxh,     ky,         kyh,        kx,         kxh,
+      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
+      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
+      pml_x1,  ca_batched, cb_batched, false};
+  ::tide::born_backward_prepare_e_core<TIDE_DTYPE, __nv_bfloat16, TIDE_STENCIL>(
+      params, ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x, ey_store,
+      curl_h_store, grad_ca_shot, grad_cb_shot, work_x, work_z,
+      ca_requires_grad, cb_requires_grad, step_ratio_val, y, x, shot_idx);
+}
+
+__global__ __launch_bounds__(256) void born_backward_apply_e_to_h_kernel(
+    TIDE_DTYPE const *__restrict const work_x,
+    TIDE_DTYPE const *__restrict const work_z,
+    TIDE_DTYPE *__restrict const lambda_hx,
+    TIDE_DTYPE *__restrict const lambda_hz,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh) {
+  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
+  int64_t shot_idx =
+      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
+  ::tide::GridParams<TIDE_DTYPE> params = {
+      ay,      ayh,        ax,         axh,        by,     byh,    bx,
+      bxh,     ky,         kyh,        kx,         kxh,
+      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
+      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
+      pml_x1,  false,      false,      false};
+  ::tide::born_backward_apply_e_to_h_core<TIDE_DTYPE, TIDE_STENCIL>(
+      params, work_x, work_z, lambda_hx, lambda_hz, y, x, shot_idx);
+}
+
+__global__ __launch_bounds__(256) void born_backward_prepare_h_kernel(
+    TIDE_DTYPE const *__restrict const cq,
+    TIDE_DTYPE const *__restrict const lambda_hx,
+    TIDE_DTYPE const *__restrict const lambda_hz,
+    TIDE_DTYPE *__restrict const m_lambda_ey_x,
+    TIDE_DTYPE *__restrict const m_lambda_ey_z,
+    TIDE_DTYPE *__restrict const work_x, TIDE_DTYPE *__restrict const work_z,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh) {
+  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
+  int64_t shot_idx =
+      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
+  ::tide::GridParams<TIDE_DTYPE> params = {
+      ay,      ayh,        ax,         axh,        by,     byh,    bx,
+      bxh,     ky,         kyh,        kx,         kxh,
+      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
+      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
+      pml_x1,  false,      false,      cq_batched};
+  ::tide::born_backward_prepare_h_core<TIDE_DTYPE, TIDE_STENCIL>(
+      params, cq, lambda_hx, lambda_hz, m_lambda_ey_x, m_lambda_ey_z, work_x,
+      work_z, y, x, shot_idx);
+}
+
+__global__ __launch_bounds__(256) void born_backward_apply_h_to_e_kernel(
+    TIDE_DTYPE const *__restrict const work_x,
+    TIDE_DTYPE const *__restrict const work_z,
+    TIDE_DTYPE *__restrict const lambda_ey,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kx,
+    TIDE_DTYPE const *__restrict const kxh) {
+  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
+  int64_t shot_idx =
+      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
+  ::tide::GridParams<TIDE_DTYPE> params = {
+      ay,      ayh,        ax,         axh,        by,     byh,    bx,
+      bxh,     ky,         kyh,        kx,         kxh,
+      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
+      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
+      pml_x1,  false,      false,      false};
+  ::tide::born_backward_apply_h_to_e_core<TIDE_DTYPE, TIDE_STENCIL>(
+      params, work_x, work_z, lambda_ey, y, x, shot_idx);
+}
+
 // Exact CPML adjoint helpers: update memory terms first, then apply transposed
 // operators while reconstructing transformed fluxes directly from m_new + field.
 __device__ __forceinline__ TIDE_DTYPE cpml_tmp_from_m_new(
@@ -1561,6 +1820,658 @@ extern "C" void FUNC(forward_with_storage)(
   }
   storage_async_disk_close(async_disk_ey);
   storage_async_disk_close(async_disk_curl);
+
+  tide::cuda_check_or_abort(cudaPeekAtLastError(), __FILE__, __LINE__);
+}
+
+extern "C" void FUNC(born_forward)(
+    TIDE_DTYPE const *const ca, TIDE_DTYPE const *const cb,
+    TIDE_DTYPE const *const cq, TIDE_DTYPE const *const dca,
+    TIDE_DTYPE const *const dcb, TIDE_DTYPE const *const f0,
+    TIDE_DTYPE const *const df, TIDE_DTYPE *const ey, TIDE_DTYPE *const hx,
+    TIDE_DTYPE *const hz, TIDE_DTYPE *const m_ey_x, TIDE_DTYPE *const m_ey_z,
+    TIDE_DTYPE *const m_hx_z, TIDE_DTYPE *const m_hz_x, TIDE_DTYPE *const dey,
+    TIDE_DTYPE *const dhx, TIDE_DTYPE *const dhz, TIDE_DTYPE *const dm_ey_x,
+    TIDE_DTYPE *const dm_ey_z, TIDE_DTYPE *const dm_hx_z,
+    TIDE_DTYPE *const dm_hz_x, TIDE_DTYPE *const r,
+    TIDE_DTYPE const *const ay, TIDE_DTYPE const *const by,
+    TIDE_DTYPE const *const ayh, TIDE_DTYPE const *const byh,
+    TIDE_DTYPE const *const ax, TIDE_DTYPE const *const bx,
+    TIDE_DTYPE const *const axh, TIDE_DTYPE const *const bxh,
+    TIDE_DTYPE const *const ky, TIDE_DTYPE const *const kyh,
+    TIDE_DTYPE const *const kx, TIDE_DTYPE const *const kxh,
+    int64_t const *const sources_i, int64_t const *const receivers_i,
+    tide_scalar_t const rdy_h, tide_scalar_t const rdx_h,
+    tide_scalar_t const dt_h, int64_t const nt, int64_t const n_shots_h,
+    int64_t const ny_h, int64_t const nx_h, int64_t const n_sources_per_shot_h,
+    int64_t const n_receivers_per_shot_h, int64_t const step_ratio_h,
+    bool const ca_batched_h, bool const cb_batched_h, bool const cq_batched_h,
+    int64_t const start_t, int64_t const pml_y0_h, int64_t const pml_x0_h,
+    int64_t const pml_y1_h, int64_t const pml_x1_h, int64_t const n_threads,
+    int64_t const device, void *const compute_stream_handle) {
+
+  cudaSetDevice(device);
+  (void)dt_h;
+  (void)step_ratio_h;
+  (void)n_threads;
+  cudaStream_t const stream_compute =
+      resolve_cuda_stream(compute_stream_handle);
+
+  int64_t const shot_numel_h = ny_h * nx_h;
+  static DeviceConstantCache2D constant_cache{};
+  sync_device_constants_if_needed(
+      constant_cache, rdy_h, rdx_h, n_shots_h, ny_h, nx_h, shot_numel_h,
+      n_sources_per_shot_h, n_receivers_per_shot_h, pml_y0_h, pml_x0_h,
+      pml_y1_h, pml_x1_h, ca_batched_h, cb_batched_h, cq_batched_h, device);
+
+  TMForwardLaunchConfig const launch_cfg = make_tm_forward_launch_config(
+      n_shots_h, ny_h, nx_h, n_sources_per_shot_h, n_receivers_per_shot_h);
+
+  auto run_step = [&](int64_t t) {
+    forward_kernel_h<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                       stream_compute>>>(
+        cq, ey, hx, hz, m_ey_x, m_ey_z, ay, ayh, ax, axh, by, byh, bx, bxh, ky,
+        kyh, kx, kxh);
+    forward_kernel_h<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                       stream_compute>>>(
+        cq, dey, dhx, dhz, dm_ey_x, dm_ey_z, ay, ayh, ax, axh, by, byh, bx, bxh,
+        ky, kyh, kx, kxh);
+    born_forward_kernel_e_with_storage<<<launch_cfg.dimGrid, launch_cfg.dimBlock,
+                                         0, stream_compute>>>(
+        ca, cb, dca, dcb, hx, hz, ey, m_hx_z, m_hz_x, dhx, dhz, dey, dm_hx_z,
+        dm_hz_x, nullptr, nullptr, ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh,
+        kx, kxh, false, false);
+
+    if (n_sources_per_shot_h > 0) {
+      add_sources_ey<<<launch_cfg.dimGridSources, launch_cfg.dimBlockSources, 0,
+                       stream_compute>>>(
+          ey, f0 + t * n_shots_h * n_sources_per_shot_h, sources_i);
+      add_sources_ey<<<launch_cfg.dimGridSources, launch_cfg.dimBlockSources, 0,
+                       stream_compute>>>(
+          dey, df + t * n_shots_h * n_sources_per_shot_h, sources_i);
+    }
+
+    if (n_receivers_per_shot_h > 0) {
+      record_receivers_ey<<<launch_cfg.dimGridReceivers,
+                            launch_cfg.dimBlockReceivers, 0,
+                            stream_compute>>>(
+          r + t * n_shots_h * n_receivers_per_shot_h, dey, receivers_i);
+    }
+  };
+
+  for (int64_t t = start_t; t < start_t + nt; ++t) {
+    run_step(t);
+  }
+
+  tide::cuda_check_or_abort(cudaPeekAtLastError(), __FILE__, __LINE__);
+}
+
+extern "C" void FUNC(born_forward_with_storage)(
+    TIDE_DTYPE const *const ca, TIDE_DTYPE const *const cb,
+    TIDE_DTYPE const *const cq, TIDE_DTYPE const *const dca,
+    TIDE_DTYPE const *const dcb, TIDE_DTYPE const *const f0,
+    TIDE_DTYPE const *const df, TIDE_DTYPE *const ey, TIDE_DTYPE *const hx,
+    TIDE_DTYPE *const hz, TIDE_DTYPE *const m_ey_x, TIDE_DTYPE *const m_ey_z,
+    TIDE_DTYPE *const m_hx_z, TIDE_DTYPE *const m_hz_x, TIDE_DTYPE *const dey,
+    TIDE_DTYPE *const dhx, TIDE_DTYPE *const dhz, TIDE_DTYPE *const dm_ey_x,
+    TIDE_DTYPE *const dm_ey_z, TIDE_DTYPE *const dm_hx_z,
+    TIDE_DTYPE *const dm_hz_x, TIDE_DTYPE *const r, void *const ey_store_1,
+    void *const ey_store_3, char const *const *const ey_filenames,
+    void *const curl_store_1, void *const curl_store_3,
+    char const *const *const curl_filenames, TIDE_DTYPE const *const ay,
+    TIDE_DTYPE const *const by, TIDE_DTYPE const *const ayh,
+    TIDE_DTYPE const *const byh, TIDE_DTYPE const *const ax,
+    TIDE_DTYPE const *const bx, TIDE_DTYPE const *const axh,
+    TIDE_DTYPE const *const bxh, TIDE_DTYPE const *const ky,
+    TIDE_DTYPE const *const kyh, TIDE_DTYPE const *const kx,
+    TIDE_DTYPE const *const kxh, int64_t const *const sources_i,
+    int64_t const *const receivers_i, tide_scalar_t const rdy_h,
+    tide_scalar_t const rdx_h, tide_scalar_t const dt_h, int64_t const nt,
+    int64_t const n_shots_h, int64_t const ny_h, int64_t const nx_h,
+    int64_t const n_sources_per_shot_h, int64_t const n_receivers_per_shot_h,
+    int64_t const step_ratio_h, int64_t const storage_mode_h,
+    int64_t const storage_format_h,
+    int64_t const shot_bytes_uncomp_h, bool const ca_requires_grad,
+    bool const cb_requires_grad, bool const ca_batched_h,
+    bool const cb_batched_h, bool const cq_batched_h, int64_t const start_t,
+    int64_t const pml_y0_h, int64_t const pml_x0_h, int64_t const pml_y1_h,
+    int64_t const pml_x1_h, int64_t const n_threads, int64_t const device,
+    void *const compute_stream_handle, void *const storage_stream_handle) {
+
+  cudaSetDevice(device);
+  (void)dt_h;
+  (void)n_threads;
+  cudaStream_t const stream_compute =
+      resolve_cuda_stream(compute_stream_handle);
+  cudaStream_t const stream_storage =
+      resolve_cuda_stream(storage_stream_handle);
+
+  int64_t const shot_numel_h = ny_h * nx_h;
+  size_t const bytes_per_step_store =
+      (size_t)shot_bytes_uncomp_h * (size_t)n_shots_h;
+  bool const storage_bf16_h =
+      (!kFieldIsHalf) && (storage_format_h == STORAGE_FORMAT_BF16);
+  bool const use_storage_pipeline =
+      (storage_mode_h == STORAGE_CPU || storage_mode_h == STORAGE_DISK) &&
+      (ca_requires_grad || cb_requires_grad) && stream_storage != nullptr &&
+      stream_storage != stream_compute;
+  static DeviceConstantCache2D constant_cache{};
+  sync_device_constants_if_needed(
+      constant_cache, rdy_h, rdx_h, n_shots_h, ny_h, nx_h, shot_numel_h,
+      n_sources_per_shot_h, n_receivers_per_shot_h, pml_y0_h, pml_x0_h,
+      pml_y1_h, pml_x1_h, ca_batched_h, cb_batched_h, cq_batched_h, device);
+
+  TMForwardLaunchConfig const launch_cfg = make_tm_forward_launch_config(
+      n_shots_h, ny_h, nx_h, n_sources_per_shot_h, n_receivers_per_shot_h);
+
+  void *async_disk_ey = nullptr;
+  void *async_disk_curl = nullptr;
+  if (storage_mode_h == STORAGE_DISK) {
+    if (ca_requires_grad)
+      async_disk_ey =
+          storage_async_disk_open(ey_filenames[0], true, NUM_BUFFERS);
+    if (cb_requires_grad)
+      async_disk_curl =
+          storage_async_disk_open(curl_filenames[0], true, NUM_BUFFERS);
+  }
+
+  ScopedEventArray storage_done_events;
+  ScopedEventArray compute_done_events;
+  if (use_storage_pipeline) {
+    for (int i = 0; i < NUM_BUFFERS; ++i) {
+      tide::cuda_check_or_abort(cudaEventCreate(&storage_done_events.events[i]),
+                                __FILE__, __LINE__);
+      tide::cuda_check_or_abort(cudaEventCreate(&compute_done_events.events[i]),
+                                __FILE__, __LINE__);
+      tide::cuda_check_or_abort(
+          cudaEventRecord(storage_done_events.events[i], stream_storage),
+          __FILE__, __LINE__);
+    }
+  }
+
+  auto run_step = [&](int64_t t) {
+    bool const store_step = ((t % step_ratio_h) == 0);
+    bool const store_ey = store_step && ca_requires_grad;
+    bool const store_curl = store_step && cb_requires_grad;
+    bool const want_store = store_ey || store_curl;
+    int slot = 0;
+    cudaEvent_t slot_storage_done = nullptr;
+    cudaEvent_t slot_compute_done = nullptr;
+    if (want_store) {
+      int64_t const step_idx = t / step_ratio_h;
+      slot = (int)(step_idx % NUM_BUFFERS);
+      if (use_storage_pipeline) {
+        slot_storage_done = storage_done_events.events[slot];
+        slot_compute_done = compute_done_events.events[slot];
+        tide::cuda_check_or_abort(
+            cudaStreamWaitEvent(stream_compute, slot_storage_done, 0),
+            __FILE__, __LINE__);
+      }
+    }
+
+    forward_kernel_h<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                       stream_compute>>>(
+        cq, ey, hx, hz, m_ey_x, m_ey_z, ay, ayh, ax, axh, by, byh, bx, bxh, ky,
+        kyh, kx, kxh);
+    forward_kernel_h<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                       stream_compute>>>(
+        cq, dey, dhx, dhz, dm_ey_x, dm_ey_z, ay, ayh, ax, axh, by, byh, bx, bxh,
+        ky, kyh, kx, kxh);
+
+    if (want_store) {
+      int64_t const step_idx = t / step_ratio_h;
+      size_t const store1_offset = ring_storage_offset_bytes(
+          step_idx, storage_mode_h, bytes_per_step_store);
+      size_t const store3_offset = host_storage_offset_bytes(
+          step_idx, storage_mode_h, bytes_per_step_store);
+
+      void *__restrict const ey_store_1_t =
+          (uint8_t *)ey_store_1 + store1_offset;
+      void *__restrict const ey_store_3_t = (uint8_t *)ey_store_3 + store3_offset;
+      void *__restrict const curl_store_1_t =
+          (uint8_t *)curl_store_1 + store1_offset;
+      void *__restrict const curl_store_3_t =
+          (uint8_t *)curl_store_3 + store3_offset;
+
+      if (storage_bf16_h) {
+        born_forward_kernel_e_with_storage_bf16<<<launch_cfg.dimGrid,
+                                                  launch_cfg.dimBlock, 0,
+                                                  stream_compute>>>(
+            ca, cb, dca, dcb, hx, hz, ey, m_hx_z, m_hz_x, dhx, dhz, dey,
+            dm_hx_z, dm_hz_x, store_ey ? (__nv_bfloat16 *)ey_store_1_t : nullptr,
+            store_curl ? (__nv_bfloat16 *)curl_store_1_t : nullptr, ay, ayh, ax,
+            axh, by, byh, bx, bxh, ky, kyh, kx, kxh, store_ey, store_curl);
+      } else {
+        born_forward_kernel_e_with_storage<<<launch_cfg.dimGrid,
+                                             launch_cfg.dimBlock, 0,
+                                             stream_compute>>>(
+            ca, cb, dca, dcb, hx, hz, ey, m_hx_z, m_hz_x, dhx, dhz, dey,
+            dm_hx_z, dm_hz_x, store_ey ? (TIDE_DTYPE *)ey_store_1_t : nullptr,
+            store_curl ? (TIDE_DTYPE *)curl_store_1_t : nullptr, ay, ayh, ax,
+            axh, by, byh, bx, bxh, ky, kyh, kx, kxh, store_ey, store_curl);
+      }
+
+      if (storage_mode_h == STORAGE_CPU || storage_mode_h == STORAGE_DISK) {
+        cudaStream_t save_stream = stream_compute;
+        if (use_storage_pipeline) {
+          tide::cuda_check_or_abort(
+              cudaEventRecord(slot_compute_done, stream_compute), __FILE__,
+              __LINE__);
+          tide::cuda_check_or_abort(
+              cudaStreamWaitEvent(stream_storage, slot_compute_done, 0),
+              __FILE__, __LINE__);
+          save_stream = stream_storage;
+        }
+        if (storage_mode_h == STORAGE_DISK) {
+          int64_t const file_offset =
+              step_idx * (int64_t)bytes_per_step_store;
+          if (store_ey) {
+            storage_async_disk_wait_slot(async_disk_ey, slot);
+            tide::cuda_check_or_abort(
+                cudaMemcpyAsync(ey_store_3_t, ey_store_1_t,
+                                bytes_per_step_store, cudaMemcpyDeviceToHost,
+                                save_stream),
+                __FILE__, __LINE__);
+            cudaEvent_t ready_event = nullptr;
+            tide::cuda_check_or_abort(
+                cudaEventCreateWithFlags(&ready_event, cudaEventDisableTiming),
+                __FILE__, __LINE__);
+            tide::cuda_check_or_abort(
+                cudaEventRecord(ready_event, save_stream), __FILE__, __LINE__);
+            storage_async_disk_enqueue_write(
+                async_disk_ey, slot, ey_store_3_t, bytes_per_step_store,
+                file_offset, ready_event);
+          }
+          if (store_curl) {
+            storage_async_disk_wait_slot(async_disk_curl, slot);
+            tide::cuda_check_or_abort(
+                cudaMemcpyAsync(curl_store_3_t, curl_store_1_t,
+                                bytes_per_step_store, cudaMemcpyDeviceToHost,
+                                save_stream),
+                __FILE__, __LINE__);
+            cudaEvent_t ready_event = nullptr;
+            tide::cuda_check_or_abort(
+                cudaEventCreateWithFlags(&ready_event, cudaEventDisableTiming),
+                __FILE__, __LINE__);
+            tide::cuda_check_or_abort(
+                cudaEventRecord(ready_event, save_stream), __FILE__, __LINE__);
+            storage_async_disk_enqueue_write(
+                async_disk_curl, slot, curl_store_3_t, bytes_per_step_store,
+                file_offset, ready_event);
+          }
+        } else {
+          if (store_ey) {
+            storage_copy_snapshot_d2h(ey_store_1_t, ey_store_3_t,
+                                      (size_t)shot_bytes_uncomp_h,
+                                      (size_t)n_shots_h, save_stream);
+          }
+          if (store_curl) {
+            storage_copy_snapshot_d2h(curl_store_1_t, curl_store_3_t,
+                                      (size_t)shot_bytes_uncomp_h,
+                                      (size_t)n_shots_h, save_stream);
+          }
+        }
+        if (use_storage_pipeline) {
+          tide::cuda_check_or_abort(
+              cudaEventRecord(slot_storage_done, save_stream), __FILE__,
+              __LINE__);
+        }
+      }
+    } else {
+      born_forward_kernel_e_with_storage<<<launch_cfg.dimGrid,
+                                           launch_cfg.dimBlock, 0,
+                                           stream_compute>>>(
+          ca, cb, dca, dcb, hx, hz, ey, m_hx_z, m_hz_x, dhx, dhz, dey,
+          dm_hx_z, dm_hz_x, nullptr, nullptr, ay, ayh, ax, axh, by, byh, bx,
+          bxh, ky, kyh, kx, kxh, false, false);
+    }
+
+    if (n_sources_per_shot_h > 0) {
+      add_sources_ey<<<launch_cfg.dimGridSources, launch_cfg.dimBlockSources, 0,
+                       stream_compute>>>(
+          ey, f0 + t * n_shots_h * n_sources_per_shot_h, sources_i);
+      add_sources_ey<<<launch_cfg.dimGridSources, launch_cfg.dimBlockSources, 0,
+                       stream_compute>>>(
+          dey, df + t * n_shots_h * n_sources_per_shot_h, sources_i);
+    }
+
+    if (n_receivers_per_shot_h > 0) {
+      record_receivers_ey<<<launch_cfg.dimGridReceivers,
+                            launch_cfg.dimBlockReceivers, 0,
+                            stream_compute>>>(
+          r + t * n_shots_h * n_receivers_per_shot_h, dey, receivers_i);
+    }
+  };
+
+  for (int64_t t = start_t; t < start_t + nt; ++t) {
+    run_step(t);
+  }
+
+  if (use_storage_pipeline) {
+    tide::cuda_check_or_abort(cudaStreamSynchronize(stream_storage), __FILE__,
+                              __LINE__);
+  }
+  storage_async_disk_close(async_disk_ey);
+  storage_async_disk_close(async_disk_curl);
+
+  tide::cuda_check_or_abort(cudaPeekAtLastError(), __FILE__, __LINE__);
+}
+
+extern "C" void FUNC(born_backward)(
+    TIDE_DTYPE const *const ca, TIDE_DTYPE const *const cb,
+    TIDE_DTYPE const *const cq, TIDE_DTYPE const *const grad_r,
+    TIDE_DTYPE *const lambda_ey, TIDE_DTYPE *const lambda_hx,
+    TIDE_DTYPE *const lambda_hz, TIDE_DTYPE *const m_lambda_ey_x,
+    TIDE_DTYPE *const m_lambda_ey_z, TIDE_DTYPE *const m_lambda_hx_z,
+    TIDE_DTYPE *const m_lambda_hz_x, void *const ey_store_1,
+    void *const ey_store_3, char const *const *const ey_filenames,
+    void *const curl_store_1, void *const curl_store_3,
+    char const *const *const curl_filenames, TIDE_DTYPE *const grad_f,
+    TIDE_DTYPE *const grad_ca, TIDE_DTYPE *const grad_cb,
+    TIDE_DTYPE *const grad_ca_shot, TIDE_DTYPE *const grad_cb_shot,
+    TIDE_DTYPE *const work_x, TIDE_DTYPE *const work_z,
+    TIDE_DTYPE const *const ay, TIDE_DTYPE const *const by,
+    TIDE_DTYPE const *const ayh, TIDE_DTYPE const *const byh,
+    TIDE_DTYPE const *const ax, TIDE_DTYPE const *const bx,
+    TIDE_DTYPE const *const axh, TIDE_DTYPE const *const bxh,
+    TIDE_DTYPE const *const ky, TIDE_DTYPE const *const kyh,
+    TIDE_DTYPE const *const kx, TIDE_DTYPE const *const kxh,
+    int64_t const *const sources_i, int64_t const *const receivers_i,
+    tide_scalar_t const rdy_h, tide_scalar_t const rdx_h,
+    tide_scalar_t const dt_h, int64_t const nt, int64_t const n_shots_h,
+    int64_t const ny_h, int64_t const nx_h, int64_t const n_sources_per_shot_h,
+    int64_t const n_receivers_per_shot_h, int64_t const step_ratio_h,
+    int64_t const storage_mode_h, int64_t const storage_format_h,
+    int64_t const shot_bytes_uncomp_h,
+    bool const ca_requires_grad, bool const cb_requires_grad,
+    bool const ca_batched_h, bool const cb_batched_h, bool const cq_batched_h,
+    int64_t const start_t, int64_t const pml_y0_h, int64_t const pml_x0_h,
+    int64_t const pml_y1_h, int64_t const pml_x1_h, int64_t const n_threads,
+    int64_t const device, void *const compute_stream_handle,
+    void *const storage_stream_handle) {
+
+  cudaSetDevice(device);
+  (void)dt_h;
+  (void)n_threads;
+  cudaStream_t const stream_compute =
+      resolve_cuda_stream(compute_stream_handle);
+  cudaStream_t const stream_storage =
+      resolve_cuda_stream(storage_stream_handle);
+
+  int64_t const shot_numel_h = ny_h * nx_h;
+  size_t const bytes_per_step_store =
+      (size_t)shot_bytes_uncomp_h * (size_t)n_shots_h;
+  bool const storage_bf16_h =
+      (!kFieldIsHalf) && (storage_format_h == STORAGE_FORMAT_BF16);
+  bool const use_storage_pipeline =
+      (storage_mode_h == STORAGE_CPU || storage_mode_h == STORAGE_DISK) &&
+      (ca_requires_grad || cb_requires_grad) && stream_storage != nullptr &&
+      stream_storage != stream_compute;
+  static DeviceConstantCache2D constant_cache{};
+  sync_device_constants_if_needed(
+      constant_cache, rdy_h, rdx_h, n_shots_h, ny_h, nx_h, shot_numel_h,
+      n_sources_per_shot_h, n_receivers_per_shot_h, pml_y0_h, pml_x0_h,
+      pml_y1_h, pml_x1_h, ca_batched_h, cb_batched_h, cq_batched_h, device);
+
+  TMForwardLaunchConfig const launch_cfg = make_tm_forward_launch_config(
+      n_shots_h, ny_h, nx_h, n_sources_per_shot_h, n_receivers_per_shot_h);
+
+  if (ca_requires_grad && !ca_batched_h) {
+    tide::cuda_check_or_abort(
+        cudaMemsetAsync(grad_ca_shot, 0,
+                        (size_t)n_shots_h * (size_t)shot_numel_h *
+                            sizeof(TIDE_DTYPE),
+                        stream_compute),
+        __FILE__, __LINE__);
+  }
+  if (cb_requires_grad && !cb_batched_h) {
+    tide::cuda_check_or_abort(
+        cudaMemsetAsync(grad_cb_shot, 0,
+                        (size_t)n_shots_h * (size_t)shot_numel_h *
+                            sizeof(TIDE_DTYPE),
+                        stream_compute),
+        __FILE__, __LINE__);
+  }
+
+  void *async_disk_ey = nullptr;
+  void *async_disk_curl = nullptr;
+  if (storage_mode_h == STORAGE_DISK) {
+    if (ca_requires_grad)
+      async_disk_ey =
+          storage_async_disk_open(ey_filenames[0], false, NUM_BUFFERS);
+    if (cb_requires_grad)
+      async_disk_curl =
+          storage_async_disk_open(curl_filenames[0], false, NUM_BUFFERS);
+  }
+
+  ScopedEventArray storage_done_events;
+  ScopedEventArray compute_done_events;
+  if (use_storage_pipeline) {
+    for (int i = 0; i < NUM_BUFFERS; ++i) {
+      tide::cuda_check_or_abort(cudaEventCreate(&storage_done_events.events[i]),
+                                __FILE__, __LINE__);
+      tide::cuda_check_or_abort(cudaEventCreate(&compute_done_events.events[i]),
+                                __FILE__, __LINE__);
+      tide::cuda_check_or_abort(
+          cudaEventRecord(compute_done_events.events[i], stream_compute),
+          __FILE__, __LINE__);
+    }
+  }
+
+  int64_t const first_store_idx = start_t / step_ratio_h - 1;
+  int64_t const last_store_idx = (start_t - nt) / step_ratio_h;
+  if (storage_mode_h == STORAGE_DISK) {
+    int64_t const prefetch_count = tide_min<int64_t>(NUM_BUFFERS, nt / step_ratio_h);
+    for (int64_t i = 0; i < prefetch_count; ++i) {
+      int64_t const store_idx = first_store_idx - i;
+      int const slot = (int)(store_idx % NUM_BUFFERS);
+      size_t const store3_offset = host_storage_offset_bytes(
+          store_idx, storage_mode_h, bytes_per_step_store);
+      if (ca_requires_grad) {
+        storage_async_disk_enqueue_read(
+            async_disk_ey, slot, (uint8_t *)ey_store_3 + store3_offset,
+            bytes_per_step_store,
+            store_idx * (int64_t)bytes_per_step_store, nullptr);
+      }
+      if (cb_requires_grad) {
+        storage_async_disk_enqueue_read(
+            async_disk_curl, slot, (uint8_t *)curl_store_3 + store3_offset,
+            bytes_per_step_store,
+            store_idx * (int64_t)bytes_per_step_store, nullptr);
+      }
+    }
+  }
+
+  for (int64_t t = start_t - 1; t >= start_t - nt; --t) {
+    int slot = 0;
+    cudaEvent_t slot_storage_done = nullptr;
+    cudaEvent_t slot_compute_done = nullptr;
+    cudaStream_t load_stream = stream_compute;
+
+    int64_t const store_idx = t / step_ratio_h;
+    bool const do_grad = (t % step_ratio_h) == 0;
+    bool const grad_ey = do_grad && ca_requires_grad;
+    bool const grad_curl = do_grad && cb_requires_grad;
+    bool const want_load = grad_ey || grad_curl;
+    if (want_load) {
+      slot = (int)(store_idx % NUM_BUFFERS);
+      if (use_storage_pipeline) {
+        slot_storage_done = storage_done_events.events[slot];
+        slot_compute_done = compute_done_events.events[slot];
+      }
+    }
+
+    size_t const store1_offset = ring_storage_offset_bytes(
+        store_idx, storage_mode_h, bytes_per_step_store);
+    size_t const store3_offset = host_storage_offset_bytes(
+        store_idx, storage_mode_h, bytes_per_step_store);
+
+    void *__restrict const ey_store_1_t = (uint8_t *)ey_store_1 + store1_offset;
+    void *__restrict const ey_store_3_t = (uint8_t *)ey_store_3 + store3_offset;
+    void *__restrict const curl_store_1_t =
+        (uint8_t *)curl_store_1 + store1_offset;
+    void *__restrict const curl_store_3_t =
+        (uint8_t *)curl_store_3 + store3_offset;
+
+    if (storage_mode_h == STORAGE_CPU && want_load) {
+      if (use_storage_pipeline) {
+        tide::cuda_check_or_abort(
+            cudaStreamWaitEvent(stream_storage, slot_compute_done, 0),
+            __FILE__, __LINE__);
+        load_stream = stream_storage;
+      }
+      if (grad_ey) {
+        storage_copy_snapshot_h2d((void *)ey_store_1_t, (void *)ey_store_3_t,
+                                  (size_t)shot_bytes_uncomp_h,
+                                  (size_t)n_shots_h, load_stream);
+      }
+      if (grad_curl) {
+        storage_copy_snapshot_h2d((void *)curl_store_1_t,
+                                  (void *)curl_store_3_t,
+                                  (size_t)shot_bytes_uncomp_h,
+                                  (size_t)n_shots_h, load_stream);
+      }
+      if (use_storage_pipeline) {
+        tide::cuda_check_or_abort(
+            cudaEventRecord(slot_storage_done, stream_storage), __FILE__,
+            __LINE__);
+      }
+    } else if (storage_mode_h == STORAGE_DISK) {
+      if (want_load && use_storage_pipeline) {
+        tide::cuda_check_or_abort(
+            cudaStreamWaitEvent(stream_storage, slot_compute_done, 0),
+            __FILE__, __LINE__);
+        load_stream = stream_storage;
+      }
+      if (grad_ey) {
+        storage_async_disk_wait_slot(async_disk_ey, slot);
+        tide::cuda_check_or_abort(
+            cudaMemcpyAsync((void *)ey_store_1_t, (void *)ey_store_3_t,
+                            bytes_per_step_store, cudaMemcpyHostToDevice,
+                            load_stream),
+            __FILE__, __LINE__);
+      }
+      if (grad_curl) {
+        storage_async_disk_wait_slot(async_disk_curl, slot);
+        tide::cuda_check_or_abort(
+            cudaMemcpyAsync((void *)curl_store_1_t, (void *)curl_store_3_t,
+                            bytes_per_step_store, cudaMemcpyHostToDevice,
+                            load_stream),
+            __FILE__, __LINE__);
+      }
+      if (want_load && use_storage_pipeline) {
+        tide::cuda_check_or_abort(
+            cudaEventRecord(slot_storage_done, load_stream), __FILE__,
+            __LINE__);
+      }
+    }
+
+    if (n_receivers_per_shot_h > 0) {
+      add_adjoint_sources_ey<<<launch_cfg.dimGridReceivers,
+                               launch_cfg.dimBlockReceivers, 0,
+                               stream_compute>>>(
+          lambda_ey, grad_r + t * n_shots_h * n_receivers_per_shot_h,
+          receivers_i);
+    }
+    if (n_sources_per_shot_h > 0) {
+      record_adjoint_at_sources<<<launch_cfg.dimGridSources,
+                                  launch_cfg.dimBlockSources, 0,
+                                  stream_compute>>>(
+          grad_f + t * n_shots_h * n_sources_per_shot_h, lambda_ey, sources_i);
+    }
+
+    if (want_load && use_storage_pipeline) {
+      tide::cuda_check_or_abort(
+          cudaStreamWaitEvent(stream_compute, slot_storage_done, 0), __FILE__,
+          __LINE__);
+    }
+
+    if (storage_bf16_h) {
+      born_backward_prepare_e_kernel_bf16<<<launch_cfg.dimGrid,
+                                            launch_cfg.dimBlock, 0,
+                                            stream_compute>>>(
+          ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x,
+          grad_ey ? (__nv_bfloat16 const *)ey_store_1_t : nullptr,
+          grad_curl ? (__nv_bfloat16 const *)curl_store_1_t : nullptr,
+          grad_ca_shot, grad_cb_shot, work_x, work_z, ay, ayh, ax, axh, by,
+          byh, bx, bxh, ky, kyh, kx, kxh, grad_ey, grad_curl, step_ratio_h);
+    } else {
+      born_backward_prepare_e_kernel<<<launch_cfg.dimGrid, launch_cfg.dimBlock,
+                                       0, stream_compute>>>(
+          ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x,
+          grad_ey ? (TIDE_DTYPE const *)ey_store_1_t : nullptr,
+          grad_curl ? (TIDE_DTYPE const *)curl_store_1_t : nullptr,
+          grad_ca_shot, grad_cb_shot, work_x, work_z, ay, ayh, ax, axh, by,
+          byh, bx, bxh, ky, kyh, kx, kxh, grad_ey, grad_curl, step_ratio_h);
+    }
+    born_backward_apply_e_to_h_kernel<<<launch_cfg.dimGrid, launch_cfg.dimBlock,
+                                        0, stream_compute>>>(
+        work_x, work_z, lambda_hx, lambda_hz, ay, ayh, ax, axh, by, byh, bx,
+        bxh, ky, kyh, kx, kxh);
+    born_backward_prepare_h_kernel<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                                     stream_compute>>>(
+        cq, lambda_hx, lambda_hz, m_lambda_ey_x, m_lambda_ey_z, work_x, work_z,
+        ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
+    born_backward_apply_h_to_e_kernel<<<launch_cfg.dimGrid, launch_cfg.dimBlock,
+                                        0, stream_compute>>>(
+        work_x, work_z, lambda_ey, ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh,
+        kx, kxh);
+
+    if (want_load && use_storage_pipeline) {
+      tide::cuda_check_or_abort(
+          cudaEventRecord(slot_compute_done, stream_compute), __FILE__,
+          __LINE__);
+    }
+
+    if (want_load && storage_mode_h == STORAGE_DISK) {
+      int64_t const future_store_idx = store_idx - NUM_BUFFERS;
+      if (future_store_idx >= last_store_idx) {
+        size_t const future_store3_offset = host_storage_offset_bytes(
+            future_store_idx, storage_mode_h, bytes_per_step_store);
+        int64_t const future_file_offset =
+            future_store_idx * (int64_t)bytes_per_step_store;
+        if (grad_ey) {
+          cudaEvent_t ready_event = nullptr;
+          tide::cuda_check_or_abort(
+              cudaEventCreateWithFlags(&ready_event, cudaEventDisableTiming),
+              __FILE__, __LINE__);
+          tide::cuda_check_or_abort(
+              cudaEventRecord(ready_event, load_stream), __FILE__, __LINE__);
+          storage_async_disk_enqueue_read(
+              async_disk_ey, slot, (uint8_t *)ey_store_3 + future_store3_offset,
+              bytes_per_step_store, future_file_offset, ready_event);
+        }
+        if (grad_curl) {
+          cudaEvent_t ready_event = nullptr;
+          tide::cuda_check_or_abort(
+              cudaEventCreateWithFlags(&ready_event, cudaEventDisableTiming),
+              __FILE__, __LINE__);
+          tide::cuda_check_or_abort(
+              cudaEventRecord(ready_event, load_stream), __FILE__, __LINE__);
+          storage_async_disk_enqueue_read(
+              async_disk_curl, slot,
+              (uint8_t *)curl_store_3 + future_store3_offset,
+              bytes_per_step_store, future_file_offset, ready_event);
+        }
+      }
+    }
+  }
+
+  storage_async_disk_close(async_disk_ey);
+  storage_async_disk_close(async_disk_curl);
+
+  dim3 dimBlock_combine(32, 32, 1);
+  dim3 dimGrid_combine(
+      (nx_h - 2 * kFdPad + dimBlock_combine.x - 1) / dimBlock_combine.x,
+      (ny_h - 2 * kFdPad + dimBlock_combine.y - 1) / dimBlock_combine.y, 1);
+  if (ca_requires_grad && !ca_batched_h) {
+    combine_grad<<<dimGrid_combine, dimBlock_combine, 0, stream_compute>>>(
+        grad_ca, grad_ca_shot);
+  }
+  if (cb_requires_grad && !cb_batched_h) {
+    combine_grad<<<dimGrid_combine, dimBlock_combine, 0, stream_compute>>>(
+        grad_cb, grad_cb_shot);
+  }
 
   tide::cuda_check_or_abort(cudaPeekAtLastError(), __FILE__, __LINE__);
 }
