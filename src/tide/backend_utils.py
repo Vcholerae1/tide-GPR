@@ -23,7 +23,14 @@ _SUPPORTED_PROPAGATORS = (
     "maxwell_tm",
     "maxwell_3d",
 )
-_SUPPORTED_PASSES = ("forward", "forward_with_storage", "backward")
+_SUPPORTED_PASSES = (
+    "forward",
+    "forward_with_storage",
+    "backward",
+    "born_forward",
+    "born_forward_with_storage",
+    "born_backward",
+)
 
 # Mapping from torch dtypes to backend dtype strings and from backend dtype strings to C types.
 _TORCH_DTYPE_TO_BACKEND_DTYPE: dict[torch.dtype, str] = {
@@ -233,6 +240,63 @@ _TM_BACKWARD_SPEC: _Spec = [
     (_P, 2, "compute_stream, storage_stream"),
 ]
 
+_TM_BORN_FORWARD_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 2, "dca, dcb"),
+    (_P, 2, "f0, df"),
+    (_P, 3, "ey, hx, hz"),
+    (_P, 4, "m_ey_x, m_ey_z, m_hx_z, m_hz_x"),
+    (_P, 3, "dey, dhx, dhz"),
+    (_P, 4, "dm_ey_x, dm_ey_z, dm_hx_z, dm_hz_x"),
+    (_P, 1, "r"),
+    *_TM_PML_PROFILES,
+    *_TM_COMMON_TAIL,
+    *_TM_BATCHED_FLAGS,
+    (_P, 1, "compute_stream"),
+]
+
+_TM_BORN_FORWARD_WITH_STORAGE_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 2, "dca, dcb"),
+    (_P, 2, "f0, df"),
+    (_P, 3, "ey, hx, hz"),
+    (_P, 4, "m_ey_x, m_ey_z, m_hx_z, m_hz_x"),
+    (_P, 3, "dey, dhx, dhz"),
+    (_P, 4, "dm_ey_x, dm_ey_z, dm_hx_z, dm_hz_x"),
+    (_P, 1, "r"),
+    (
+        _P,
+        6,
+        "ey_store_1, ey_store_3, ey_filenames, curl_store_1, curl_store_3, curl_filenames",
+    ),
+    *_TM_PML_PROFILES,
+    *_TM_COMMON_TAIL,
+    *_TM_STORAGE_TAIL,
+    *_TM_BATCHED_FLAGS,
+    (_P, 2, "compute_stream, storage_stream"),
+]
+
+_TM_BORN_BACKWARD_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 1, "grad_r"),
+    (_P, 3, "lambda_ey, lambda_hx, lambda_hz"),
+    (_P, 4, "m_lambda_ey_x, m_lambda_ey_z, m_lambda_hx_z, m_lambda_hz_x"),
+    (
+        _P,
+        6,
+        "ey_store_1, ey_store_3, ey_filenames, curl_store_1, curl_store_3, curl_filenames",
+    ),
+    (_P, 1, "grad_f"),
+    (_P, 2, "grad_ca, grad_cb"),
+    (_P, 2, "grad_ca_shot, grad_cb_shot"),
+    (_P, 2, "work_x, work_z"),
+    *_TM_PML_PROFILES,
+    *_TM_COMMON_TAIL,
+    *_TM_STORAGE_TAIL,
+    *_TM_BATCHED_FLAGS,
+    (_P, 2, "compute_stream, storage_stream"),
+]
+
 # ---------------------------------------------------------------------------
 # 3-D propagators
 # ---------------------------------------------------------------------------
@@ -346,14 +410,93 @@ _3D_BACKWARD_SPEC: _Spec = [
     (_P, 2, "compute_stream, storage_stream"),
 ]
 
+_3D_BORN_FORWARD_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 2, "dca, dcb"),
+    (_P, 2, "f0, df"),
+    *_3D_FIELDS,
+    (
+        _P,
+        6,
+        "dex, dey, dez, dhx, dhy, dhz",
+    ),
+    (
+        _P,
+        12,
+        "dm_hz_y, dm_hy_z, dm_hx_z, dm_hz_x, dm_hy_x, dm_hx_y, "
+        "dm_ey_z, dm_ez_y, dm_ez_x, dm_ex_z, dm_ex_y, dm_ey_x",
+    ),
+    (_P, 1, "r"),
+    *_3D_PML_PROFILES,
+    *_3D_COMMON_TAIL,
+    *_3D_BATCHED_FLAGS,
+    (_P, 1, "compute_stream"),
+]
+
+_3D_BORN_FORWARD_WITH_STORAGE_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 2, "dca, dcb"),
+    (_P, 2, "f0, df"),
+    *_3D_FIELDS,
+    (
+        _P,
+        6,
+        "dex, dey, dez, dhx, dhy, dhz",
+    ),
+    (
+        _P,
+        12,
+        "dm_hz_y, dm_hy_z, dm_hx_z, dm_hz_x, dm_hy_x, dm_hx_y, "
+        "dm_ey_z, dm_ez_y, dm_ez_x, dm_ex_z, dm_ex_y, dm_ey_x",
+    ),
+    (_P, 1, "r"),
+    (
+        _P,
+        18,
+        "ex_s1,ex_s3,ex_fn, ey_s1,ey_s3,ey_fn, ez_s1,ez_s3,ez_fn, "
+        "cx_s1,cx_s3,cx_fn, cy_s1,cy_s3,cy_fn, cz_s1,cz_s3,cz_fn",
+    ),
+    *_3D_PML_PROFILES,
+    *_3D_COMMON_TAIL,
+    *_3D_STORAGE_TAIL,
+    *_3D_BATCHED_FLAGS,
+    (_P, 2, "compute_stream, storage_stream"),
+]
+
+_3D_BORN_BACKWARD_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 1, "grad_r"),
+    *_3D_ADJ_FIELDS,
+    (
+        _P,
+        18,
+        "ex_s1,ex_s3,ex_fn, ey_s1,ey_s3,ey_fn, ez_s1,ez_s3,ez_fn, "
+        "cx_s1,cx_s3,cx_fn, cy_s1,cy_s3,cy_fn, cz_s1,cz_s3,cz_fn",
+    ),
+    (_P, 1, "grad_f"),
+    (_P, 2, "grad_ca, grad_cb"),
+    (_P, 2, "grad_ca_shot, grad_cb_shot"),
+    *_3D_PML_PROFILES,
+    *_3D_COMMON_TAIL,
+    *_3D_STORAGE_TAIL,
+    *_3D_BATCHED_FLAGS,
+    (_P, 2, "compute_stream, storage_stream"),
+]
+
 # Flat template registry.
 _TEMPLATE_SPECS: dict[str, _Spec] = {
     "maxwell_tm_forward": _TM_FORWARD_SPEC,
     "maxwell_tm_forward_with_storage": _TM_FORWARD_WITH_STORAGE_SPEC,
     "maxwell_tm_backward": _TM_BACKWARD_SPEC,
+    "maxwell_tm_born_forward": _TM_BORN_FORWARD_SPEC,
+    "maxwell_tm_born_forward_with_storage": _TM_BORN_FORWARD_WITH_STORAGE_SPEC,
+    "maxwell_tm_born_backward": _TM_BORN_BACKWARD_SPEC,
     "maxwell_3d_forward": _3D_FORWARD_SPEC,
     "maxwell_3d_forward_with_storage": _3D_FORWARD_WITH_STORAGE_SPEC,
     "maxwell_3d_backward": _3D_BACKWARD_SPEC,
+    "maxwell_3d_born_forward": _3D_BORN_FORWARD_SPEC,
+    "maxwell_3d_born_forward_with_storage": _3D_BORN_FORWARD_WITH_STORAGE_SPEC,
+    "maxwell_3d_born_backward": _3D_BORN_BACKWARD_SPEC,
 }
 
 _ARGTYPES_CACHE: dict[tuple[str, str], list[Any]] = {}
@@ -394,6 +537,8 @@ def _assign_argtypes_for_variant(
         return
 
     template_name = _build_template_name(propagator, pass_name)
+    if template_name not in _TEMPLATE_SPECS:
+        return
     argtypes = _template_argtypes(template_name, backend_dtype)
 
     for device_name in _SUPPORTED_DEVICES:
