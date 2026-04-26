@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import torch
 
@@ -31,6 +31,17 @@ from .validation_internal import (
     _validate_positive_int,
     _validate_tensor_arg,
 )
+
+ReceiverMisfit = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+def _default_receiver_misfit(
+    predicted: torch.Tensor,
+    observed: torch.Tensor,
+) -> torch.Tensor:
+    residual = predicted - observed
+    return 0.5 * residual.square().sum()
+
 
 class Maxwell3D(torch.nn.Module):
     """3D Maxwell equations solver using FDTD + CPML.
@@ -168,6 +179,135 @@ class Maxwell3D(torch.nn.Module):
             n_threads,
             dispersion=dispersion,
         )
+
+    def hvp(
+        self,
+        dt: float,
+        source_amplitude: torch.Tensor | None,
+        source_location: torch.Tensor | None,
+        receiver_location: torch.Tensor | None,
+        observed_data: torch.Tensor,
+        *,
+        vepsilon: torch.Tensor | None = None,
+        vsigma: torch.Tensor | None = None,
+        misfit: ReceiverMisfit | None = None,
+        stencil: int = 2,
+        pml_width: int | Sequence[int] = 20,
+        max_vel: float | None = None,
+        nt: int | None = None,
+        linearize_source: bool = True,
+        source_component: str = "ey",
+        receiver_component: str = "ey",
+        python_backend: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        _validate_optional_bool("python_backend", python_backend)
+        assert isinstance(self.epsilon, torch.Tensor)
+        assert isinstance(self.sigma, torch.Tensor)
+        assert isinstance(self.mu, torch.Tensor)
+        return maxwell3d_hvp(
+            self.epsilon,
+            self.sigma,
+            self.mu,
+            grid_spacing=self.grid_spacing,
+            dt=dt,
+            source_amplitude=source_amplitude,
+            source_location=source_location,
+            receiver_location=receiver_location,
+            observed_data=observed_data,
+            vepsilon=vepsilon,
+            vsigma=vsigma,
+            misfit=misfit,
+            stencil=stencil,
+            pml_width=pml_width,
+            max_vel=max_vel,
+            nt=nt,
+            linearize_source=linearize_source,
+            source_component=source_component,
+            receiver_component=receiver_component,
+            python_backend=python_backend,
+        )
+
+
+def maxwell3d_hvp(
+    epsilon: torch.Tensor,
+    sigma: torch.Tensor,
+    mu: torch.Tensor,
+    grid_spacing: float | Sequence[float],
+    dt: float,
+    source_amplitude: torch.Tensor | None,
+    source_location: torch.Tensor | None,
+    receiver_location: torch.Tensor | None,
+    observed_data: torch.Tensor,
+    *,
+    vepsilon: torch.Tensor | None = None,
+    vsigma: torch.Tensor | None = None,
+    misfit: ReceiverMisfit | None = None,
+    stencil: int = 2,
+    pml_width: int | Sequence[int] = 20,
+    max_vel: float | None = None,
+    nt: int | None = None,
+    linearize_source: bool = True,
+    source_component: str = "ey",
+    receiver_component: str = "ey",
+    python_backend: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply a receiver-space Hessian to a model direction.
+
+    The current implementation is limited to the Python path
+    (`python_backend=True`), which evaluates a receiver-space
+    Hessian-vector product through the reference `maxwell3d` and `born3d`
+    operators:
+
+        Hv = grad_m <dPhi/dd, Jv>
+    """
+    _validate_optional_bool("python_backend", python_backend)
+    if not python_backend:
+        raise NotImplementedError("3D HVP currently requires python_backend=True.")
+
+    _validate_tensor_arg("epsilon", epsilon)
+    _validate_tensor_arg("sigma", sigma)
+    _validate_tensor_arg("mu", mu)
+    _validate_tensor_arg("observed_data", observed_data)
+    if epsilon.ndim != 3:
+        raise NotImplementedError("maxwell3d_hvp currently supports a single 3D model.")
+    if sigma.shape != epsilon.shape or mu.shape != epsilon.shape:
+        raise ValueError("sigma and mu must have the same shape as epsilon.")
+    if vepsilon is not None:
+        _validate_tensor_arg("vepsilon", vepsilon)
+        if vepsilon.shape != epsilon.shape:
+            raise ValueError("vepsilon must have the same shape as epsilon.")
+    if vsigma is not None:
+        _validate_tensor_arg("vsigma", vsigma)
+        if vsigma.shape != sigma.shape:
+            raise ValueError("vsigma must have the same shape as sigma.")
+
+    misfit_fn = _default_receiver_misfit if misfit is None else misfit
+    if not callable(misfit_fn):
+        raise TypeError("misfit must be callable when provided.")
+
+    from .maxwell3d_born_autograd import maxwell3d_receiver_hvp_naive
+
+    return maxwell3d_receiver_hvp_naive(
+        epsilon,
+        sigma,
+        mu,
+        vepsilon=vepsilon,
+        vsigma=vsigma,
+        grid_spacing=grid_spacing,
+        dt=dt,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        observed_data=observed_data,
+        misfit_fn=misfit_fn,
+        stencil=stencil,
+        pml_width=pml_width,
+        max_vel=max_vel,
+        nt=nt,
+        linearize_source=linearize_source,
+        source_component=source_component,
+        receiver_component=receiver_component,
+    )
 
 
 def maxwell3d(
@@ -883,4 +1023,4 @@ def maxwell3d(
         receiver_amplitudes,
     )
 
-__all__ = ["Maxwell3D", "maxwell3d"]
+__all__ = ["Maxwell3D", "maxwell3d", "maxwell3d_hvp"]

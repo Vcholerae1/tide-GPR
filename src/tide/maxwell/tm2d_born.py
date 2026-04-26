@@ -236,10 +236,12 @@ def borntm(
     3. background receiver amplitudes,
     4. scattered receiver amplitudes.
 
-    Native backend gradients are supported with respect to the perturbation
-    inputs (`depsilon`, `dsigma`, `dca`, `dcb`). When gradients are required
-    with respect to the background model, source amplitudes, or initial
-    wavefields, TIDE falls back to the Python reference path.
+    ``borntm`` computes the Born scattered field ``J(m)v``. The scattered field
+    remains linear in the perturbation inputs (`depsilon`, `dsigma`, `dca`,
+    `dcb`), while the operator is differentiable with respect to the background
+    model (`epsilon`, `sigma`) as well. Native fallback is still used for
+    unsupported gradient paths such as `mu`, source amplitudes, or initial
+    wavefields.
     """
     if epsilon.ndim != 2:
         raise NotImplementedError("borntm currently supports a single 2D model only.")
@@ -366,6 +368,7 @@ def borntm(
             dm_Hz_x_0,
             nt_internal,
             parameterization,
+            1,
             linearize_source,
             storage_mode=storage_mode,
             storage_path=storage_path,

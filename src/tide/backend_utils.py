@@ -30,6 +30,7 @@ _SUPPORTED_PASSES = (
     "born_forward",
     "born_forward_with_storage",
     "born_backward",
+    "born_backward_bggrad",
 )
 
 # Mapping from torch dtypes to backend dtype strings and from backend dtype strings to C types.
@@ -248,7 +249,7 @@ _TM_BORN_FORWARD_SPEC: _Spec = [
     (_P, 4, "m_ey_x, m_ey_z, m_hx_z, m_hz_x"),
     (_P, 3, "dey, dhx, dhz"),
     (_P, 4, "dm_ey_x, dm_ey_z, dm_hx_z, dm_hz_x"),
-    (_P, 1, "r"),
+    (_P, 2, "r, background_r"),
     *_TM_PML_PROFILES,
     *_TM_COMMON_TAIL,
     *_TM_BATCHED_FLAGS,
@@ -263,11 +264,11 @@ _TM_BORN_FORWARD_WITH_STORAGE_SPEC: _Spec = [
     (_P, 4, "m_ey_x, m_ey_z, m_hx_z, m_hz_x"),
     (_P, 3, "dey, dhx, dhz"),
     (_P, 4, "dm_ey_x, dm_ey_z, dm_hx_z, dm_hz_x"),
-    (_P, 1, "r"),
+    (_P, 2, "r, background_r"),
     (
         _P,
-        6,
-        "ey_store_1, ey_store_3, ey_filenames, curl_store_1, curl_store_3, curl_filenames",
+        8,
+        "ey_store_1, ey_store_3, ey_filenames, curl_store_1, curl_store_3, curl_filenames, dey_store, dcurl_store",
     ),
     *_TM_PML_PROFILES,
     *_TM_COMMON_TAIL,
@@ -290,6 +291,37 @@ _TM_BORN_BACKWARD_SPEC: _Spec = [
     (_P, 2, "grad_ca, grad_cb"),
     (_P, 2, "grad_ca_shot, grad_cb_shot"),
     (_P, 2, "work_x, work_z"),
+    *_TM_PML_PROFILES,
+    *_TM_COMMON_TAIL,
+    *_TM_STORAGE_TAIL,
+    *_TM_BATCHED_FLAGS,
+    (_P, 2, "compute_stream, storage_stream"),
+]
+
+_TM_BORN_BACKWARD_BGGRAD_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 2, "dca, dcb"),
+    (_P, 2, "f0, df"),
+    (_P, 1, "grad_r"),
+    (
+        _P,
+        6,
+        "ey_store_1, ey_store_3, ey_filenames, curl_store_1, curl_store_3, curl_filenames",
+    ),
+    (_P, 2, "dey_store, dcurl_store"),
+    (_P, 3, "ey, hx, hz"),
+    (_P, 3, "dey, dhx, dhz"),
+    (_P, 2, "grad_f0, grad_df"),
+    (_P, 2, "grad_ca, grad_cb"),
+    (_P, 2, "grad_dca, grad_dcb"),
+    (
+        _P,
+        15,
+        "m_lambda_ey_x, m_lambda_ey_z, m_lambda_hx_z, m_lambda_hz_x, "
+        "m_eta_ey_x, m_eta_ey_z, m_eta_hx_z, m_eta_hz_x, "
+        "eta_source_old, work_eta_x, work_eta_z, "
+        "grad_ca_shot, grad_cb_shot, grad_dca_shot, grad_dcb_shot",
+    ),
     *_TM_PML_PROFILES,
     *_TM_COMMON_TAIL,
     *_TM_STORAGE_TAIL,
@@ -491,6 +523,7 @@ _TEMPLATE_SPECS: dict[str, _Spec] = {
     "maxwell_tm_born_forward": _TM_BORN_FORWARD_SPEC,
     "maxwell_tm_born_forward_with_storage": _TM_BORN_FORWARD_WITH_STORAGE_SPEC,
     "maxwell_tm_born_backward": _TM_BORN_BACKWARD_SPEC,
+    "maxwell_tm_born_backward_bggrad": _TM_BORN_BACKWARD_BGGRAD_SPEC,
     "maxwell_3d_forward": _3D_FORWARD_SPEC,
     "maxwell_3d_forward_with_storage": _3D_FORWARD_WITH_STORAGE_SPEC,
     "maxwell_3d_backward": _3D_BACKWARD_SPEC,

@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Any
 
 import torch
@@ -11,8 +12,29 @@ from ..storage import (
     TemporaryStorage,
     storage_mode_to_int,
 )
+from ..validation import validate_model_gradient_sampling_interval
 from .common import _get_ctx_handle, _register_ctx_handle, _release_ctx_handle
+from .common import _clone_param, _directional_receiver_hvp, ReceiverMisfit
 from .tm2d_helpers import _make_tm_storage_streams, _resolve_tm2d_storage_spec
+
+
+def _alloc_tm2d_field(
+    *,
+    ctx: Any,
+    device: torch.device,
+    dtype: torch.dtype,
+    zeros: bool = True,
+) -> torch.Tensor:
+    factory = torch.zeros if zeros else torch.empty
+    return factory(ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=dtype)
+
+
+def _zero_tensors_(
+    *tensors: torch.Tensor,
+) -> None:
+    for tensor in tensors:
+        if tensor.numel() > 0:
+            tensor.zero_()
 
 
 class BornTMForwardFunc(torch.autograd.Function):
@@ -88,14 +110,21 @@ class BornTMForwardFunc(torch.autograd.Function):
         dca_requires_grad = dca.requires_grad
         dcb_requires_grad = dcb.requires_grad
         df_requires_grad = df.requires_grad
-        needs_storage = dca_requires_grad or dcb_requires_grad
+        background_grad_possible = ca.requires_grad or cb.requires_grad or f0.requires_grad
+        store_ey_needed = dca_requires_grad or background_grad_possible
+        store_curl_needed = dcb_requires_grad or background_grad_possible
+        needs_storage = store_ey_needed or store_curl_needed
 
         if n_receivers > 0:
             receiver_amplitudes = torch.zeros(
                 nt, n_shots, n_receivers, device=device, dtype=coeff_dtype
             )
+            background_receiver_amplitudes = torch.zeros_like(receiver_amplitudes)
         else:
             receiver_amplitudes = torch.empty(0, device=device, dtype=coeff_dtype)
+            background_receiver_amplitudes = torch.empty(
+                0, device=device, dtype=coeff_dtype
+            )
 
         device_idx = (
             device.index if device.type == "cuda" and device.index is not None else 0
@@ -107,6 +136,10 @@ class BornTMForwardFunc(torch.autograd.Function):
         storage_mode = STORAGE_NONE
         shot_bytes_uncomp = 0
         stream_keepalive: tuple[Any, ...] = ()
+        direct_snapshot_tensors = (
+            torch.empty(0, device=device, dtype=coeff_dtype),
+            torch.empty(0, device=device, dtype=coeff_dtype),
+        )
 
         if needs_storage:
             import ctypes
@@ -130,6 +163,25 @@ class BornTMForwardFunc(torch.autograd.Function):
 
             shot_bytes_uncomp = num_elements_per_shot * store_dtype.itemsize
             num_steps_stored = (nt + step_ratio - 1) // step_ratio
+            if background_grad_possible:
+                direct_snapshot_tensors = (
+                    torch.empty(
+                        num_steps_stored,
+                        n_shots,
+                        ny,
+                        nx,
+                        device=device,
+                        dtype=coeff_dtype,
+                    ),
+                    torch.empty(
+                        num_steps_stored,
+                        n_shots,
+                        ny,
+                        nx,
+                        device=device,
+                        dtype=coeff_dtype,
+                    ),
+                )
 
             char_ptr_type = ctypes.c_char_p
             is_cuda = device.type == "cuda"
@@ -212,9 +264,9 @@ class BornTMForwardFunc(torch.autograd.Function):
                 )
                 return store_1, store_3, filenames_ptr
 
-            ey_store_1, ey_store_3, ey_filenames_ptr = alloc_storage(dca_requires_grad)
+            ey_store_1, ey_store_3, ey_filenames_ptr = alloc_storage(store_ey_needed)
             curl_store_1, curl_store_3, curl_filenames_ptr = alloc_storage(
-                dcb_requires_grad
+                store_curl_needed
             )
 
             forward_func = backend_utils.get_backend_function(
@@ -247,12 +299,15 @@ class BornTMForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(dm_Hx_z),
                 backend_utils.tensor_to_ptr(dm_Hz_x),
                 backend_utils.tensor_to_ptr(receiver_amplitudes),
+                backend_utils.tensor_to_ptr(background_receiver_amplitudes),
                 backend_utils.tensor_to_ptr(ey_store_1),
                 backend_utils.tensor_to_ptr(ey_store_3),
                 ey_filenames_ptr,
                 backend_utils.tensor_to_ptr(curl_store_1),
                 backend_utils.tensor_to_ptr(curl_store_3),
                 curl_filenames_ptr,
+                backend_utils.tensor_to_ptr(direct_snapshot_tensors[0]),
+                backend_utils.tensor_to_ptr(direct_snapshot_tensors[1]),
                 backend_utils.tensor_to_ptr(ay),
                 backend_utils.tensor_to_ptr(by),
                 backend_utils.tensor_to_ptr(ay_h),
@@ -280,8 +335,8 @@ class BornTMForwardFunc(torch.autograd.Function):
                 storage_mode,
                 storage_format,
                 shot_bytes_uncomp,
-                dca_requires_grad,
-                dcb_requires_grad,
+                store_ey_needed,
+                store_curl_needed,
                 ca_batched,
                 cb_batched,
                 cq_batched,
@@ -329,6 +384,7 @@ class BornTMForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(dm_Hx_z),
                 backend_utils.tensor_to_ptr(dm_Hz_x),
                 backend_utils.tensor_to_ptr(receiver_amplitudes),
+                backend_utils.tensor_to_ptr(background_receiver_amplitudes),
                 backend_utils.tensor_to_ptr(ay),
                 backend_utils.tensor_to_ptr(by),
                 backend_utils.tensor_to_ptr(ay_h),
@@ -386,6 +442,7 @@ class BornTMForwardFunc(torch.autograd.Function):
             "dca_requires_grad": dca_requires_grad,
             "dcb_requires_grad": dcb_requires_grad,
             "df_requires_grad": df_requires_grad,
+            "direct_snapshot_tensors": direct_snapshot_tensors,
             "stream_keepalive": stream_keepalive,
         }
         ctx_handle = _register_ctx_handle(ctx_data)
@@ -398,6 +455,7 @@ class BornTMForwardFunc(torch.autograd.Function):
             dm_Hx_z,
             dm_Hz_x,
             receiver_amplitudes,
+            background_receiver_amplitudes,
             ctx_handle,
         )
 
@@ -412,14 +470,19 @@ class BornTMForwardFunc(torch.autograd.Function):
         ctx_data = _get_ctx_handle(ctx_handle_id)
         ctx._ctx_handle_id = ctx_handle_id
         backward_storage_tensors = ctx_data["backward_storage_tensors"]
+        direct_snapshot_tensors = ctx_data["direct_snapshot_tensors"]
         ctx.backward_storage_filename_arrays = ctx_data[
             "backward_storage_filename_arrays"
         ]
 
         ctx.save_for_backward(
+            inputs[0],  # dca
+            inputs[1],  # dcb
             inputs[2],  # ca
             inputs[3],  # cb
             inputs[4],  # cq
+            inputs[5],  # f0
+            inputs[6],  # df
             inputs[7],  # ay
             inputs[8],  # by
             inputs[9],  # ay_h
@@ -435,6 +498,7 @@ class BornTMForwardFunc(torch.autograd.Function):
             inputs[19],  # sources_i
             inputs[20],  # receivers_i
             *backward_storage_tensors,
+            *direct_snapshot_tensors,
         )
         ctx.stream_keepalive = ctx_data["stream_keepalive"]
         ctx.rdy = inputs[21]
@@ -461,6 +525,7 @@ class BornTMForwardFunc(torch.autograd.Function):
         ctx.dca_requires_grad = ctx_data["dca_requires_grad"]
         ctx.dcb_requires_grad = ctx_data["dcb_requires_grad"]
         ctx.df_requires_grad = ctx_data["df_requires_grad"]
+        ctx.background_grad_required = any(ctx.needs_input_grad[i] for i in (2, 3, 5))
         ctx.n_threads = inputs[57]
         ctx.backend_device = inputs[58]
         ctx.n_inputs = len(inputs)
@@ -472,7 +537,7 @@ class BornTMForwardFunc(torch.autograd.Function):
         from .. import backend_utils
 
         grad_outputs_list = list(grad_outputs)
-        if len(grad_outputs_list) == 9:
+        if len(grad_outputs_list) == 10:
             grad_outputs_list.pop()
 
         (
@@ -484,6 +549,7 @@ class BornTMForwardFunc(torch.autograd.Function):
             grad_dm_Hx_z,
             grad_dm_Hz_x,
             grad_r,
+            grad_background_r,
         ) = grad_outputs_list
         del (
             grad_dEy,
@@ -496,9 +562,13 @@ class BornTMForwardFunc(torch.autograd.Function):
         )
 
         (
+            dca,
+            dcb,
             ca,
             cb,
             cq,
+            f0,
+            df,
             ay,
             by,
             ay_h,
@@ -517,6 +587,8 @@ class BornTMForwardFunc(torch.autograd.Function):
             ey_store_3,
             curl_store_1,
             curl_store_3,
+            dey_store,
+            dcurl_store,
         ) = ctx.saved_tensors
 
         device = ca.device
@@ -535,7 +607,19 @@ class BornTMForwardFunc(torch.autograd.Function):
             ey_filenames_ptr = 0
             curl_filenames_ptr = 0
 
-        if grad_r is None or grad_r.numel() == 0:
+        bg_ca_requires_grad = ctx.needs_input_grad[2]
+        bg_cb_requires_grad = ctx.needs_input_grad[3]
+        f0_requires_grad = ctx.needs_input_grad[5]
+        model_grad_requested = bg_ca_requires_grad or bg_cb_requires_grad or f0_requires_grad
+
+        receiver_grad_needed = bool(
+            grad_r is not None
+            and grad_r.numel() > 0
+            and torch.count_nonzero(grad_r).item() > 0
+        )
+        if receiver_grad_needed:
+            grad_r = grad_r.contiguous()
+        elif ctx.n_receivers > 0:
             grad_r = torch.zeros(
                 ctx.nt,
                 ctx.n_shots,
@@ -544,26 +628,96 @@ class BornTMForwardFunc(torch.autograd.Function):
                 dtype=coeff_dtype,
             )
         else:
-            grad_r = grad_r.contiguous()
+            grad_r = torch.empty(0, device=device, dtype=coeff_dtype)
 
-        lambda_ey = torch.zeros(
-            ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
+        background_receiver_grad_needed = bool(
+            grad_background_r is not None
+            and grad_background_r.numel() > 0
+            and torch.count_nonzero(grad_background_r).item() > 0
         )
-        lambda_hx = torch.zeros_like(lambda_ey)
-        lambda_hz = torch.zeros_like(lambda_ey)
-        m_lambda_ey_x = torch.zeros_like(lambda_ey)
-        m_lambda_ey_z = torch.zeros_like(lambda_ey)
-        m_lambda_hx_z = torch.zeros_like(lambda_ey)
-        m_lambda_hz_x = torch.zeros_like(lambda_ey)
+        if background_receiver_grad_needed:
+            grad_background_r = grad_background_r.contiguous()
+        elif ctx.n_receivers > 0:
+            grad_background_r = torch.zeros(
+                ctx.nt,
+                ctx.n_shots,
+                ctx.n_receivers,
+                device=device,
+                dtype=coeff_dtype,
+            )
+        else:
+            grad_background_r = torch.empty(0, device=device, dtype=coeff_dtype)
 
-        if ctx.n_sources > 0:
+        needs_bggrad = receiver_grad_needed and model_grad_requested
+        needs_born_backward = receiver_grad_needed and not needs_bggrad and (
+            ctx.dca_requires_grad or ctx.dcb_requires_grad or ctx.df_requires_grad
+        )
+        needs_background_backward = (
+            background_receiver_grad_needed and model_grad_requested
+        )
+        needs_lambda_workspace = (
+            needs_bggrad or needs_born_backward or needs_background_backward
+        )
+
+        if needs_lambda_workspace:
+            lambda_ey = _alloc_tm2d_field(ctx=ctx, device=device, dtype=coeff_dtype)
+            lambda_hx = torch.zeros_like(lambda_ey)
+            lambda_hz = torch.zeros_like(lambda_ey)
+            m_lambda_ey_x = torch.zeros_like(lambda_ey)
+            m_lambda_ey_z = torch.zeros_like(lambda_ey)
+            m_lambda_hx_z = torch.zeros_like(lambda_ey)
+            m_lambda_hz_x = torch.zeros_like(lambda_ey)
+            work_x = torch.zeros_like(lambda_ey)
+            work_z = torch.zeros_like(lambda_ey)
+        else:
+            lambda_ey = torch.empty(0, device=device, dtype=coeff_dtype)
+            lambda_hx = torch.empty(0, device=device, dtype=coeff_dtype)
+            lambda_hz = torch.empty(0, device=device, dtype=coeff_dtype)
+            m_lambda_ey_x = torch.empty(0, device=device, dtype=coeff_dtype)
+            m_lambda_ey_z = torch.empty(0, device=device, dtype=coeff_dtype)
+            m_lambda_hx_z = torch.empty(0, device=device, dtype=coeff_dtype)
+            m_lambda_hz_x = torch.empty(0, device=device, dtype=coeff_dtype)
+            work_x = torch.empty(0, device=device, dtype=coeff_dtype)
+            work_z = torch.empty(0, device=device, dtype=coeff_dtype)
+
+        if receiver_grad_needed and ctx.n_sources > 0:
             grad_f = torch.zeros(
                 ctx.nt, ctx.n_shots, ctx.n_sources, device=device, dtype=coeff_dtype
             )
         else:
             grad_f = torch.empty(0, device=device, dtype=coeff_dtype)
 
-        if ctx.dca_requires_grad:
+        if needs_bggrad or ctx.dca_requires_grad:
+            grad_dca = (
+                torch.zeros(
+                    ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
+                )
+                if ctx.ca_batched
+                else torch.zeros(ctx.ny, ctx.nx, device=device, dtype=coeff_dtype)
+            )
+            grad_dca_shot = torch.zeros(
+                ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
+            )
+        else:
+            grad_dca = torch.empty(0, device=device, dtype=coeff_dtype)
+            grad_dca_shot = torch.empty(0, device=device, dtype=coeff_dtype)
+
+        if needs_bggrad or ctx.dcb_requires_grad:
+            grad_dcb = (
+                torch.zeros(
+                    ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
+                )
+                if ctx.cb_batched
+                else torch.zeros(ctx.ny, ctx.nx, device=device, dtype=coeff_dtype)
+            )
+            grad_dcb_shot = torch.zeros(
+                ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
+            )
+        else:
+            grad_dcb = torch.empty(0, device=device, dtype=coeff_dtype)
+            grad_dcb_shot = torch.empty(0, device=device, dtype=coeff_dtype)
+
+        if model_grad_requested and (needs_bggrad or needs_background_backward):
             grad_ca = (
                 torch.zeros(
                     ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
@@ -571,14 +725,6 @@ class BornTMForwardFunc(torch.autograd.Function):
                 if ctx.ca_batched
                 else torch.zeros(ctx.ny, ctx.nx, device=device, dtype=coeff_dtype)
             )
-            grad_ca_shot = torch.zeros(
-                ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
-            )
-        else:
-            grad_ca = torch.empty(0, device=device, dtype=coeff_dtype)
-            grad_ca_shot = torch.empty(0, device=device, dtype=coeff_dtype)
-
-        if ctx.dcb_requires_grad:
             grad_cb = (
                 torch.zeros(
                     ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
@@ -586,12 +732,33 @@ class BornTMForwardFunc(torch.autograd.Function):
                 if ctx.cb_batched
                 else torch.zeros(ctx.ny, ctx.nx, device=device, dtype=coeff_dtype)
             )
+        else:
+            grad_ca = torch.empty(0, device=device, dtype=coeff_dtype)
+            grad_cb = torch.empty(0, device=device, dtype=coeff_dtype)
+
+        if bg_ca_requires_grad and (needs_bggrad or needs_background_backward):
+            grad_ca_shot = torch.zeros(
+                ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
+            )
+        else:
+            grad_ca_shot = torch.empty(0, device=device, dtype=coeff_dtype)
+
+        if bg_cb_requires_grad and (needs_bggrad or needs_background_backward):
             grad_cb_shot = torch.zeros(
                 ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
             )
         else:
-            grad_cb = torch.empty(0, device=device, dtype=coeff_dtype)
             grad_cb_shot = torch.empty(0, device=device, dtype=coeff_dtype)
+
+        if f0_requires_grad and (needs_bggrad or needs_background_backward) and ctx.n_sources > 0:
+            grad_f0 = torch.zeros(
+                ctx.nt, ctx.n_shots, ctx.n_sources, device=device, dtype=coeff_dtype
+            )
+        else:
+            grad_f0 = torch.empty(0, device=device, dtype=coeff_dtype)
+
+        store_ey_needed = ctx.dca_requires_grad or model_grad_requested
+        store_curl_needed = ctx.dcb_requires_grad or model_grad_requested
 
         device_idx = (
             device.index if device.type == "cuda" and device.index is not None else 0
@@ -600,102 +767,561 @@ class BornTMForwardFunc(torch.autograd.Function):
             _make_tm_storage_streams(device, ctx.storage_mode)
         )
         ctx.stream_keepalive = stream_keepalive
-        work_x = torch.empty(
-            ctx.n_shots, ctx.ny, ctx.nx, device=device, dtype=coeff_dtype
-        )
-        work_z = torch.empty_like(work_x)
+        grad_ca_shot_ptr = grad_ca if ctx.ca_batched else grad_ca_shot
+        grad_cb_shot_ptr = grad_cb if ctx.cb_batched else grad_cb_shot
+        grad_dca_shot_ptr = grad_dca if ctx.ca_batched else grad_dca_shot
+        grad_dcb_shot_ptr = grad_dcb if ctx.cb_batched else grad_dcb_shot
 
-        backward_func = backend_utils.get_backend_function(
-            "maxwell_tm",
-            "born_backward",
-            ctx.accuracy,
-            coeff_dtype,
-            ctx.backend_device,
-        )
-        backward_func(
-            backend_utils.tensor_to_ptr(ca),
-            backend_utils.tensor_to_ptr(cb),
-            backend_utils.tensor_to_ptr(cq),
-            backend_utils.tensor_to_ptr(grad_r),
-            backend_utils.tensor_to_ptr(lambda_ey),
-            backend_utils.tensor_to_ptr(lambda_hx),
-            backend_utils.tensor_to_ptr(lambda_hz),
-            backend_utils.tensor_to_ptr(m_lambda_ey_x),
-            backend_utils.tensor_to_ptr(m_lambda_ey_z),
-            backend_utils.tensor_to_ptr(m_lambda_hx_z),
-            backend_utils.tensor_to_ptr(m_lambda_hz_x),
-            backend_utils.tensor_to_ptr(ey_store_1),
-            backend_utils.tensor_to_ptr(ey_store_3),
-            ey_filenames_ptr,
-            backend_utils.tensor_to_ptr(curl_store_1),
-            backend_utils.tensor_to_ptr(curl_store_3),
-            curl_filenames_ptr,
-            backend_utils.tensor_to_ptr(grad_f),
-            backend_utils.tensor_to_ptr(grad_ca),
-            backend_utils.tensor_to_ptr(grad_cb),
-            backend_utils.tensor_to_ptr(grad_ca_shot),
-            backend_utils.tensor_to_ptr(grad_cb_shot),
-            backend_utils.tensor_to_ptr(work_x),
-            backend_utils.tensor_to_ptr(work_z),
-            backend_utils.tensor_to_ptr(ay),
-            backend_utils.tensor_to_ptr(by),
-            backend_utils.tensor_to_ptr(ay_h),
-            backend_utils.tensor_to_ptr(by_h),
-            backend_utils.tensor_to_ptr(ax),
-            backend_utils.tensor_to_ptr(bx),
-            backend_utils.tensor_to_ptr(ax_h),
-            backend_utils.tensor_to_ptr(bx_h),
-            backend_utils.tensor_to_ptr(ky),
-            backend_utils.tensor_to_ptr(ky_h),
-            backend_utils.tensor_to_ptr(kx),
-            backend_utils.tensor_to_ptr(kx_h),
-            backend_utils.tensor_to_ptr(sources_i),
-            backend_utils.tensor_to_ptr(receivers_i),
-            ctx.rdy,
-            ctx.rdx,
-            ctx.dt,
-            ctx.nt,
-            ctx.n_shots,
-            ctx.ny,
-            ctx.nx,
-            ctx.n_sources,
-            ctx.n_receivers,
-            ctx.step_ratio,
-            ctx.storage_mode,
-            ctx.storage_format,
-            ctx.shot_bytes_uncomp,
-            ctx.dca_requires_grad,
-            ctx.dcb_requires_grad,
-            ctx.ca_batched,
-            ctx.cb_batched,
-            ctx.cq_batched,
-            ctx.nt,
-            ctx.pml_y0,
-            ctx.pml_x0,
-            ctx.pml_y1,
-            ctx.pml_x1,
-            ctx.n_threads,
-            device_idx,
-            compute_stream_handle,
-            storage_stream_handle,
-        )
+        if needs_background_backward:
+            _zero_tensors_(
+                lambda_ey,
+                lambda_hx,
+                lambda_hz,
+                m_lambda_ey_x,
+                m_lambda_ey_z,
+                m_lambda_hx_z,
+                m_lambda_hz_x,
+                work_x,
+                work_z,
+            )
+            if not ctx.ca_batched:
+                _zero_tensors_(grad_ca_shot)
+            if not ctx.cb_batched:
+                _zero_tensors_(grad_cb_shot)
+            background_backward_func = backend_utils.get_backend_function(
+                "maxwell_tm",
+                "backward",
+                ctx.accuracy,
+                coeff_dtype,
+                ctx.backend_device,
+            )
+            background_backward_func(
+                backend_utils.tensor_to_ptr(ca),
+                backend_utils.tensor_to_ptr(cb),
+                backend_utils.tensor_to_ptr(cq),
+                backend_utils.tensor_to_ptr(grad_background_r),
+                backend_utils.tensor_to_ptr(lambda_ey),
+                backend_utils.tensor_to_ptr(lambda_hx),
+                backend_utils.tensor_to_ptr(lambda_hz),
+                backend_utils.tensor_to_ptr(m_lambda_ey_x),
+                backend_utils.tensor_to_ptr(m_lambda_ey_z),
+                backend_utils.tensor_to_ptr(m_lambda_hx_z),
+                backend_utils.tensor_to_ptr(m_lambda_hz_x),
+                backend_utils.tensor_to_ptr(ey_store_1),
+                backend_utils.tensor_to_ptr(ey_store_3),
+                ey_filenames_ptr,
+                backend_utils.tensor_to_ptr(curl_store_1),
+                backend_utils.tensor_to_ptr(curl_store_3),
+                curl_filenames_ptr,
+                backend_utils.tensor_to_ptr(grad_f0),
+                backend_utils.tensor_to_ptr(grad_ca),
+                backend_utils.tensor_to_ptr(grad_cb),
+                backend_utils.tensor_to_ptr(grad_ca_shot_ptr),
+                backend_utils.tensor_to_ptr(grad_cb_shot_ptr),
+                backend_utils.tensor_to_ptr(ay),
+                backend_utils.tensor_to_ptr(by),
+                backend_utils.tensor_to_ptr(ay_h),
+                backend_utils.tensor_to_ptr(by_h),
+                backend_utils.tensor_to_ptr(ax),
+                backend_utils.tensor_to_ptr(bx),
+                backend_utils.tensor_to_ptr(ax_h),
+                backend_utils.tensor_to_ptr(bx_h),
+                backend_utils.tensor_to_ptr(ky),
+                backend_utils.tensor_to_ptr(ky_h),
+                backend_utils.tensor_to_ptr(kx),
+                backend_utils.tensor_to_ptr(kx_h),
+                backend_utils.tensor_to_ptr(sources_i),
+                backend_utils.tensor_to_ptr(receivers_i),
+                ctx.rdy,
+                ctx.rdx,
+                ctx.dt,
+                ctx.nt,
+                ctx.n_shots,
+                ctx.ny,
+                ctx.nx,
+                ctx.n_sources,
+                ctx.n_receivers,
+                ctx.step_ratio,
+                ctx.storage_mode,
+                ctx.storage_format,
+                ctx.shot_bytes_uncomp,
+                bg_ca_requires_grad,
+                bg_cb_requires_grad,
+                ctx.ca_batched,
+                ctx.cb_batched,
+                ctx.cq_batched,
+                ctx.nt,
+                ctx.pml_y0,
+                ctx.pml_x0,
+                ctx.pml_y1,
+                ctx.pml_x1,
+                ctx.n_threads,
+                device_idx,
+                compute_stream_handle,
+                storage_stream_handle,
+            )
+
+        if needs_bggrad:
+            bg_eta_ey = torch.zeros_like(lambda_ey)
+            bg_eta_hx = torch.zeros_like(lambda_hx)
+            bg_eta_hz = torch.zeros_like(lambda_hz)
+            m_eta_ey_x = torch.zeros_like(lambda_ey)
+            m_eta_ey_z = torch.zeros_like(lambda_ey)
+            m_eta_hx_z = torch.zeros_like(lambda_ey)
+            m_eta_hz_x = torch.zeros_like(lambda_ey)
+            eta_source_old = torch.zeros_like(lambda_ey)
+            work_eta_x = torch.zeros_like(lambda_ey)
+            work_eta_z = torch.zeros_like(lambda_ey)
+            bggrad_grad_f0 = grad_f0
+            bggrad_grad_ca = grad_ca
+            bggrad_grad_cb = grad_cb
+            if needs_background_backward:
+                bggrad_grad_f0 = torch.zeros_like(grad_f0) if grad_f0.numel() > 0 else grad_f0
+                bggrad_grad_ca = torch.zeros_like(grad_ca) if grad_ca.numel() > 0 else grad_ca
+                bggrad_grad_cb = torch.zeros_like(grad_cb) if grad_cb.numel() > 0 else grad_cb
+            bggrad_grad_ca_shot_ptr = (
+                bggrad_grad_ca if ctx.ca_batched else grad_ca_shot_ptr
+            )
+            bggrad_grad_cb_shot_ptr = (
+                bggrad_grad_cb if ctx.cb_batched else grad_cb_shot_ptr
+            )
+            _zero_tensors_(
+                lambda_ey,
+                lambda_hx,
+                lambda_hz,
+                m_lambda_ey_x,
+                m_lambda_ey_z,
+                m_lambda_hx_z,
+                m_lambda_hz_x,
+                bg_eta_ey,
+                bg_eta_hx,
+                bg_eta_hz,
+                m_eta_ey_x,
+                m_eta_ey_z,
+                m_eta_hx_z,
+                m_eta_hz_x,
+                eta_source_old,
+                work_eta_x,
+                work_eta_z,
+            )
+            if not ctx.ca_batched:
+                _zero_tensors_(grad_ca_shot, grad_dca_shot)
+            if not ctx.cb_batched:
+                _zero_tensors_(grad_cb_shot, grad_dcb_shot)
+            bggrad_func = backend_utils.get_backend_function(
+                "maxwell_tm",
+                "born_backward_bggrad",
+                ctx.accuracy,
+                coeff_dtype,
+                ctx.backend_device,
+            )
+            bggrad_func(
+                backend_utils.tensor_to_ptr(ca),
+                backend_utils.tensor_to_ptr(cb),
+                backend_utils.tensor_to_ptr(cq),
+                backend_utils.tensor_to_ptr(dca),
+                backend_utils.tensor_to_ptr(dcb),
+                backend_utils.tensor_to_ptr(f0),
+                backend_utils.tensor_to_ptr(df),
+                backend_utils.tensor_to_ptr(grad_r),
+                backend_utils.tensor_to_ptr(ey_store_1),
+                backend_utils.tensor_to_ptr(ey_store_3),
+                ey_filenames_ptr,
+                backend_utils.tensor_to_ptr(curl_store_1),
+                backend_utils.tensor_to_ptr(curl_store_3),
+                curl_filenames_ptr,
+                backend_utils.tensor_to_ptr(dey_store),
+                backend_utils.tensor_to_ptr(dcurl_store),
+                backend_utils.tensor_to_ptr(lambda_ey),
+                backend_utils.tensor_to_ptr(lambda_hx),
+                backend_utils.tensor_to_ptr(lambda_hz),
+                backend_utils.tensor_to_ptr(bg_eta_ey),
+                backend_utils.tensor_to_ptr(bg_eta_hx),
+                backend_utils.tensor_to_ptr(bg_eta_hz),
+                backend_utils.tensor_to_ptr(bggrad_grad_f0),
+                backend_utils.tensor_to_ptr(grad_f),
+                backend_utils.tensor_to_ptr(bggrad_grad_ca),
+                backend_utils.tensor_to_ptr(bggrad_grad_cb),
+                backend_utils.tensor_to_ptr(grad_dca),
+                backend_utils.tensor_to_ptr(grad_dcb),
+                backend_utils.tensor_to_ptr(m_lambda_ey_x),
+                backend_utils.tensor_to_ptr(m_lambda_ey_z),
+                backend_utils.tensor_to_ptr(m_lambda_hx_z),
+                backend_utils.tensor_to_ptr(m_lambda_hz_x),
+                backend_utils.tensor_to_ptr(m_eta_ey_x),
+                backend_utils.tensor_to_ptr(m_eta_ey_z),
+                backend_utils.tensor_to_ptr(m_eta_hx_z),
+                backend_utils.tensor_to_ptr(m_eta_hz_x),
+                backend_utils.tensor_to_ptr(eta_source_old),
+                backend_utils.tensor_to_ptr(work_eta_x),
+                backend_utils.tensor_to_ptr(work_eta_z),
+                backend_utils.tensor_to_ptr(bggrad_grad_ca_shot_ptr),
+                backend_utils.tensor_to_ptr(bggrad_grad_cb_shot_ptr),
+                backend_utils.tensor_to_ptr(grad_dca_shot_ptr),
+                backend_utils.tensor_to_ptr(grad_dcb_shot_ptr),
+                backend_utils.tensor_to_ptr(ay),
+                backend_utils.tensor_to_ptr(by),
+                backend_utils.tensor_to_ptr(ay_h),
+                backend_utils.tensor_to_ptr(by_h),
+                backend_utils.tensor_to_ptr(ax),
+                backend_utils.tensor_to_ptr(bx),
+                backend_utils.tensor_to_ptr(ax_h),
+                backend_utils.tensor_to_ptr(bx_h),
+                backend_utils.tensor_to_ptr(ky),
+                backend_utils.tensor_to_ptr(ky_h),
+                backend_utils.tensor_to_ptr(kx),
+                backend_utils.tensor_to_ptr(kx_h),
+                backend_utils.tensor_to_ptr(sources_i),
+                backend_utils.tensor_to_ptr(receivers_i),
+                ctx.rdy,
+                ctx.rdx,
+                ctx.dt,
+                ctx.nt,
+                ctx.n_shots,
+                ctx.ny,
+                ctx.nx,
+                ctx.n_sources,
+                ctx.n_receivers,
+                ctx.step_ratio,
+                ctx.storage_mode,
+                ctx.storage_format,
+                ctx.shot_bytes_uncomp,
+                store_ey_needed,
+                store_curl_needed,
+                ctx.ca_batched,
+                ctx.cb_batched,
+                ctx.cq_batched,
+                ctx.nt,
+                ctx.pml_y0,
+                ctx.pml_x0,
+                ctx.pml_y1,
+                ctx.pml_x1,
+                ctx.n_threads,
+                device_idx,
+                compute_stream_handle,
+                storage_stream_handle,
+            )
+            if needs_background_backward:
+                if bggrad_grad_f0.numel() > 0:
+                    grad_f0.add_(bggrad_grad_f0)
+                if bggrad_grad_ca.numel() > 0:
+                    grad_ca.add_(bggrad_grad_ca)
+                if bggrad_grad_cb.numel() > 0:
+                    grad_cb.add_(bggrad_grad_cb)
+        elif needs_born_backward:
+            _zero_tensors_(
+                lambda_ey,
+                lambda_hx,
+                lambda_hz,
+                m_lambda_ey_x,
+                m_lambda_ey_z,
+                m_lambda_hx_z,
+                m_lambda_hz_x,
+                work_x,
+                work_z,
+                grad_dca_shot,
+                grad_dcb_shot,
+            )
+            backward_func = backend_utils.get_backend_function(
+                "maxwell_tm",
+                "born_backward",
+                ctx.accuracy,
+                coeff_dtype,
+                ctx.backend_device,
+            )
+            backward_func(
+                backend_utils.tensor_to_ptr(ca),
+                backend_utils.tensor_to_ptr(cb),
+                backend_utils.tensor_to_ptr(cq),
+                backend_utils.tensor_to_ptr(grad_r),
+                backend_utils.tensor_to_ptr(lambda_ey),
+                backend_utils.tensor_to_ptr(lambda_hx),
+                backend_utils.tensor_to_ptr(lambda_hz),
+                backend_utils.tensor_to_ptr(m_lambda_ey_x),
+                backend_utils.tensor_to_ptr(m_lambda_ey_z),
+                backend_utils.tensor_to_ptr(m_lambda_hx_z),
+                backend_utils.tensor_to_ptr(m_lambda_hz_x),
+                backend_utils.tensor_to_ptr(ey_store_1),
+                backend_utils.tensor_to_ptr(ey_store_3),
+                ey_filenames_ptr,
+                backend_utils.tensor_to_ptr(curl_store_1),
+                backend_utils.tensor_to_ptr(curl_store_3),
+                curl_filenames_ptr,
+                backend_utils.tensor_to_ptr(grad_f),
+                backend_utils.tensor_to_ptr(grad_dca),
+                backend_utils.tensor_to_ptr(grad_dcb),
+                backend_utils.tensor_to_ptr(grad_dca_shot_ptr),
+                backend_utils.tensor_to_ptr(grad_dcb_shot_ptr),
+                backend_utils.tensor_to_ptr(work_x),
+                backend_utils.tensor_to_ptr(work_z),
+                backend_utils.tensor_to_ptr(ay),
+                backend_utils.tensor_to_ptr(by),
+                backend_utils.tensor_to_ptr(ay_h),
+                backend_utils.tensor_to_ptr(by_h),
+                backend_utils.tensor_to_ptr(ax),
+                backend_utils.tensor_to_ptr(bx),
+                backend_utils.tensor_to_ptr(ax_h),
+                backend_utils.tensor_to_ptr(bx_h),
+                backend_utils.tensor_to_ptr(ky),
+                backend_utils.tensor_to_ptr(ky_h),
+                backend_utils.tensor_to_ptr(kx),
+                backend_utils.tensor_to_ptr(kx_h),
+                backend_utils.tensor_to_ptr(sources_i),
+                backend_utils.tensor_to_ptr(receivers_i),
+                ctx.rdy,
+                ctx.rdx,
+                ctx.dt,
+                ctx.nt,
+                ctx.n_shots,
+                ctx.ny,
+                ctx.nx,
+                ctx.n_sources,
+                ctx.n_receivers,
+                ctx.step_ratio,
+                ctx.storage_mode,
+                ctx.storage_format,
+                ctx.shot_bytes_uncomp,
+                ctx.dca_requires_grad,
+                ctx.dcb_requires_grad,
+                ctx.ca_batched,
+                ctx.cb_batched,
+                ctx.cq_batched,
+                ctx.nt,
+                ctx.pml_y0,
+                ctx.pml_x0,
+                ctx.pml_y1,
+                ctx.pml_x1,
+                ctx.n_threads,
+                device_idx,
+                compute_stream_handle,
+                storage_stream_handle,
+            )
 
         if ctx.dca_requires_grad and not ctx.ca_batched:
-            grad_ca = grad_ca.unsqueeze(0)
+            grad_dca = grad_dca.unsqueeze(0)
         if ctx.dcb_requires_grad and not ctx.cb_batched:
+            grad_dcb = grad_dcb.unsqueeze(0)
+        if bg_ca_requires_grad and not ctx.ca_batched:
+            grad_ca = grad_ca.unsqueeze(0)
+        if bg_cb_requires_grad and not ctx.cb_batched:
             grad_cb = grad_cb.unsqueeze(0)
 
         grads: list[torch.Tensor | None] = [None] * ctx.n_inputs
-        grads[0] = grad_ca if ctx.dca_requires_grad else None
-        grads[1] = grad_cb if ctx.dcb_requires_grad else None
+        grads[0] = grad_dca if ctx.dca_requires_grad else None
+        grads[1] = grad_dcb if ctx.dcb_requires_grad else None
+        grads[2] = grad_ca if bg_ca_requires_grad else None
+        grads[3] = grad_cb if bg_cb_requires_grad else None
+        grads[5] = (
+            grad_f0.reshape(ctx.nt * ctx.n_shots * ctx.n_sources)
+            if f0_requires_grad and ctx.n_sources > 0
+            else None
+        )
         grads[6] = (
             grad_f.reshape(ctx.nt * ctx.n_shots * ctx.n_sources)
-            if ctx.df_requires_grad and ctx.n_sources > 0
+            if ctx.df_requires_grad and ctx.n_sources > 0 and grad_f.numel() > 0
             else None
         )
 
         _release_ctx_handle(getattr(ctx, "_ctx_handle_id", None))
         return tuple(grads)
 
+def tm2d_receiver_hvp_naive(
+    epsilon: torch.Tensor,
+    sigma: torch.Tensor,
+    mu: torch.Tensor,
+    *,
+    vepsilon: torch.Tensor | None = None,
+    vsigma: torch.Tensor | None = None,
+    grid_spacing: float | Sequence[float],
+    dt: float,
+    source_amplitude: torch.Tensor | None,
+    source_location: torch.Tensor | None,
+    receiver_location: torch.Tensor | None,
+    observed_data: torch.Tensor,
+    misfit_fn: ReceiverMisfit,
+    stencil: int = 2,
+    pml_width: int | Sequence[int] = 20,
+    max_vel: float | None = None,
+    nt: int | None = None,
+    model_gradient_sampling_interval: int = 1,
+    linearize_source: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference TM2D receiver-space HVP on the Python Maxwell/Born path."""
+    if vepsilon is None and vsigma is None:
+        raise ValueError("At least one of vepsilon or vsigma must be provided.")
+    model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
+        model_gradient_sampling_interval
+    )
+    if model_gradient_sampling_interval > 1:
+        raise NotImplementedError(
+            "Python TM2D HVP currently requires "
+            "model_gradient_sampling_interval in {0, 1}."
+        )
 
-__all__ = ["BornTMForwardFunc"]
+    from .tm2d import maxwelltm
+    from .tm2d_born import borntm
+
+    epsilon_req = _clone_param(epsilon)
+    sigma_req = _clone_param(sigma)
+    mu_fixed = mu.detach()
+    if vepsilon is None:
+        vepsilon = torch.zeros_like(epsilon_req)
+    if vsigma is None:
+        vsigma = torch.zeros_like(sigma_req)
+
+    predicted_data = maxwelltm(
+        epsilon_req,
+        sigma_req,
+        mu_fixed,
+        grid_spacing=grid_spacing,
+        dt=dt,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        stencil=stencil,
+        pml_width=pml_width,
+        max_vel=max_vel,
+        nt=nt,
+        model_gradient_sampling_interval=model_gradient_sampling_interval,
+        python_backend=True,
+    )[-1]
+    delta_predicted_data = borntm(
+        epsilon_req,
+        sigma_req,
+        mu_fixed,
+        grid_spacing=grid_spacing,
+        dt=dt,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        depsilon=vepsilon,
+        dsigma=vsigma,
+        stencil=stencil,
+        pml_width=pml_width,
+        max_vel=max_vel,
+        nt=nt,
+        linearize_source=linearize_source,
+        python_backend=True,
+    )[-1]
+    hvp_epsilon, hvp_sigma = _directional_receiver_hvp(
+        params=(epsilon_req, sigma_req),
+        observed_data=observed_data,
+        misfit_fn=misfit_fn,
+        predicted_data=predicted_data,
+        delta_predicted_data=delta_predicted_data,
+    )
+    return hvp_epsilon, hvp_sigma
+
+
+def tm2d_receiver_hvp_native(
+    epsilon: torch.Tensor,
+    sigma: torch.Tensor,
+    mu: torch.Tensor,
+    *,
+    vepsilon: torch.Tensor | None = None,
+    vsigma: torch.Tensor | None = None,
+    grid_spacing: float | Sequence[float],
+    dt: float,
+    source_amplitude: torch.Tensor | None,
+    source_location: torch.Tensor | None,
+    receiver_location: torch.Tensor | None,
+    observed_data: torch.Tensor,
+    misfit_fn: ReceiverMisfit,
+    stencil: int = 2,
+    pml_width: int | Sequence[int] = 0,
+    max_vel: float | None = None,
+    nt: int | None = None,
+    model_gradient_sampling_interval: int = 1,
+    linearize_source: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """TM2D native receiver-space HVP via the native Born bggrad path."""
+    from .. import backend_utils
+    from ..grid_utils import _normalize_pml_width_2d
+    from .tm2d_born_cuda import borntm_c_cuda
+
+    if vepsilon is None and vsigma is None:
+        raise ValueError("At least one of vepsilon or vsigma must be provided.")
+    model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
+        model_gradient_sampling_interval
+    )
+    if not backend_utils.is_backend_available():
+        raise RuntimeError("Native TM2D HVP requires the compiled backend.")
+    if epsilon.device.type not in {"cpu", "cuda"}:
+        raise NotImplementedError(
+            "Native TM2D HVP currently supports cpu and cuda devices only."
+        )
+    if epsilon.device.type == "cpu" and model_gradient_sampling_interval > 1:
+        raise NotImplementedError(
+            "Native TM2D HVP on CPU currently requires "
+            "model_gradient_sampling_interval in {0, 1}."
+        )
+    _normalize_pml_width_2d(pml_width)
+
+    epsilon_req = _clone_param(epsilon)
+    sigma_req = _clone_param(sigma)
+    mu_fixed = mu.detach()
+    if vepsilon is None:
+        vepsilon = torch.zeros_like(epsilon_req)
+    if vsigma is None:
+        vsigma = torch.zeros_like(sigma_req)
+    storage_compression = (
+        "bf16"
+        if epsilon_req.device.type == "cuda" and epsilon_req.dtype == torch.float32
+        else False
+    )
+
+    born_outputs = borntm_c_cuda(
+        epsilon_req,
+        sigma_req,
+        mu_fixed,
+        vepsilon,
+        vsigma,
+        None,
+        None,
+        grid_spacing,
+        dt,
+        source_amplitude,
+        source_location,
+        receiver_location,
+        stencil,
+        pml_width,
+        max_vel,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        nt,
+        "epsilon_sigma",
+        model_gradient_sampling_interval,
+        linearize_source,
+        storage_mode="device",
+        storage_compression=storage_compression,
+        return_background_receiver_amplitudes=True,
+    )
+    delta_predicted_data = born_outputs[-2]
+    predicted_data = born_outputs[-1]
+    hvp_epsilon, hvp_sigma = _directional_receiver_hvp(
+        params=(epsilon_req, sigma_req),
+        observed_data=observed_data,
+        misfit_fn=misfit_fn,
+        predicted_data=predicted_data,
+        delta_predicted_data=delta_predicted_data,
+    )
+    return hvp_epsilon, hvp_sigma
+
+
+__all__ = [
+    "BornTMForwardFunc",
+    "tm2d_receiver_hvp_naive",
+    "tm2d_receiver_hvp_native",
+]

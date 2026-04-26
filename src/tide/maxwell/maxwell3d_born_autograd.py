@@ -1,9 +1,15 @@
+from collections.abc import Sequence
 from typing import Any
 
 import torch
 
 from ..storage import STORAGE_DEVICE, STORAGE_NONE
-from .common import _make_storage_streams
+from .common import (
+    ReceiverMisfit,
+    _clone_param,
+    _directional_receiver_hvp,
+    _make_storage_streams,
+)
 
 
 class Born3DForwardFunc(torch.autograd.Function):
@@ -738,4 +744,91 @@ class Born3DForwardFunc(torch.autograd.Function):
         )
 
 
-__all__ = ["Born3DForwardFunc"]
+def maxwell3d_receiver_hvp_naive(
+    epsilon: torch.Tensor,
+    sigma: torch.Tensor,
+    mu: torch.Tensor,
+    *,
+    vepsilon: torch.Tensor | None = None,
+    vsigma: torch.Tensor | None = None,
+    grid_spacing: float | Sequence[float],
+    dt: float,
+    source_amplitude: torch.Tensor | None,
+    source_location: torch.Tensor | None,
+    receiver_location: torch.Tensor | None,
+    observed_data: torch.Tensor,
+    misfit_fn: ReceiverMisfit,
+    stencil: int = 2,
+    pml_width: int | Sequence[int] = 20,
+    max_vel: float | None = None,
+    nt: int | None = None,
+    linearize_source: bool = True,
+    source_component: str = "ey",
+    receiver_component: str = "ey",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference 3D receiver-space HVP on the Python Maxwell/Born path."""
+    if vepsilon is None and vsigma is None:
+        raise ValueError("At least one of vepsilon or vsigma must be provided.")
+
+    from .maxwell3d import maxwell3d
+    from .maxwell3d_born import born3d
+
+    epsilon_req = _clone_param(epsilon)
+    sigma_req = _clone_param(sigma)
+    mu_fixed = mu.detach()
+    if vepsilon is None:
+        vepsilon = torch.zeros_like(epsilon_req)
+    if vsigma is None:
+        vsigma = torch.zeros_like(sigma_req)
+
+    predicted_data = maxwell3d(
+        epsilon_req,
+        sigma_req,
+        mu_fixed,
+        grid_spacing=grid_spacing,
+        dt=dt,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        stencil=stencil,
+        pml_width=pml_width,
+        max_vel=max_vel,
+        nt=nt,
+        source_component=source_component,
+        receiver_component=receiver_component,
+        python_backend=True,
+    )[-1]
+    delta_predicted_data = born3d(
+        epsilon_req,
+        sigma_req,
+        mu_fixed,
+        grid_spacing=grid_spacing,
+        dt=dt,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        depsilon=vepsilon,
+        dsigma=vsigma,
+        stencil=stencil,
+        pml_width=pml_width,
+        max_vel=max_vel,
+        nt=nt,
+        linearize_source=linearize_source,
+        source_component=source_component,
+        receiver_component=receiver_component,
+        python_backend=True,
+    )[-1]
+    hvp_epsilon, hvp_sigma = _directional_receiver_hvp(
+        params=(epsilon_req, sigma_req),
+        observed_data=observed_data,
+        misfit_fn=misfit_fn,
+        predicted_data=predicted_data,
+        delta_predicted_data=delta_predicted_data,
+    )
+    return hvp_epsilon, hvp_sigma
+
+
+__all__ = [
+    "Born3DForwardFunc",
+    "maxwell3d_receiver_hvp_naive",
+]

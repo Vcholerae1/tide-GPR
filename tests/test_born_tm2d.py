@@ -1,3 +1,5 @@
+import warnings
+
 import pytest
 import torch
 
@@ -398,3 +400,78 @@ def test_native_borntm_autograd_matches_python_reference(born_tm_setup):
     )[0]
 
     torch.testing.assert_close(grad_native, grad_reference, atol=1e-9, rtol=1e-8)
+
+
+def test_native_borntm_supports_background_gradients_by_default(born_tm_setup):
+    if not backend_utils.is_backend_available():
+        pytest.skip("native backend not available")
+
+    torch.manual_seed(17)
+    setup = born_tm_setup
+    epsilon = setup["epsilon"]
+    sigma = setup["sigma"]
+    assert isinstance(epsilon, torch.Tensor)
+    assert isinstance(sigma, torch.Tensor)
+
+    residual = torch.randn(
+        24,
+        1,
+        2,
+        device=epsilon.device,
+        dtype=epsilon.dtype,
+    )
+    depsilon_seed = 0.05 * torch.randn_like(epsilon)
+
+    epsilon_native = epsilon.clone().detach().requires_grad_(True)
+    sigma_native = sigma.clone().detach().requires_grad_(True)
+    depsilon_native = depsilon_seed.clone().detach().requires_grad_(True)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pred_native = tide.borntm(
+            epsilon_native,
+            sigma_native,
+            setup["mu"],
+            grid_spacing=setup["grid_spacing"],
+            dt=setup["dt"],
+            source_amplitude=setup["source_amplitude"],
+            source_location=setup["source_location"],
+            receiver_location=setup["receiver_location"],
+            depsilon=depsilon_native,
+            pml_width=setup["pml_width"],
+            stencil=setup["stencil"],
+            linearize_source=True,
+            python_backend=False,
+        )[-1]
+    assert not any(
+        "background model requires gradients" in str(w.message) for w in caught
+    )
+    grad_native = torch.autograd.grad(
+        torch.sum(pred_native * residual),
+        (epsilon_native, sigma_native, depsilon_native),
+    )
+
+    epsilon_reference = epsilon.clone().detach().requires_grad_(True)
+    sigma_reference = sigma.clone().detach().requires_grad_(True)
+    depsilon_reference = depsilon_seed.clone().detach().requires_grad_(True)
+    pred_reference = tide.borntm(
+        epsilon_reference,
+        sigma_reference,
+        setup["mu"],
+        grid_spacing=setup["grid_spacing"],
+        dt=setup["dt"],
+        source_amplitude=setup["source_amplitude"],
+        source_location=setup["source_location"],
+        receiver_location=setup["receiver_location"],
+        depsilon=depsilon_reference,
+        pml_width=setup["pml_width"],
+        stencil=setup["stencil"],
+        linearize_source=True,
+        python_backend=True,
+    )[-1]
+    grad_reference = torch.autograd.grad(
+        torch.sum(pred_reference * residual),
+        (epsilon_reference, sigma_reference, depsilon_reference),
+    )
+
+    for grad_n, grad_r in zip(grad_native, grad_reference):
+        torch.testing.assert_close(grad_n, grad_r, atol=1e-8, rtol=1e-7)

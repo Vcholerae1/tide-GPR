@@ -30,7 +30,9 @@ from .maxwell import (
     born3d,
     borntm,
     maxwell3d,
+    maxwell3d_hvp,
     maxwelltm,
+    maxwelltm_hvp,
 )
 from .padding import create_or_pad, reverse_pad, zero_interior
 from .resampling import downsample, downsample_and_movedim, upsample
@@ -64,6 +66,8 @@ __all__ = [
     # Functions
     "maxwelltm",
     "maxwell3d",
+    "maxwelltm_hvp",
+    "maxwell3d_hvp",
     "born3d",
     "borntm",
     "create_callback_state",
@@ -85,4 +89,4 @@ __all__ = [
 ]
 
 
-__version__ = "0.0.25"
+__version__ = "0.0.26"

@@ -620,7 +620,8 @@ static TIDE_HOST_DEVICE void forward_kernel_e_born_with_storage_core(
     GridParams<T> const &params, T const *ca_ptr, T const *cb_ptr,
     T const *dca_ptr, T const *dcb_ptr, T const *hx, T const *hz, T *ey,
     T *m_hx_z, T *m_hz_x, T const *dhx, T const *dhz, T *dey, T *dm_hx_z,
-    T *dm_hz_x, StoreT *ey_store, StoreT *curl_h_store,
+    T *dm_hz_x, StoreT *ey_store, StoreT *curl_h_store, T *dey_store,
+    T *dcurl_h_store,
     bool ca_requires_grad, bool cb_requires_grad, int64_t y, int64_t x,
     int64_t shot_idx) {
 
@@ -679,6 +680,7 @@ static TIDE_HOST_DEVICE void forward_kernel_e_born_with_storage_core(
 
     T const dcurl_h = ddhz_dx - ddhx_dz;
     T const ey_n = ey[i];
+    T const dey_n = dey[i];
 
     if (ca_requires_grad && ey_store != nullptr) {
       ey_store[i] = encode_snapshot<StoreT, T>(ey_n);
@@ -686,10 +688,74 @@ static TIDE_HOST_DEVICE void forward_kernel_e_born_with_storage_core(
     if (cb_requires_grad && curl_h_store != nullptr) {
       curl_h_store[i] = encode_snapshot<StoreT, T>(curl_h);
     }
+    if (dey_store != nullptr) {
+      dey_store[i] = dey_n;
+    }
+    if (dcurl_h_store != nullptr) {
+      dcurl_h_store[i] = dcurl_h;
+    }
 
     ey[i] = ca_val * ey_n + cb_val * curl_h;
-    dey[i] = ca_val * dey[i] + cb_val * dcurl_h + dca_val * ey_n +
+    dey[i] = ca_val * dey_n + cb_val * dcurl_h + dca_val * ey_n +
              dcb_val * curl_h;
+  }
+}
+
+// Direct bggrad preparation for the full Hessian path. This accumulates the
+// local ca/cb direct term and emits the transposed dcb * lambda contribution
+// into alpha_h* without requiring scattered CPML memory reconstruction.
+template <typename T, int STENCIL_ORDER>
+static TIDE_HOST_DEVICE void born_background_prepare_direct_core(
+    GridParams<T> const &params, T const *dca_ptr, T const *dcb_ptr,
+    T const *lambda_sc_ey, T const *dey_store, T const *dcurl_h_store,
+    T *grad_ca_shot, T *grad_cb_shot, T *eta_source_old, T *alpha_hz_x,
+    T *alpha_hx_z, int64_t step_ratio_val, int64_t y, int64_t x,
+    int64_t shot_idx) {
+
+  if (y < 0 || x < 0 || y >= params.ny || x >= params.nx ||
+      shot_idx >= params.n_shots) {
+    return;
+  }
+
+  int const FD_PAD = tide::StencilTraits<STENCIL_ORDER>::FD_PAD;
+  int64_t const j = y * params.nx + x;
+  int64_t const i = shot_idx * params.shot_numel + j;
+
+  alpha_hz_x[i] = static_cast<T>(0);
+  alpha_hx_z[i] = static_cast<T>(0);
+  eta_source_old[i] = static_cast<T>(0);
+
+  if (y < FD_PAD || x < FD_PAD || y >= params.ny - FD_PAD + 1 ||
+      x >= params.nx - FD_PAD + 1) {
+    return;
+  }
+
+  T const dca_val = params.ca_batched ? dca_ptr[i] : dca_ptr[j];
+  T const dcb_val = params.cb_batched ? dcb_ptr[i] : dcb_ptr[j];
+  T const lambda_curr = lambda_sc_ey[i];
+
+  if (grad_ca_shot != nullptr && dey_store != nullptr) {
+    grad_ca_shot[i] += lambda_curr * dey_store[i] * static_cast<T>(step_ratio_val);
+  }
+  if (grad_cb_shot != nullptr && dcurl_h_store != nullptr) {
+    grad_cb_shot[i] +=
+        lambda_curr * dcurl_h_store[i] * static_cast<T>(step_ratio_val);
+  }
+
+  eta_source_old[i] = dca_val * lambda_curr;
+
+  T const beta_x = dcb_val * lambda_curr;
+  if (x >= params.pml_x0 && x < params.pml_x1) {
+    alpha_hz_x[i] = beta_x;
+  } else {
+    alpha_hz_x[i] = beta_x / params.kx[x] + params.ax[x] * beta_x;
+  }
+
+  T const beta_z = -dcb_val * lambda_curr;
+  if (y >= params.pml_y0 && y < params.pml_y1) {
+    alpha_hx_z[i] = beta_z;
+  } else {
+    alpha_hx_z[i] = beta_z / params.ky[y] + params.ay[y] * beta_z;
   }
 }
 
