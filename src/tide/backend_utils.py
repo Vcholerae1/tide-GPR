@@ -488,6 +488,11 @@ _3D_BORN_FORWARD_WITH_STORAGE_SPEC: _Spec = [
         "ex_s1,ex_s3,ex_fn, ey_s1,ey_s3,ey_fn, ez_s1,ez_s3,ez_fn, "
         "cx_s1,cx_s3,cx_fn, cy_s1,cy_s3,cy_fn, cz_s1,cz_s3,cz_fn",
     ),
+    (
+        _P,
+        6,
+        "dex_store, dey_store, dez_store, dcurl_x_store, dcurl_y_store, dcurl_z_store",
+    ),
     *_3D_PML_PROFILES,
     *_3D_COMMON_TAIL,
     *_3D_STORAGE_TAIL,
@@ -515,6 +520,43 @@ _3D_BORN_BACKWARD_SPEC: _Spec = [
     (_P, 2, "compute_stream, storage_stream"),
 ]
 
+_3D_BORN_BACKWARD_BGGRAD_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 2, "dca, dcb"),
+    (_P, 2, "f0, df"),
+    (_P, 1, "grad_r"),
+    *_3D_ADJ_FIELDS,
+    (_P, 6, "eta_ex, eta_ey, eta_ez, eta_hx, eta_hy, eta_hz"),
+    (
+        _P,
+        12,
+        "m_eta_ey_z, m_eta_ez_y, m_eta_ez_x, m_eta_ex_z, "
+        "m_eta_ex_y, m_eta_ey_x, m_eta_hz_y, m_eta_hy_z, "
+        "m_eta_hx_z, m_eta_hz_x, m_eta_hy_x, m_eta_hx_y",
+    ),
+    (
+        _P,
+        18,
+        "ex_s1,ex_s3,ex_fn, ey_s1,ey_s3,ey_fn, ez_s1,ez_s3,ez_fn, "
+        "cx_s1,cx_s3,cx_fn, cy_s1,cy_s3,cy_fn, cz_s1,cz_s3,cz_fn",
+    ),
+    (
+        _P,
+        6,
+        "dex_store, dey_store, dez_store, dcurl_x_store, dcurl_y_store, dcurl_z_store",
+    ),
+    (_P, 2, "grad_f0, grad_df"),
+    (_P, 4, "grad_ca, grad_cb, grad_dca, grad_dcb"),
+    (_P, 4, "grad_ca_shot, grad_cb_shot, grad_dca_shot, grad_dcb_shot"),
+    (_P, 3, "eta_source_ex, eta_source_ey, eta_source_ez"),
+    *_3D_PML_PROFILES,
+    *_3D_COMMON_TAIL,
+    (_I, 3, "storage_mode, storage_format, shot_bytes_uncomp"),
+    (_B, 4, "ca_requires_grad, cb_requires_grad, dca_requires_grad, dcb_requires_grad"),
+    *_3D_BATCHED_FLAGS,
+    (_P, 2, "compute_stream, storage_stream"),
+]
+
 # Flat template registry.
 _TEMPLATE_SPECS: dict[str, _Spec] = {
     "maxwell_tm_forward": _TM_FORWARD_SPEC,
@@ -530,6 +572,7 @@ _TEMPLATE_SPECS: dict[str, _Spec] = {
     "maxwell_3d_born_forward": _3D_BORN_FORWARD_SPEC,
     "maxwell_3d_born_forward_with_storage": _3D_BORN_FORWARD_WITH_STORAGE_SPEC,
     "maxwell_3d_born_backward": _3D_BORN_BACKWARD_SPEC,
+    "maxwell_3d_born_backward_bggrad": _3D_BORN_BACKWARD_BGGRAD_SPEC,
 }
 
 _ARGTYPES_CACHE: dict[tuple[str, str], list[Any]] = {}

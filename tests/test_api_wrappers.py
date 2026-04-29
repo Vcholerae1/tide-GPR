@@ -10,7 +10,9 @@ def _receiver_misfit(predicted: torch.Tensor, observed: torch.Tensor) -> torch.T
     return 0.5 * residual.square().sum() + 0.01 * predicted.sin().sum()
 
 
-def _tm_observed_data(case: dict[str, torch.Tensor | float], device: torch.device) -> torch.Tensor:
+def _tm_observed_data(
+    case: dict[str, torch.Tensor | float], device: torch.device
+) -> torch.Tensor:
     source_amplitude = case["source_amplitude"]
     receiver_location = case["receiver_location"]
     epsilon = case["epsilon"]
@@ -77,7 +79,9 @@ def _build_3d_case(device: torch.device):
         dtype=dtype,
         device=device,
     ).view(1, 1, nt)
-    observed_data = torch.zeros(nt, 1, receiver_location.shape[1], device=device, dtype=dtype)
+    observed_data = torch.zeros(
+        nt, 1, receiver_location.shape[1], device=device, dtype=dtype
+    )
     return {
         "epsilon": epsilon,
         "sigma": sigma,
@@ -504,6 +508,57 @@ def test_maxwell3d_hvp_module_matches_functional_cpu():
         pml_width=1,
         source_component=case["source_component"],
         receiver_component=case["receiver_component"],
+    )
+
+    for module_out, func_out in zip(module_hvp, func_hvp):
+        torch.testing.assert_close(module_out, func_out)
+
+
+@pytest.mark.skipif(
+    not backend_utils.is_backend_available(), reason="native backend not available"
+)
+def test_maxwell3d_hvp_native_module_matches_functional_cpu():
+    device = torch.device("cpu")
+    case = _build_3d_case(device)
+
+    model = tide.Maxwell3D(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        grid_spacing=case["grid_spacing"],
+    )
+
+    module_hvp = model.hvp(
+        dt=case["dt"],
+        source_amplitude=case["source_amplitude"],
+        source_location=case["source_location"],
+        receiver_location=case["receiver_location"],
+        observed_data=case["observed_data"],
+        vepsilon=case["depsilon"],
+        vsigma=case["dsigma"],
+        stencil=2,
+        pml_width=1,
+        source_component=case["source_component"],
+        receiver_component=case["receiver_component"],
+        python_backend=False,
+    )
+    func_hvp = tide.maxwell3d_hvp(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        grid_spacing=case["grid_spacing"],
+        dt=case["dt"],
+        source_amplitude=case["source_amplitude"],
+        source_location=case["source_location"],
+        receiver_location=case["receiver_location"],
+        observed_data=case["observed_data"],
+        vepsilon=case["depsilon"],
+        vsigma=case["dsigma"],
+        stencil=2,
+        pml_width=1,
+        source_component=case["source_component"],
+        receiver_component=case["receiver_component"],
+        python_backend=False,
     )
 
     for module_out, func_out in zip(module_hvp, func_hvp):

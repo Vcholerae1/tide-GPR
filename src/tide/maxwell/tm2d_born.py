@@ -7,6 +7,7 @@ import torch
 from ..cfl import cfl_condition
 from ..resampling import downsample_and_movedim, upsample
 from ..utils import C0
+from ..validation import validate_model_gradient_sampling_interval
 from .tm2d_born_cuda import borntm_c_cuda
 from .tm2d_born_python import borntm_python
 from .validation_internal import _validate_optional_bool, _validate_tensor_arg
@@ -117,6 +118,7 @@ class BornTM(torch.nn.Module):
         dm_Hx_z_0: torch.Tensor | None = None,
         dm_Hz_x_0: torch.Tensor | None = None,
         nt: int | None = None,
+        model_gradient_sampling_interval: int = 1,
         linearize_source: bool | None = None,
         freq_taper_frac: float = 0.0,
         time_pad_frac: float = 0.0,
@@ -166,6 +168,7 @@ class BornTM(torch.nn.Module):
             dm_Hx_z_0=dm_Hx_z_0,
             dm_Hz_x_0=dm_Hz_x_0,
             nt=nt,
+            model_gradient_sampling_interval=model_gradient_sampling_interval,
             parameterization=self.parameterization,
             linearize_source=linearize_source,
             freq_taper_frac=freq_taper_frac,
@@ -214,6 +217,7 @@ def borntm(
     dm_Hx_z_0: torch.Tensor | None = None,
     dm_Hz_x_0: torch.Tensor | None = None,
     nt: int | None = None,
+    model_gradient_sampling_interval: int = 1,
     parameterization: Literal["epsilon_sigma", "ca_cb"] = "epsilon_sigma",
     linearize_source: bool = True,
     freq_taper_frac: float = 0.0,
@@ -245,6 +249,9 @@ def borntm(
     """
     if epsilon.ndim != 2:
         raise NotImplementedError("borntm currently supports a single 2D model only.")
+    model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
+        model_gradient_sampling_interval
+    )
 
     if isinstance(python_backend, bool):
         use_python = python_backend
@@ -368,7 +375,7 @@ def borntm(
             dm_Hz_x_0,
             nt_internal,
             parameterization,
-            1,
+            model_gradient_sampling_interval,
             linearize_source,
             storage_mode=storage_mode,
             storage_path=storage_path,
@@ -401,6 +408,7 @@ def borntm(
                 m_Hx_z=m_Hx_z_0,
                 m_Hz_x=m_Hz_x_0,
                 nt=nt,
+                model_gradient_sampling_interval=model_gradient_sampling_interval,
                 freq_taper_frac=freq_taper_frac,
                 time_pad_frac=time_pad_frac,
                 time_taper=time_taper,

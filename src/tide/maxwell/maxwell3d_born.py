@@ -7,6 +7,7 @@ import torch
 from ..cfl import cfl_condition
 from ..resampling import downsample_and_movedim, upsample
 from ..utils import C0
+from ..validation import validate_model_gradient_sampling_interval
 from .maxwell3d_born_cuda import born3d_c_cuda
 from .maxwell3d_born_python import born3d_python
 from .validation_internal import (
@@ -143,6 +144,7 @@ class Born3D(torch.nn.Module):
         dm_ex_y_0: torch.Tensor | None = None,
         dm_ey_x_0: torch.Tensor | None = None,
         nt: int | None = None,
+        model_gradient_sampling_interval: int = 1,
         linearize_source: bool | None = None,
         source_component: str = "ey",
         receiver_component: str = "ey",
@@ -216,6 +218,7 @@ class Born3D(torch.nn.Module):
             dm_ex_y_0=dm_ex_y_0,
             dm_ey_x_0=dm_ey_x_0,
             nt=nt,
+            model_gradient_sampling_interval=model_gradient_sampling_interval,
             parameterization=self.parameterization,
             linearize_source=linearize_source,
             source_component=source_component,
@@ -288,6 +291,7 @@ def born3d(
     dm_ex_y_0: torch.Tensor | None = None,
     dm_ey_x_0: torch.Tensor | None = None,
     nt: int | None = None,
+    model_gradient_sampling_interval: int = 1,
     parameterization: Literal["epsilon_sigma", "ca_cb"] = "epsilon_sigma",
     linearize_source: bool = True,
     source_component: str = "ey",
@@ -306,6 +310,9 @@ def born3d(
     """3D Maxwell Born propagator with background and scattered wavefields."""
     if epsilon.ndim != 3:
         raise NotImplementedError("born3d currently supports a single 3D model only.")
+    model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
+        model_gradient_sampling_interval
+    )
 
     if isinstance(python_backend, bool):
         use_python = python_backend
@@ -482,6 +489,7 @@ def born3d(
             dm_ey_x_0,
             nt_internal,
             parameterization,
+            model_gradient_sampling_interval,
             linearize_source,
             source_component,
             receiver_component,
@@ -527,6 +535,7 @@ def born3d(
                 m_ex_y=m_ex_y_0,
                 m_ey_x=m_ey_x_0,
                 nt=nt,
+                model_gradient_sampling_interval=model_gradient_sampling_interval,
                 freq_taper_frac=freq_taper_frac,
                 time_pad_frac=time_pad_frac,
                 time_taper=time_taper,

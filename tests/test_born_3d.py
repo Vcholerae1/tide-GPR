@@ -1,3 +1,5 @@
+import warnings
+
 import pytest
 import torch
 
@@ -257,9 +259,7 @@ def test_native_born3d_matches_python_reference(born_3d_setup):
 
 
 @pytest.mark.parametrize("linearize_source", [True, False])
-def test_born3d_autograd_passes_dot_product_test(
-    born_3d_setup, linearize_source: bool
-):
+def test_born3d_autograd_passes_dot_product_test(born_3d_setup, linearize_source: bool):
     torch.manual_seed(2)
     setup = born_3d_setup
     epsilon = setup["epsilon"]
@@ -405,6 +405,266 @@ def test_native_born3d_autograd_matches_python_reference(born_3d_setup):
     )[0]
 
     torch.testing.assert_close(grad_native, grad_reference, atol=1e-9, rtol=1e-8)
+
+
+def test_born3d_autograd_samples_saved_gradient_intermediates(monkeypatch):
+    from tide.maxwell.maxwell3d_born_autograd import Born3DForwardFunc
+
+    class _Ctx:
+        def save_for_backward(self, *tensors):
+            self.saved_tensors = tensors
+
+    def fake_backend(*_args):
+        return None
+
+    monkeypatch.setattr(backend_utils, "get_backend_function", lambda *_args: fake_backend)
+
+    device = torch.device("cpu")
+    dtype = torch.float64
+    nt, n_shots, nz, ny, nx = 7, 1, 3, 4, 5
+    field_shape = (n_shots, nz, ny, nx)
+    dca = torch.zeros(1, nz, ny, nx, device=device, dtype=dtype, requires_grad=True)
+    dcb = torch.zeros_like(dca)
+    ca = torch.ones_like(dca)
+    cb = torch.ones_like(dca)
+    cq = torch.ones_like(dca)
+    f0 = torch.empty(0, device=device, dtype=dtype)
+    df = torch.empty(0, device=device, dtype=dtype)
+    profiles = tuple(torch.zeros(1, device=device, dtype=dtype) for _ in range(18))
+    indices = (
+        torch.empty(0, device=device, dtype=torch.long),
+        torch.empty(0, device=device, dtype=torch.long),
+    )
+    background_wavefields = tuple(
+        torch.zeros(field_shape, device=device, dtype=dtype) for _ in range(18)
+    )
+    scattered_wavefields = tuple(
+        torch.zeros(field_shape, device=device, dtype=dtype) for _ in range(18)
+    )
+    ctx = _Ctx()
+
+    Born3DForwardFunc.forward(
+        ctx,
+        dca,
+        dcb,
+        ca,
+        cb,
+        cq,
+        f0,
+        df,
+        profiles,
+        indices,
+        background_wavefields,
+        scattered_wavefields,
+        {
+            "dt": 4.0e-11,
+            "nt": nt,
+            "n_shots": n_shots,
+            "nz": nz,
+            "ny": ny,
+            "nx": nx,
+            "n_sources": 0,
+            "n_receivers": 0,
+            "step_ratio": 3,
+            "accuracy": 2,
+            "pml_z0": 0,
+            "pml_y0": 0,
+            "pml_x0": 0,
+            "pml_z1": nz,
+            "pml_y1": ny,
+            "pml_x1": nx,
+            "source_component_idx": 1,
+            "receiver_component_idx": 1,
+            "n_threads": 0,
+            "rdz": 1.0,
+            "rdy": 1.0,
+            "rdx": 1.0,
+            "backend_device": device,
+        },
+    )
+
+    store_ex = ctx.saved_tensors[-12]
+    assert store_ex.shape == (3, n_shots, nz, ny, nx)
+    assert ctx.meta["step_ratio"] == 3
+
+
+def test_native_born3d_supports_background_gradients_by_default(
+    born_3d_setup, monkeypatch
+):
+    if not backend_utils.is_backend_available():
+        pytest.skip("native backend not available")
+
+    torch.manual_seed(17)
+    setup = born_3d_setup
+    epsilon = setup["epsilon"]
+    sigma = setup["sigma"]
+    mu = setup["mu"]
+    assert isinstance(epsilon, torch.Tensor)
+    assert isinstance(sigma, torch.Tensor)
+    assert isinstance(mu, torch.Tensor)
+
+    residual = torch.randn(
+        14,
+        1,
+        2,
+        device=epsilon.device,
+        dtype=epsilon.dtype,
+    )
+    depsilon_seed = 0.05 * torch.randn_like(epsilon)
+
+    epsilon_native = epsilon.clone().detach().requires_grad_(True)
+    sigma_native = sigma.clone().detach().requires_grad_(True)
+    depsilon_native = depsilon_seed.clone().detach().requires_grad_(True)
+
+    def fail_python_fallback(*_args, **_kwargs):
+        raise AssertionError("native 3D Born background gradients used Python fallback")
+
+    with monkeypatch.context() as m:
+        m.setattr(
+            "tide.maxwell.maxwell3d_born_cuda.born3d_python",
+            fail_python_fallback,
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            pred_native = tide.born3d(
+                epsilon_native,
+                sigma_native,
+                mu,
+                grid_spacing=setup["grid_spacing"],
+                dt=setup["dt"],
+                source_amplitude=setup["source_amplitude"],
+                source_location=setup["source_location"],
+                receiver_location=setup["receiver_location"],
+                depsilon=depsilon_native,
+                pml_width=setup["pml_width"],
+                stencil=setup["stencil"],
+                linearize_source=True,
+                source_component=setup["source_component"],
+                receiver_component=setup["receiver_component"],
+                python_backend=False,
+            )[-1]
+    assert not any(
+        "background model requires gradients" in str(w.message) for w in caught
+    )
+    grad_native = torch.autograd.grad(
+        torch.sum(pred_native * residual),
+        (epsilon_native, sigma_native, depsilon_native),
+    )
+
+    epsilon_reference = epsilon.clone().detach().requires_grad_(True)
+    sigma_reference = sigma.clone().detach().requires_grad_(True)
+    depsilon_reference = depsilon_seed.clone().detach().requires_grad_(True)
+    pred_reference = tide.born3d(
+        epsilon_reference,
+        sigma_reference,
+        mu,
+        grid_spacing=setup["grid_spacing"],
+        dt=setup["dt"],
+        source_amplitude=setup["source_amplitude"],
+        source_location=setup["source_location"],
+        receiver_location=setup["receiver_location"],
+        depsilon=depsilon_reference,
+        pml_width=setup["pml_width"],
+        stencil=setup["stencil"],
+        linearize_source=True,
+        source_component=setup["source_component"],
+        receiver_component=setup["receiver_component"],
+        python_backend=True,
+    )[-1]
+    grad_reference = torch.autograd.grad(
+        torch.sum(pred_reference * residual),
+        (epsilon_reference, sigma_reference, depsilon_reference),
+    )
+
+    for native, reference in zip(grad_native, grad_reference):
+        torch.testing.assert_close(native, reference, atol=1e-9, rtol=1e-8)
+
+
+def test_native_born3d_cuda_supports_background_gradients_without_fallback(
+    monkeypatch,
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for native 3D Born background gradient test.")
+    if not backend_utils.is_backend_available():
+        pytest.skip("Native backend is required for native 3D Born background test.")
+
+    torch.manual_seed(23)
+    setup = _make_born_3d_setup(torch.device("cuda"), torch.float32)
+    epsilon = setup["epsilon"]
+    sigma = setup["sigma"]
+    mu = setup["mu"]
+    assert isinstance(epsilon, torch.Tensor)
+    assert isinstance(sigma, torch.Tensor)
+    assert isinstance(mu, torch.Tensor)
+
+    residual = torch.randn(14, 1, 2, device=epsilon.device, dtype=epsilon.dtype)
+    depsilon_seed = 0.05 * torch.randn_like(epsilon)
+
+    epsilon_native = epsilon.clone().detach().requires_grad_(True)
+    sigma_native = sigma.clone().detach().requires_grad_(True)
+    depsilon_native = depsilon_seed.clone().detach().requires_grad_(True)
+
+    def fail_python_fallback(*_args, **_kwargs):
+        raise AssertionError("native CUDA 3D Born bggrad used Python fallback")
+
+    with monkeypatch.context() as m:
+        m.setattr(
+            "tide.maxwell.maxwell3d_born_cuda.born3d_python",
+            fail_python_fallback,
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            pred_native = tide.born3d(
+                epsilon_native,
+                sigma_native,
+                mu,
+                grid_spacing=setup["grid_spacing"],
+                dt=setup["dt"],
+                source_amplitude=setup["source_amplitude"],
+                source_location=setup["source_location"],
+                receiver_location=setup["receiver_location"],
+                depsilon=depsilon_native,
+                pml_width=setup["pml_width"],
+                stencil=setup["stencil"],
+                linearize_source=True,
+                source_component=setup["source_component"],
+                receiver_component=setup["receiver_component"],
+                python_backend=False,
+            )[-1]
+    assert not any("falling back to Python" in str(w.message) for w in caught)
+
+    grad_native = torch.autograd.grad(
+        torch.sum(pred_native * residual),
+        (epsilon_native, sigma_native, depsilon_native),
+    )
+
+    epsilon_reference = epsilon.clone().detach().requires_grad_(True)
+    sigma_reference = sigma.clone().detach().requires_grad_(True)
+    depsilon_reference = depsilon_seed.clone().detach().requires_grad_(True)
+    pred_reference = tide.born3d(
+        epsilon_reference,
+        sigma_reference,
+        mu,
+        grid_spacing=setup["grid_spacing"],
+        dt=setup["dt"],
+        source_amplitude=setup["source_amplitude"],
+        source_location=setup["source_location"],
+        receiver_location=setup["receiver_location"],
+        depsilon=depsilon_reference,
+        pml_width=setup["pml_width"],
+        stencil=setup["stencil"],
+        linearize_source=True,
+        source_component=setup["source_component"],
+        receiver_component=setup["receiver_component"],
+        python_backend=True,
+    )[-1]
+    grad_reference = torch.autograd.grad(
+        torch.sum(pred_reference * residual),
+        (epsilon_reference, sigma_reference, depsilon_reference),
+    )
+
+    for native, reference in zip(grad_native, grad_reference):
+        torch.testing.assert_close(native, reference, atol=5e-4, rtol=5e-3)
 
 
 def test_native_born3d_cuda_matches_python_reference():
