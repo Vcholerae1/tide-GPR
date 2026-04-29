@@ -2,8 +2,9 @@ import pytest
 import torch
 
 from tide import backend_utils, staggered
+from tide.maxwell.common import _get_ctx_handle, _release_ctx_handle
 from tide.maxwell.tm2d_born_autograd import BornTMForwardFunc
-from tide.storage import STORAGE_FORMAT_FULL
+from tide.storage import STORAGE_FORMAT_BF16, STORAGE_FORMAT_FULL
 
 
 def _native_tm2d_born_receivers(
@@ -25,9 +26,11 @@ def _native_tm2d_born_receivers(
     n_receivers: int,
     stencil: int,
     dEy_0: torch.Tensor | None = None,
+    storage_compression: bool | str = False,
 ) -> torch.Tensor:
     device = ca.device
     dtype = ca.dtype
+    storage_format = STORAGE_FORMAT_BF16 if storage_compression else STORAGE_FORMAT_FULL
     fd_pad = stencil // 2
     pml_y0 = pml_x0 = fd_pad
     pml_y1 = ny - fd_pad + 1
@@ -81,9 +84,9 @@ def _native_tm2d_born_receivers(
         pml_y1,
         pml_x1,
         "device",
-        STORAGE_FORMAT_FULL,
+        storage_format,
         "",
-        False,
+        storage_compression,
         zeros.clone(),
         zeros.clone(),
         zeros.clone(),
@@ -102,6 +105,101 @@ def _native_tm2d_born_receivers(
         device,
     )
     return outputs[7]
+
+
+def test_tm2d_born_autograd_uses_bf16_for_saved_snapshots(monkeypatch):
+    def fake_backend(*_args):
+        return None
+
+    monkeypatch.setattr(
+        backend_utils, "get_backend_function", lambda *_args: fake_backend
+    )
+
+    device = torch.device("cpu")
+    dtype = torch.float32
+    nt, n_shots, ny, nx = 4, 1, 5, 6
+    n_sources = n_receivers = 0
+    zeros = torch.zeros(n_shots, ny, nx, dtype=dtype, device=device)
+    line_zero_y = torch.zeros(ny, dtype=dtype, device=device)
+    line_zero_x = torch.zeros(nx, dtype=dtype, device=device)
+    line_one_y = torch.ones(ny, dtype=dtype, device=device)
+    line_one_x = torch.ones(nx, dtype=dtype, device=device)
+    empty_i = torch.empty(0, dtype=torch.long, device=device)
+    empty_f = torch.empty(0, dtype=dtype, device=device)
+
+    outputs = BornTMForwardFunc.forward(
+        torch.zeros(1, ny, nx, dtype=dtype, device=device, requires_grad=True),
+        torch.zeros(1, ny, nx, dtype=dtype, device=device, requires_grad=True),
+        torch.ones(1, ny, nx, dtype=dtype, device=device, requires_grad=True),
+        torch.ones(1, ny, nx, dtype=dtype, device=device, requires_grad=True),
+        torch.ones(1, ny, nx, dtype=dtype, device=device),
+        empty_f,
+        empty_f,
+        line_zero_y,
+        line_zero_y,
+        line_zero_y,
+        line_zero_y,
+        line_zero_x,
+        line_zero_x,
+        line_zero_x,
+        line_zero_x,
+        line_one_y,
+        line_one_y,
+        line_one_x,
+        line_one_x,
+        empty_i,
+        empty_i,
+        1.0,
+        1.0,
+        1.0,
+        nt,
+        n_shots,
+        ny,
+        nx,
+        n_sources,
+        n_receivers,
+        1,
+        2,
+        False,
+        False,
+        False,
+        1,
+        1,
+        ny,
+        nx,
+        "device",
+        STORAGE_FORMAT_BF16,
+        "",
+        "bf16",
+        zeros.clone(),
+        zeros.clone(),
+        zeros.clone(),
+        zeros.clone(),
+        zeros.clone(),
+        zeros.clone(),
+        zeros.clone(),
+        zeros.clone(),
+        zeros.clone(),
+        zeros.clone(),
+        zeros.clone(),
+        zeros.clone(),
+        zeros.clone(),
+        zeros.clone(),
+        0,
+        device,
+    )
+    ctx_handle = outputs[-1]
+    ctx_data = _get_ctx_handle(int(ctx_handle.item()))
+    try:
+        for tensor in (
+            *ctx_data["backward_storage_tensors"],
+            *ctx_data["direct_snapshot_tensors"],
+        ):
+            assert tensor.dtype == torch.bfloat16
+        assert ctx_data["storage_format"] == STORAGE_FORMAT_BF16
+        assert ctx_data["shot_bytes_uncomp"] == ny * nx * 2
+    finally:
+        _release_ctx_handle(int(ctx_handle.item()))
 
 
 def _reference_tm2d_born_receivers(
@@ -149,9 +247,7 @@ def _reference_tm2d_born_receivers(
         dHx = dHx - cq * staggered.diffyh1(dEy, stencil, rdy)
         dHz = dHz + cq * staggered.diffxh1(dEy, stencil, rdx)
 
-        curl_h = staggered.diffx1(Hz, stencil, rdx) - staggered.diffy1(
-            Hx, stencil, rdy
-        )
+        curl_h = staggered.diffx1(Hz, stencil, rdx) - staggered.diffy1(Hx, stencil, rdy)
         dcurl_h = staggered.diffx1(dHz, stencil, rdx) - staggered.diffy1(
             dHx, stencil, rdy
         )
@@ -194,9 +290,7 @@ def test_tm2d_born_bggrad_matches_reference_with_sources():
     source_yx = torch.tensor([[[3, 3]]], dtype=torch.long, device=device)
     receiver_yx = torch.tensor([[[3, 4], [4, 4]]], dtype=torch.long, device=device)
     sources_i = (source_yx[..., 0] * nx + source_yx[..., 1]).long().contiguous()
-    receivers_i = (
-        receiver_yx[..., 0] * nx + receiver_yx[..., 1]
-    ).long().contiguous()
+    receivers_i = (receiver_yx[..., 0] * nx + receiver_yx[..., 1]).long().contiguous()
 
     ca = torch.full((1, ny, nx), 0.98, dtype=dtype, device=device).requires_grad_()
     cb = torch.full((1, ny, nx), 0.07, dtype=dtype, device=device).requires_grad_()
@@ -278,7 +372,9 @@ def test_tm2d_born_bggrad_matches_reference_without_sources():
     stencil = 2
 
     receivers_i = torch.tensor([[[3, 4], [4, 4]]], dtype=torch.long, device=device)
-    receivers_flat = (receivers_i[..., 0] * nx + receivers_i[..., 1]).long().contiguous()
+    receivers_flat = (
+        (receivers_i[..., 0] * nx + receivers_i[..., 1]).long().contiguous()
+    )
 
     ca = torch.full((1, ny, nx), 0.98, dtype=dtype, device=device).requires_grad_()
     cb = torch.full((1, ny, nx), 0.07, dtype=dtype, device=device).requires_grad_()
@@ -361,9 +457,7 @@ def test_tm2d_born_bggrad_matches_reference_with_sources_cuda():
     source_yx = torch.tensor([[[3, 3]]], dtype=torch.long, device=device)
     receiver_yx = torch.tensor([[[3, 4], [4, 4]]], dtype=torch.long, device=device)
     sources_i = (source_yx[..., 0] * nx + source_yx[..., 1]).long().contiguous()
-    receivers_i = (
-        receiver_yx[..., 0] * nx + receiver_yx[..., 1]
-    ).long().contiguous()
+    receivers_i = (receiver_yx[..., 0] * nx + receiver_yx[..., 1]).long().contiguous()
 
     ca = torch.full((1, ny, nx), 0.98, dtype=dtype, device=device).requires_grad_()
     cb = torch.full((1, ny, nx), 0.07, dtype=dtype, device=device).requires_grad_()
@@ -446,7 +540,9 @@ def test_tm2d_born_bggrad_matches_reference_without_sources_cuda():
     stencil = 2
 
     receivers_i = torch.tensor([[[3, 4], [4, 4]]], dtype=torch.long, device=device)
-    receivers_flat = (receivers_i[..., 0] * nx + receivers_i[..., 1]).long().contiguous()
+    receivers_flat = (
+        (receivers_i[..., 0] * nx + receivers_i[..., 1]).long().contiguous()
+    )
 
     ca = torch.full((1, ny, nx), 0.98, dtype=dtype, device=device).requires_grad_()
     cb = torch.full((1, ny, nx), 0.07, dtype=dtype, device=device).requires_grad_()
@@ -509,3 +605,92 @@ def test_tm2d_born_bggrad_matches_reference_without_sources_cuda():
 
     torch.testing.assert_close(native_grad_ca, reference_grad_ca, atol=1e-6, rtol=1e-6)
     torch.testing.assert_close(native_grad_cb, reference_grad_cb, atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.parametrize("device_type", ["cpu", "cuda"])
+@pytest.mark.skipif(
+    not backend_utils.is_backend_available(), reason="native backend not available"
+)
+def test_tm2d_born_bggrad_matches_reference_with_bf16_storage(device_type):
+    if device_type == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is required for TM2D Born BF16 storage test.")
+
+    torch.manual_seed(4)
+    device = torch.device(device_type)
+    dtype = torch.float32
+    ny = nx = 8
+    nt = 5
+    n_shots = 1
+    n_sources = 1
+    n_receivers = 2
+    stencil = 2
+
+    source_yx = torch.tensor([[[3, 3]]], dtype=torch.long, device=device)
+    receiver_yx = torch.tensor([[[3, 4], [4, 4]]], dtype=torch.long, device=device)
+    sources_i = (source_yx[..., 0] * nx + source_yx[..., 1]).long().contiguous()
+    receivers_i = (receiver_yx[..., 0] * nx + receiver_yx[..., 1]).long().contiguous()
+
+    ca = torch.full((1, ny, nx), 0.98, dtype=dtype, device=device).requires_grad_()
+    cb = torch.full((1, ny, nx), 0.07, dtype=dtype, device=device).requires_grad_()
+    cq = torch.full((1, ny, nx), 0.05, dtype=dtype, device=device)
+    dca = (0.02 * torch.randn(ny, nx, dtype=dtype, device=device)).requires_grad_()
+    dcb = (0.02 * torch.randn(ny, nx, dtype=dtype, device=device)).requires_grad_()
+    source = torch.randn(nt, n_shots, n_sources, dtype=dtype, device=device)
+    f0 = source.reshape(-1).clone().detach().requires_grad_(True)
+    df = (0.15 * source).reshape(-1).clone().detach().requires_grad_(True)
+    residual = torch.randn(nt, n_shots, n_receivers, dtype=dtype, device=device)
+
+    native_receivers = _native_tm2d_born_receivers(
+        ca=ca,
+        cb=cb,
+        cq=cq,
+        dca=dca,
+        dcb=dcb,
+        f0=f0,
+        df=df,
+        sources_i=sources_i,
+        receivers_i=receivers_i,
+        nt=nt,
+        n_shots=n_shots,
+        ny=ny,
+        nx=nx,
+        n_sources=n_sources,
+        n_receivers=n_receivers,
+        stencil=stencil,
+        storage_compression="bf16",
+    )
+    native_grads = torch.autograd.grad(
+        torch.sum(native_receivers * residual),
+        [ca, cb, dca, dcb, f0, df],
+    )
+
+    ca_ref = ca.detach().clone().requires_grad_(True)
+    cb_ref = cb.detach().clone().requires_grad_(True)
+    dca_ref = dca.detach().clone().requires_grad_(True)
+    dcb_ref = dcb.detach().clone().requires_grad_(True)
+    f0_ref = f0.detach().clone().requires_grad_(True)
+    df_ref = df.detach().clone().requires_grad_(True)
+    reference_receivers = _reference_tm2d_born_receivers(
+        ca=ca_ref,
+        cb=cb_ref,
+        cq=cq,
+        dca=dca_ref,
+        dcb=dcb_ref,
+        f0=f0_ref,
+        df=df_ref,
+        sources_i=sources_i,
+        receivers_i=receivers_i,
+        nt=nt,
+        n_shots=n_shots,
+        ny=ny,
+        nx=nx,
+        n_sources=n_sources,
+        stencil=stencil,
+    )
+    reference_grads = torch.autograd.grad(
+        torch.sum(reference_receivers * residual),
+        [ca_ref, cb_ref, dca_ref, dcb_ref, f0_ref, df_ref],
+    )
+
+    for native_grad, reference_grad in zip(native_grads, reference_grads):
+        torch.testing.assert_close(native_grad, reference_grad, atol=3e-3, rtol=3e-2)

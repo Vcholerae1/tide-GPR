@@ -96,10 +96,14 @@ Autograd behavior:
 - use PyTorch autograd directly on the perturbation inputs to obtain Born
   Jacobian-vector or vector-Jacobian products
 - the explicit `borntm_adjoint` and `born3d_adjoint` APIs were removed
-- native backend gradients are supported for perturbation inputs
-- if gradients are required with respect to the background model, source
-  amplitudes, or initial wavefields, TIDE falls back to the Python reference
-  path
+- native backend gradients are supported for perturbation inputs and supported
+  background/source-gradient paths
+- `storage_compression="bf16"` stores saved Born backward snapshots in bf16 for
+  float32 native workflows that support compressed storage. This includes TM2D
+  CPU/CUDA and 3D CUDA scattered direct snapshots used by background-gradient
+  adjoints
+- unsupported gradient requests, such as some initial-wavefield gradients, fall
+  back to the Python reference path
 
 ## Class Wrappers
 

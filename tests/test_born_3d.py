@@ -5,6 +5,7 @@ import torch
 
 import tide
 from tide import backend_utils
+from tide.storage import STORAGE_FORMAT_BF16
 
 
 def _make_born_3d_setup(device: torch.device, dtype: torch.dtype) -> dict[str, object]:
@@ -417,7 +418,9 @@ def test_born3d_autograd_samples_saved_gradient_intermediates(monkeypatch):
     def fake_backend(*_args):
         return None
 
-    monkeypatch.setattr(backend_utils, "get_backend_function", lambda *_args: fake_backend)
+    monkeypatch.setattr(
+        backend_utils, "get_backend_function", lambda *_args: fake_backend
+    )
 
     device = torch.device("cpu")
     dtype = torch.float64
@@ -486,6 +489,95 @@ def test_born3d_autograd_samples_saved_gradient_intermediates(monkeypatch):
     store_ex = ctx.saved_tensors[-12]
     assert store_ex.shape == (3, n_shots, nz, ny, nx)
     assert ctx.meta["step_ratio"] == 3
+
+
+def test_born3d_autograd_uses_bf16_for_saved_snapshots(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for 3D Born BF16 snapshot storage test.")
+
+    from tide.maxwell.maxwell3d_born_autograd import Born3DForwardFunc
+
+    class _Ctx:
+        def save_for_backward(self, *tensors):
+            self.saved_tensors = tensors
+
+    def fake_backend(*_args):
+        return None
+
+    monkeypatch.setattr(
+        backend_utils, "get_backend_function", lambda *_args: fake_backend
+    )
+
+    device = torch.device("cuda")
+    dtype = torch.float32
+    nt, n_shots, nz, ny, nx = 5, 1, 3, 4, 5
+    field_shape = (n_shots, nz, ny, nx)
+    dca = torch.zeros(1, nz, ny, nx, device=device, dtype=dtype, requires_grad=True)
+    dcb = torch.zeros_like(dca, requires_grad=True)
+    ca = torch.ones_like(dca, requires_grad=True)
+    cb = torch.ones_like(dca, requires_grad=True)
+    cq = torch.ones_like(dca)
+    f0 = torch.empty(0, device=device, dtype=dtype)
+    df = torch.empty(0, device=device, dtype=dtype)
+    profiles = tuple(torch.zeros(1, device=device, dtype=dtype) for _ in range(18))
+    indices = (
+        torch.empty(0, device=device, dtype=torch.long),
+        torch.empty(0, device=device, dtype=torch.long),
+    )
+    background_wavefields = tuple(
+        torch.zeros(field_shape, device=device, dtype=dtype) for _ in range(18)
+    )
+    scattered_wavefields = tuple(
+        torch.zeros(field_shape, device=device, dtype=dtype) for _ in range(18)
+    )
+    ctx = _Ctx()
+
+    Born3DForwardFunc.forward(
+        ctx,
+        dca,
+        dcb,
+        ca,
+        cb,
+        cq,
+        f0,
+        df,
+        profiles,
+        indices,
+        background_wavefields,
+        scattered_wavefields,
+        {
+            "dt": 4.0e-11,
+            "nt": nt,
+            "n_shots": n_shots,
+            "nz": nz,
+            "ny": ny,
+            "nx": nx,
+            "n_sources": 0,
+            "n_receivers": 0,
+            "step_ratio": 1,
+            "accuracy": 2,
+            "pml_z0": 0,
+            "pml_y0": 0,
+            "pml_x0": 0,
+            "pml_z1": nz,
+            "pml_y1": ny,
+            "pml_x1": nx,
+            "source_component_idx": 1,
+            "receiver_component_idx": 1,
+            "n_threads": 0,
+            "rdz": 1.0,
+            "rdy": 1.0,
+            "rdx": 1.0,
+            "backend_device": device,
+            "storage_compression": "bf16",
+        },
+    )
+
+    saved = ctx.saved_tensors
+    for tensor in (*saved[-12:-6], *saved[-6:]):
+        assert tensor.dtype == torch.bfloat16
+    assert ctx.meta["storage_format"] == STORAGE_FORMAT_BF16
+    assert ctx.meta["shot_bytes_uncomp"] == nz * ny * nx * 2
 
 
 def test_native_born3d_supports_background_gradients_by_default(
@@ -580,8 +672,9 @@ def test_native_born3d_supports_background_gradients_by_default(
         torch.testing.assert_close(native, reference, atol=1e-9, rtol=1e-8)
 
 
+@pytest.mark.parametrize("storage_compression", [False, "bf16"])
 def test_native_born3d_cuda_supports_background_gradients_without_fallback(
-    monkeypatch,
+    monkeypatch, storage_compression: bool | str
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for native 3D Born background gradient test.")
@@ -630,6 +723,7 @@ def test_native_born3d_cuda_supports_background_gradients_without_fallback(
                 source_component=setup["source_component"],
                 receiver_component=setup["receiver_component"],
                 python_backend=False,
+                storage_compression=storage_compression,
             )[-1]
     assert not any("falling back to Python" in str(w.message) for w in caught)
 
@@ -663,8 +757,10 @@ def test_native_born3d_cuda_supports_background_gradients_without_fallback(
         (epsilon_reference, sigma_reference, depsilon_reference),
     )
 
+    atol = 2e-3 if storage_compression else 5e-4
+    rtol = 2e-2 if storage_compression else 5e-3
     for native, reference in zip(grad_native, grad_reference):
-        torch.testing.assert_close(native, reference, atol=5e-4, rtol=5e-3)
+        torch.testing.assert_close(native, reference, atol=atol, rtol=rtol)
 
 
 def test_native_born3d_cuda_matches_python_reference():

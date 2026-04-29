@@ -601,8 +601,8 @@ __global__ __launch_bounds__(256) void born_forward_kernel_e_with_storage_bf16(
     TIDE_DTYPE *__restrict const dm_hx_z, TIDE_DTYPE *__restrict const dm_hz_x,
     __nv_bfloat16 *__restrict const ey_store,
     __nv_bfloat16 *__restrict const curl_h_store,
-    TIDE_DTYPE *__restrict const dey_store,
-    TIDE_DTYPE *__restrict const dcurl_h_store,
+    __nv_bfloat16 *__restrict const dey_store,
+    __nv_bfloat16 *__restrict const dcurl_h_store,
     TIDE_DTYPE const *__restrict const ay,
     TIDE_DTYPE const *__restrict const ayh,
     TIDE_DTYPE const *__restrict const ax,
@@ -634,12 +634,13 @@ __global__ __launch_bounds__(256) void born_forward_kernel_e_with_storage_bf16(
       cb_requires_grad, y, x, shot_idx);
 }
 
+template <typename StoreT>
 __global__ __launch_bounds__(256) void born_background_prepare_direct_kernel(
     TIDE_DTYPE const *__restrict const dca,
     TIDE_DTYPE const *__restrict const dcb,
     TIDE_DTYPE const *__restrict const lambda_sc_ey,
-    TIDE_DTYPE const *__restrict const dey_store,
-    TIDE_DTYPE const *__restrict const dcurl_h_store,
+    StoreT const *__restrict const dey_store,
+    StoreT const *__restrict const dcurl_h_store,
     TIDE_DTYPE *__restrict const grad_ca_shot,
     TIDE_DTYPE *__restrict const grad_cb_shot,
     TIDE_DTYPE *__restrict const eta_source_old,
@@ -666,7 +667,7 @@ __global__ __launch_bounds__(256) void born_background_prepare_direct_kernel(
       static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
       n_shots, ny,          nx,         shot_numel, pml_y0,  pml_y1,
       pml_x0,  pml_x1,      ca_batched, cb_batched, false};
-  ::tide::born_background_prepare_direct_core<TIDE_DTYPE, TIDE_STENCIL>(
+  ::tide::born_background_prepare_direct_core<TIDE_DTYPE, StoreT, TIDE_STENCIL>(
       params, dca, dcb, lambda_sc_ey, dey_store, dcurl_h_store, grad_ca_shot,
       grad_cb_shot, eta_source_old, work_x, work_z, step_ratio_val, y, x,
       shot_idx);
@@ -2320,8 +2321,8 @@ extern "C" void FUNC(born_forward_with_storage)(
     TIDE_DTYPE *const background_r, void *const ey_store_1,
     void *const ey_store_3, char const *const *const ey_filenames,
     void *const curl_store_1, void *const curl_store_3,
-    char const *const *const curl_filenames, TIDE_DTYPE *const dey_store,
-    TIDE_DTYPE *const dcurl_store, TIDE_DTYPE const *const ay,
+    char const *const *const curl_filenames, void *const dey_store,
+    void *const dcurl_store, TIDE_DTYPE const *const ay,
     TIDE_DTYPE const *const by, TIDE_DTYPE const *const ayh,
     TIDE_DTYPE const *const byh, TIDE_DTYPE const *const ax,
     TIDE_DTYPE const *const bx, TIDE_DTYPE const *const axh,
@@ -2427,6 +2428,8 @@ extern "C" void FUNC(born_forward_with_storage)(
           step_idx, storage_mode_h, bytes_per_step_store);
       size_t const store3_offset = host_storage_offset_bytes(
           step_idx, storage_mode_h, bytes_per_step_store);
+      size_t const direct_store_offset =
+          (size_t)step_idx * bytes_per_step_store;
 
       void *__restrict const ey_store_1_t =
           (uint8_t *)ey_store_1 + store1_offset;
@@ -2435,12 +2438,13 @@ extern "C" void FUNC(born_forward_with_storage)(
           (uint8_t *)curl_store_1 + store1_offset;
       void *__restrict const curl_store_3_t =
           (uint8_t *)curl_store_3 + store3_offset;
-      TIDE_DTYPE *__restrict const dey_store_t =
-          dey_store != nullptr ? (dey_store + step_idx * n_shots_h * shot_numel_h)
-                               : nullptr;
-      TIDE_DTYPE *__restrict const dcurl_store_t =
+      void *__restrict const dey_store_t =
+          dey_store != nullptr
+              ? (uint8_t *)dey_store + direct_store_offset
+              : nullptr;
+      void *__restrict const dcurl_store_t =
           dcurl_store != nullptr
-              ? (dcurl_store + step_idx * n_shots_h * shot_numel_h)
+              ? (uint8_t *)dcurl_store + direct_store_offset
               : nullptr;
 
       if (storage_bf16_h) {
@@ -2449,18 +2453,19 @@ extern "C" void FUNC(born_forward_with_storage)(
                                                   stream_compute>>>(
             ca, cb, dca, dcb, hx, hz, ey, m_hx_z, m_hz_x, dhx, dhz, dey,
             dm_hx_z, dm_hz_x, store_ey ? (__nv_bfloat16 *)ey_store_1_t : nullptr,
-            store_curl ? (__nv_bfloat16 *)curl_store_1_t : nullptr, dey_store_t,
-            dcurl_store_t, ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx,
-            kxh, store_ey, store_curl);
+            store_curl ? (__nv_bfloat16 *)curl_store_1_t : nullptr,
+            (__nv_bfloat16 *)dey_store_t, (__nv_bfloat16 *)dcurl_store_t, ay,
+            ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh, store_ey,
+            store_curl);
       } else {
         born_forward_kernel_e_with_storage<<<launch_cfg.dimGrid,
                                              launch_cfg.dimBlock, 0,
                                              stream_compute>>>(
             ca, cb, dca, dcb, hx, hz, ey, m_hx_z, m_hz_x, dhx, dhz, dey,
             dm_hx_z, dm_hz_x, store_ey ? (TIDE_DTYPE *)ey_store_1_t : nullptr,
-            store_curl ? (TIDE_DTYPE *)curl_store_1_t : nullptr, dey_store_t,
-            dcurl_store_t, ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx,
-            kxh, store_ey, store_curl);
+            store_curl ? (TIDE_DTYPE *)curl_store_1_t : nullptr,
+            (TIDE_DTYPE *)dey_store_t, (TIDE_DTYPE *)dcurl_store_t, ay, ayh, ax,
+            axh, by, byh, bx, bxh, ky, kyh, kx, kxh, store_ey, store_curl);
       }
 
       if (storage_mode_h == STORAGE_CPU || storage_mode_h == STORAGE_DISK) {
@@ -3321,8 +3326,8 @@ extern "C" void FUNC(born_backward_bggrad)(
     TIDE_DTYPE *const ey_store_1, void *const ey_store_3,
     char const *const *const ey_filenames, TIDE_DTYPE *const curl_store_1,
     void *const curl_store_3, char const *const *const curl_filenames,
-    TIDE_DTYPE const *const dey_store,
-    TIDE_DTYPE const *const dcurl_store,
+    void const *const dey_store,
+    void const *const dcurl_store,
     TIDE_DTYPE *const ey, TIDE_DTYPE *const hx, TIDE_DTYPE *const hz,
     TIDE_DTYPE *const dey, TIDE_DTYPE *const dhx, TIDE_DTYPE *const dhz,
     TIDE_DTYPE *const grad_f0, TIDE_DTYPE *const grad_df,
@@ -3481,8 +3486,12 @@ extern "C" void FUNC(born_backward_bggrad)(
       continue;
     }
 
-    TIDE_DTYPE const *const dey_store_t = dey_store + store_idx * store_size;
-    TIDE_DTYPE const *const dcurl_store_t = dcurl_store + store_idx * store_size;
+    size_t const direct_store_offset =
+        (size_t)store_idx * (size_t)shot_bytes_uncomp_h * (size_t)n_shots_h;
+    void const *const dey_store_t =
+        (uint8_t const *)dey_store + direct_store_offset;
+    void const *const dcurl_store_t =
+        (uint8_t const *)dcurl_store + direct_store_offset;
 
     if (n_receivers_per_shot_h > 0) {
       add_adjoint_sources_ey<<<launch_cfg.dimGridReceivers,
@@ -3502,12 +3511,21 @@ extern "C" void FUNC(born_backward_bggrad)(
           grad_f0 + t * n_shots_h * n_sources_per_shot_h, eta_ey, sources_i);
     }
 
-    born_background_prepare_direct_kernel<<<launch_cfg.dimGrid,
-                                            launch_cfg.dimBlock, 0,
-                                            stream_compute>>>(
-        dca, dcb, lambda_ey, dey_store_t, dcurl_store_t, grad_ca_shot,
-        grad_cb_shot, eta_source_old, work_eta_x, work_eta_z, ay, ayh, ax, axh, by,
-        byh, bx, bxh, ky, kyh, kx, kxh, step_ratio_h);
+    if (storage_bf16_h) {
+      born_background_prepare_direct_kernel<__nv_bfloat16>
+          <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
+              dca, dcb, lambda_ey, (__nv_bfloat16 const *)dey_store_t,
+              (__nv_bfloat16 const *)dcurl_store_t, grad_ca_shot,
+              grad_cb_shot, eta_source_old, work_eta_x, work_eta_z, ay, ayh,
+              ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh, step_ratio_h);
+    } else {
+      born_background_prepare_direct_kernel<TIDE_DTYPE>
+          <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
+              dca, dcb, lambda_ey, (TIDE_DTYPE const *)dey_store_t,
+              (TIDE_DTYPE const *)dcurl_store_t, grad_ca_shot, grad_cb_shot,
+              eta_source_old, work_eta_x, work_eta_z, ay, ayh, ax, axh, by,
+              byh, bx, bxh, ky, kyh, kx, kxh, step_ratio_h);
+    }
     born_backward_apply_e_to_h_kernel<<<launch_cfg.dimGrid, launch_cfg.dimBlock,
                                         0, stream_compute>>>(
         work_eta_x, work_eta_z, eta_hx, eta_hz, ay, ayh, ax, axh, by, byh,

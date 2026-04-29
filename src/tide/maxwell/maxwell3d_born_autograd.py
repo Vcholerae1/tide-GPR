@@ -3,7 +3,7 @@ from typing import Any
 
 import torch
 
-from ..storage import STORAGE_DEVICE, STORAGE_NONE
+from ..storage import STORAGE_DEVICE, STORAGE_NONE, _resolve_storage_compression
 from ..validation import validate_model_gradient_sampling_interval
 from .common import (
     ReceiverMisfit,
@@ -153,42 +153,52 @@ class Born3DForwardFunc(torch.autograd.Function):
 
         if needs_storage:
             storage_mode = STORAGE_DEVICE
-            storage_format = 0
-            shot_bytes_uncomp = nz * ny * nx * dtype.itemsize
+            _, store_dtype, _, storage_format = _resolve_storage_compression(
+                meta.get("storage_compression", False),
+                dtype,
+                device,
+                context="storage_compression",
+            )
+            if storage_format != 0 and device.type != "cuda":
+                raise NotImplementedError(
+                    "3D Born BF16 snapshot storage is currently supported only on CUDA."
+                )
+            shot_bytes_uncomp = nz * ny * nx * store_dtype.itemsize
             num_steps_stored = (nt + step_ratio - 1) // step_ratio
             compute_stream_handle, storage_stream_handle, stream_keepalive = (
                 _make_storage_streams(device, storage_mode)
             )
             store_shape = (num_steps_stored, n_shots, nz, ny, nx)
+            empty_store = torch.empty(0, device=device, dtype=store_dtype)
             store_ex = (
-                torch.empty(store_shape, device=device, dtype=dtype)
+                torch.empty(store_shape, device=device, dtype=store_dtype)
                 if store_e_needed
-                else torch.empty(0, device=device, dtype=dtype)
+                else empty_store
             )
             store_ey = torch.empty_like(store_ex)
             store_ez = torch.empty_like(store_ex)
             store_curl_x = (
-                torch.empty(store_shape, device=device, dtype=dtype)
+                torch.empty(store_shape, device=device, dtype=store_dtype)
                 if store_curl_needed
-                else torch.empty(0, device=device, dtype=dtype)
+                else empty_store
             )
             store_curl_y = torch.empty_like(store_curl_x)
             store_curl_z = torch.empty_like(store_curl_x)
             store_dex = (
-                torch.empty(store_shape, device=device, dtype=dtype)
+                torch.empty(store_shape, device=device, dtype=store_dtype)
                 if ca_requires_grad
-                else torch.empty(0, device=device, dtype=dtype)
+                else empty_store
             )
             store_dey = torch.empty_like(store_dex)
             store_dez = torch.empty_like(store_dex)
             store_dcurl_x = (
-                torch.empty(store_shape, device=device, dtype=dtype)
+                torch.empty(store_shape, device=device, dtype=store_dtype)
                 if cb_requires_grad
-                else torch.empty(0, device=device, dtype=dtype)
+                else empty_store
             )
             store_dcurl_y = torch.empty_like(store_dcurl_x)
             store_dcurl_z = torch.empty_like(store_dcurl_x)
-            empty_host = torch.empty(0, device=device, dtype=dtype)
+            empty_host = torch.empty(0, device=device, dtype=store_dtype)
 
             forward_func = backend_utils.get_backend_function(
                 "maxwell_3d",
@@ -1212,9 +1222,7 @@ def maxwell3d_receiver_hvp_native(
     if not backend_utils.is_backend_available():
         raise RuntimeError("Native 3D HVP requires the compiled backend.")
     if epsilon.device.type not in {"cpu", "cuda"}:
-        raise NotImplementedError(
-            "Native 3D HVP currently supports CPU and CUDA only."
-        )
+        raise NotImplementedError("Native 3D HVP currently supports CPU and CUDA only.")
 
     from .maxwell3d import maxwell3d
     from .maxwell3d_born import born3d
@@ -1226,6 +1234,11 @@ def maxwell3d_receiver_hvp_native(
         vepsilon = torch.zeros_like(epsilon_req)
     if vsigma is None:
         vsigma = torch.zeros_like(sigma_req)
+    storage_compression = (
+        "bf16"
+        if epsilon_req.device.type == "cuda" and epsilon_req.dtype == torch.float32
+        else False
+    )
 
     predicted_data = maxwell3d(
         epsilon_req,
@@ -1244,6 +1257,7 @@ def maxwell3d_receiver_hvp_native(
         source_component=source_component,
         receiver_component=receiver_component,
         python_backend=False,
+        storage_compression=storage_compression,
     )[-1]
     delta_predicted_data = born3d(
         epsilon_req,
@@ -1265,7 +1279,7 @@ def maxwell3d_receiver_hvp_native(
         receiver_component=receiver_component,
         python_backend=False,
         storage_mode="device",
-        storage_compression=False,
+        storage_compression=storage_compression,
     )[-1]
     hvp_epsilon, hvp_sigma = _directional_receiver_hvp(
         params=(epsilon_req, sigma_req),

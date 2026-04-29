@@ -620,8 +620,8 @@ static TIDE_HOST_DEVICE void forward_kernel_e_born_with_storage_core(
     GridParams<T> const &params, T const *ca_ptr, T const *cb_ptr,
     T const *dca_ptr, T const *dcb_ptr, T const *hx, T const *hz, T *ey,
     T *m_hx_z, T *m_hz_x, T const *dhx, T const *dhz, T *dey, T *dm_hx_z,
-    T *dm_hz_x, StoreT *ey_store, StoreT *curl_h_store, T *dey_store,
-    T *dcurl_h_store,
+    T *dm_hz_x, StoreT *ey_store, StoreT *curl_h_store, StoreT *dey_store,
+    StoreT *dcurl_h_store,
     bool ca_requires_grad, bool cb_requires_grad, int64_t y, int64_t x,
     int64_t shot_idx) {
 
@@ -689,10 +689,10 @@ static TIDE_HOST_DEVICE void forward_kernel_e_born_with_storage_core(
       curl_h_store[i] = encode_snapshot<StoreT, T>(curl_h);
     }
     if (dey_store != nullptr) {
-      dey_store[i] = dey_n;
+      dey_store[i] = encode_snapshot<StoreT, T>(dey_n);
     }
     if (dcurl_h_store != nullptr) {
-      dcurl_h_store[i] = dcurl_h;
+      dcurl_h_store[i] = encode_snapshot<StoreT, T>(dcurl_h);
     }
 
     ey[i] = ca_val * ey_n + cb_val * curl_h;
@@ -704,10 +704,11 @@ static TIDE_HOST_DEVICE void forward_kernel_e_born_with_storage_core(
 // Direct bggrad preparation for the full Hessian path. This accumulates the
 // local ca/cb direct term and emits the transposed dcb * lambda contribution
 // into alpha_h* without requiring scattered CPML memory reconstruction.
-template <typename T, int STENCIL_ORDER>
+template <typename T, typename StoreT, int STENCIL_ORDER>
 static TIDE_HOST_DEVICE void born_background_prepare_direct_core(
     GridParams<T> const &params, T const *dca_ptr, T const *dcb_ptr,
-    T const *lambda_sc_ey, T const *dey_store, T const *dcurl_h_store,
+    T const *lambda_sc_ey, StoreT const *dey_store,
+    StoreT const *dcurl_h_store,
     T *grad_ca_shot, T *grad_cb_shot, T *eta_source_old, T *alpha_hz_x,
     T *alpha_hx_z, int64_t step_ratio_val, int64_t y, int64_t x,
     int64_t shot_idx) {
@@ -735,11 +736,13 @@ static TIDE_HOST_DEVICE void born_background_prepare_direct_core(
   T const lambda_curr = lambda_sc_ey[i];
 
   if (grad_ca_shot != nullptr && dey_store != nullptr) {
-    grad_ca_shot[i] += lambda_curr * dey_store[i] * static_cast<T>(step_ratio_val);
+    T const dey_n = decode_snapshot<StoreT, T>(dey_store[i]);
+    grad_ca_shot[i] += lambda_curr * dey_n * static_cast<T>(step_ratio_val);
   }
   if (grad_cb_shot != nullptr && dcurl_h_store != nullptr) {
+    T const dcurl_h_n = decode_snapshot<StoreT, T>(dcurl_h_store[i]);
     grad_cb_shot[i] +=
-        lambda_curr * dcurl_h_store[i] * static_cast<T>(step_ratio_val);
+        lambda_curr * dcurl_h_n * static_cast<T>(step_ratio_val);
   }
 
   eta_source_old[i] = dca_val * lambda_curr;

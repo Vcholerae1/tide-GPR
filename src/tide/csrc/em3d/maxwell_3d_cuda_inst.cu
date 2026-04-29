@@ -1061,12 +1061,12 @@ __global__ void born_forward_kernel_e_with_storage(
     SnapshotT *__restrict const curl_x_store,
     SnapshotT *__restrict const curl_y_store,
     SnapshotT *__restrict const curl_z_store,
-    TIDE_DTYPE *__restrict const dex_store,
-    TIDE_DTYPE *__restrict const dey_store,
-    TIDE_DTYPE *__restrict const dez_store,
-    TIDE_DTYPE *__restrict const dcurl_x_store,
-    TIDE_DTYPE *__restrict const dcurl_y_store,
-    TIDE_DTYPE *__restrict const dcurl_z_store,
+    SnapshotT *__restrict const dex_store,
+    SnapshotT *__restrict const dey_store,
+    SnapshotT *__restrict const dez_store,
+    SnapshotT *__restrict const dcurl_x_store,
+    SnapshotT *__restrict const dcurl_y_store,
+    SnapshotT *__restrict const dcurl_z_store,
     bool const ca_requires_grad,
     bool const cb_requires_grad) {
   int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
@@ -1179,14 +1179,14 @@ __global__ void born_forward_kernel_e_with_storage(
   TIDE_DTYPE const dcurl_z = ddHx_dy - ddHy_dx;
 
   if (dex_store != nullptr) {
-    dex_store[i] = dex[i];
-    dey_store[i] = dey[i];
-    dez_store[i] = dez[i];
+    dex_store[i] = encode_snapshot<SnapshotT>(dex[i]);
+    dey_store[i] = encode_snapshot<SnapshotT>(dey[i]);
+    dez_store[i] = encode_snapshot<SnapshotT>(dez[i]);
   }
   if (dcurl_x_store != nullptr) {
-    dcurl_x_store[i] = dcurl_x;
-    dcurl_y_store[i] = dcurl_y;
-    dcurl_z_store[i] = dcurl_z;
+    dcurl_x_store[i] = encode_snapshot<SnapshotT>(dcurl_x);
+    dcurl_y_store[i] = encode_snapshot<SnapshotT>(dcurl_y);
+    dcurl_z_store[i] = encode_snapshot<SnapshotT>(dcurl_z);
   }
 
   TIDE_DTYPE const ex_old = ex[i];
@@ -1505,17 +1505,18 @@ __global__ void backward_kernel_lambda_e_with_grad(
 #undef LHZ_E
 }
 
+template <typename SnapshotT>
 __global__ void born_bggrad_prepare_direct_3d(
     TIDE_DTYPE const *__restrict const dca,
     TIDE_DTYPE const *__restrict const lambda_ex,
     TIDE_DTYPE const *__restrict const lambda_ey,
     TIDE_DTYPE const *__restrict const lambda_ez,
-    TIDE_DTYPE const *__restrict const dex_store,
-    TIDE_DTYPE const *__restrict const dey_store,
-    TIDE_DTYPE const *__restrict const dez_store,
-    TIDE_DTYPE const *__restrict const dcurl_x_store,
-    TIDE_DTYPE const *__restrict const dcurl_y_store,
-    TIDE_DTYPE const *__restrict const dcurl_z_store,
+    SnapshotT const *__restrict const dex_store,
+    SnapshotT const *__restrict const dey_store,
+    SnapshotT const *__restrict const dez_store,
+    SnapshotT const *__restrict const dcurl_x_store,
+    SnapshotT const *__restrict const dcurl_y_store,
+    SnapshotT const *__restrict const dcurl_z_store,
     TIDE_DTYPE *__restrict const grad_ca,
     TIDE_DTYPE *__restrict const grad_cb,
     TIDE_DTYPE *__restrict const grad_ca_shot,
@@ -1549,9 +1550,9 @@ __global__ void born_bggrad_prepare_direct_3d(
 
   if (direct_ca_step && grad_ca != nullptr && dex_store != nullptr &&
       dey_store != nullptr && dez_store != nullptr) {
-    TIDE_DTYPE const acc_ca = lex_curr * dex_store[i] +
-                              ley_curr * dey_store[i] +
-                              lez_curr * dez_store[i];
+    TIDE_DTYPE const acc_ca = lex_curr * decode_snapshot(dex_store[i]) +
+                              ley_curr * decode_snapshot(dey_store[i]) +
+                              lez_curr * decode_snapshot(dez_store[i]);
     TIDE_DTYPE const scaled = acc_ca * (TIDE_DTYPE)step_ratio_eff;
     if (ca_batched) {
       grad_ca[i] += scaled;
@@ -1564,9 +1565,9 @@ __global__ void born_bggrad_prepare_direct_3d(
 
   if (direct_cb_step && grad_cb != nullptr && dcurl_x_store != nullptr &&
       dcurl_y_store != nullptr && dcurl_z_store != nullptr) {
-    TIDE_DTYPE const acc_cb = lex_curr * dcurl_x_store[i] +
-                              ley_curr * dcurl_y_store[i] +
-                              lez_curr * dcurl_z_store[i];
+    TIDE_DTYPE const acc_cb = lex_curr * decode_snapshot(dcurl_x_store[i]) +
+                              ley_curr * decode_snapshot(dcurl_y_store[i]) +
+                              lez_curr * decode_snapshot(dcurl_z_store[i]);
     TIDE_DTYPE const scaled = acc_cb * (TIDE_DTYPE)step_ratio_eff;
     if (cb_batched) {
       grad_cb[i] += scaled;
@@ -3071,12 +3072,12 @@ extern "C" void FUNC(born_forward_with_storage)(
     TIDE_DTYPE *const store_11,
     TIDE_DTYPE *const store_12,
     char **store_filenames_6,
-    TIDE_DTYPE *const dstore_ex,
-    TIDE_DTYPE *const dstore_ey,
-    TIDE_DTYPE *const dstore_ez,
-    TIDE_DTYPE *const dstore_curl_x,
-    TIDE_DTYPE *const dstore_curl_y,
-    TIDE_DTYPE *const dstore_curl_z,
+    void *const dstore_ex,
+    void *const dstore_ey,
+    void *const dstore_ez,
+    void *const dstore_curl_x,
+    void *const dstore_curl_y,
+    void *const dstore_curl_z,
     TIDE_DTYPE const *const az,
     TIDE_DTYPE const *const bz,
     TIDE_DTYPE const *const azh,
@@ -3278,18 +3279,36 @@ extern "C" void FUNC(born_forward_with_storage)(
           reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(store_9) + device_offset);
       void *const curl_z_store_t =
           reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(store_11) + device_offset);
-      TIDE_DTYPE *const dex_store_t =
-          dstore_ex != nullptr ? dstore_ex + store_idx * n_shots_h * shot_numel_h : nullptr;
-      TIDE_DTYPE *const dey_store_t =
-          dstore_ey != nullptr ? dstore_ey + store_idx * n_shots_h * shot_numel_h : nullptr;
-      TIDE_DTYPE *const dez_store_t =
-          dstore_ez != nullptr ? dstore_ez + store_idx * n_shots_h * shot_numel_h : nullptr;
-      TIDE_DTYPE *const dcurl_x_store_t =
-          dstore_curl_x != nullptr ? dstore_curl_x + store_idx * n_shots_h * shot_numel_h : nullptr;
-      TIDE_DTYPE *const dcurl_y_store_t =
-          dstore_curl_y != nullptr ? dstore_curl_y + store_idx * n_shots_h * shot_numel_h : nullptr;
-      TIDE_DTYPE *const dcurl_z_store_t =
-          dstore_curl_z != nullptr ? dstore_curl_z + store_idx * n_shots_h * shot_numel_h : nullptr;
+      void *const dex_store_t =
+          dstore_ex != nullptr
+              ? reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(dstore_ex) +
+                                         device_offset)
+              : nullptr;
+      void *const dey_store_t =
+          dstore_ey != nullptr
+              ? reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(dstore_ey) +
+                                         device_offset)
+              : nullptr;
+      void *const dez_store_t =
+          dstore_ez != nullptr
+              ? reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(dstore_ez) +
+                                         device_offset)
+              : nullptr;
+      void *const dcurl_x_store_t =
+          dstore_curl_x != nullptr
+              ? reinterpret_cast<void *>(
+                    reinterpret_cast<uint8_t *>(dstore_curl_x) + device_offset)
+              : nullptr;
+      void *const dcurl_y_store_t =
+          dstore_curl_y != nullptr
+              ? reinterpret_cast<void *>(
+                    reinterpret_cast<uint8_t *>(dstore_curl_y) + device_offset)
+              : nullptr;
+      void *const dcurl_z_store_t =
+          dstore_curl_z != nullptr
+              ? reinterpret_cast<void *>(
+                    reinterpret_cast<uint8_t *>(dstore_curl_z) + device_offset)
+              : nullptr;
 
       if (storage_bf16) {
         born_forward_kernel_e_with_storage<__nv_bfloat16>
@@ -3338,12 +3357,12 @@ extern "C" void FUNC(born_forward_with_storage)(
                 reinterpret_cast<__nv_bfloat16 *>(curl_x_store_t),
                 reinterpret_cast<__nv_bfloat16 *>(curl_y_store_t),
                 reinterpret_cast<__nv_bfloat16 *>(curl_z_store_t),
-                dex_store_t,
-                dey_store_t,
-                dez_store_t,
-                dcurl_x_store_t,
-                dcurl_y_store_t,
-                dcurl_z_store_t,
+                reinterpret_cast<__nv_bfloat16 *>(dex_store_t),
+                reinterpret_cast<__nv_bfloat16 *>(dey_store_t),
+                reinterpret_cast<__nv_bfloat16 *>(dez_store_t),
+                reinterpret_cast<__nv_bfloat16 *>(dcurl_x_store_t),
+                reinterpret_cast<__nv_bfloat16 *>(dcurl_y_store_t),
+                reinterpret_cast<__nv_bfloat16 *>(dcurl_z_store_t),
                 ca_requires_grad,
                 cb_requires_grad);
       } else {
@@ -3393,12 +3412,12 @@ extern "C" void FUNC(born_forward_with_storage)(
                 reinterpret_cast<TIDE_DTYPE *>(curl_x_store_t),
                 reinterpret_cast<TIDE_DTYPE *>(curl_y_store_t),
                 reinterpret_cast<TIDE_DTYPE *>(curl_z_store_t),
-                dex_store_t,
-                dey_store_t,
-                dez_store_t,
-                dcurl_x_store_t,
-                dcurl_y_store_t,
-                dcurl_z_store_t,
+                reinterpret_cast<TIDE_DTYPE *>(dex_store_t),
+                reinterpret_cast<TIDE_DTYPE *>(dey_store_t),
+                reinterpret_cast<TIDE_DTYPE *>(dez_store_t),
+                reinterpret_cast<TIDE_DTYPE *>(dcurl_x_store_t),
+                reinterpret_cast<TIDE_DTYPE *>(dcurl_y_store_t),
+                reinterpret_cast<TIDE_DTYPE *>(dcurl_z_store_t),
                 ca_requires_grad,
                 cb_requires_grad);
       }
@@ -4202,12 +4221,12 @@ extern "C" void FUNC(born_backward_bggrad)(
     void *const store_11,
     void *const store_12,
     char **store_filenames_6,
-    TIDE_DTYPE const *const dstore_ex,
-    TIDE_DTYPE const *const dstore_ey,
-    TIDE_DTYPE const *const dstore_ez,
-    TIDE_DTYPE const *const dstore_curl_x,
-    TIDE_DTYPE const *const dstore_curl_y,
-    TIDE_DTYPE const *const dstore_curl_z,
+    void const *const dstore_ex,
+    void const *const dstore_ey,
+    void const *const dstore_ez,
+    void const *const dstore_curl_x,
+    void const *const dstore_curl_y,
+    void const *const dstore_curl_z,
     TIDE_DTYPE *const grad_f0,
     TIDE_DTYPE *const grad_df,
     TIDE_DTYPE *const grad_ca,
@@ -4307,16 +4326,19 @@ extern "C" void FUNC(born_backward_bggrad)(
   int64_t const store_size_h = n_shots_h * shot_numel_h;
   int64_t const step_ratio_eff = step_ratio_h > 0 ? step_ratio_h : 1;
   size_t const full_bytes_per_shot = (size_t)shot_numel_h * sizeof(TIDE_DTYPE);
+  size_t const bf16_bytes_per_shot = (size_t)shot_numel_h * sizeof(__nv_bfloat16);
   size_t const bytes_per_step_store =
       (size_t)shot_bytes_uncomp * (size_t)n_shots_h;
+  bool const storage_bf16 = storage_format_h == STORAGE_FORMAT_BF16;
+  bool const storage_full = storage_format_h == STORAGE_FORMAT_FULL;
   bool const storage_direct =
-      storage_mode == STORAGE_DEVICE &&
-      storage_format_h == STORAGE_FORMAT_FULL &&
-      shot_bytes_uncomp == (int64_t)full_bytes_per_shot;
+      (storage_mode == STORAGE_DEVICE) &&
+      ((storage_full && shot_bytes_uncomp == (int64_t)full_bytes_per_shot) ||
+       (storage_bf16 && shot_bytes_uncomp == (int64_t)bf16_bytes_per_shot));
   if (!storage_direct) {
     std::fprintf(stderr,
-                 "born_backward_bggrad currently supports full-precision "
-                 "device storage only for 3D CUDA.\n");
+                 "born_backward_bggrad currently supports full-precision or "
+                 "bf16 device storage only for 3D CUDA.\n");
     std::abort();
   }
 
@@ -4485,66 +4507,66 @@ extern "C" void FUNC(born_backward_bggrad)(
     size_t const device_offset =
         ring_storage_offset_bytes(store_idx, storage_mode, bytes_per_step_store);
 
-    TIDE_DTYPE const *const ex_store =
+    void const *const ex_store =
         (grad_ca_step || grad_dca_step)
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(store_1) + device_offset)
             : nullptr;
-    TIDE_DTYPE const *const ey_store =
+    void const *const ey_store =
         (grad_ca_step || grad_dca_step)
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(store_3) + device_offset)
             : nullptr;
-    TIDE_DTYPE const *const ez_store =
+    void const *const ez_store =
         (grad_ca_step || grad_dca_step)
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(store_5) + device_offset)
             : nullptr;
-    TIDE_DTYPE const *const curl_x_store =
+    void const *const curl_x_store =
         (grad_cb_step || grad_dcb_step)
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(store_7) + device_offset)
             : nullptr;
-    TIDE_DTYPE const *const curl_y_store =
+    void const *const curl_y_store =
         (grad_cb_step || grad_dcb_step)
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(store_9) + device_offset)
             : nullptr;
-    TIDE_DTYPE const *const curl_z_store =
+    void const *const curl_z_store =
         (grad_cb_step || grad_dcb_step)
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(store_11) + device_offset)
             : nullptr;
-    TIDE_DTYPE const *const dex_store =
+    void const *const dex_store =
         direct_ca_step
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t const *>(dstore_ex) + device_offset)
             : nullptr;
-    TIDE_DTYPE const *const dey_store =
+    void const *const dey_store =
         direct_ca_step
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t const *>(dstore_ey) + device_offset)
             : nullptr;
-    TIDE_DTYPE const *const dez_store =
+    void const *const dez_store =
         direct_ca_step
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t const *>(dstore_ez) + device_offset)
             : nullptr;
-    TIDE_DTYPE const *const dcurl_x_store =
+    void const *const dcurl_x_store =
         direct_cb_step
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t const *>(dstore_curl_x) +
                   device_offset)
             : nullptr;
-    TIDE_DTYPE const *const dcurl_y_store =
+    void const *const dcurl_y_store =
         direct_cb_step
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t const *>(dstore_curl_y) +
                   device_offset)
             : nullptr;
-    TIDE_DTYPE const *const dcurl_z_store =
+    void const *const dcurl_z_store =
         direct_cb_step
-            ? reinterpret_cast<TIDE_DTYPE const *>(
+            ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t const *>(dstore_curl_z) +
                   device_offset)
             : nullptr;
@@ -4582,29 +4604,55 @@ extern "C" void FUNC(born_backward_bggrad)(
       }
     }
 
-    born_bggrad_prepare_direct_3d<<<(unsigned)launch_cfg.blocks_cells,
-                                    launch_cfg.threads_cells, 0,
-                                    stream_compute>>>(
-        dca,
-        lambda_ex,
-        lambda_ey,
-        lambda_ez,
-        dex_store,
-        dey_store,
-        dez_store,
-        dcurl_x_store,
-        dcurl_y_store,
-        dcurl_z_store,
-        grad_ca,
-        grad_cb,
-        grad_ca_shot,
-        grad_cb_shot,
-        eta_source_ex,
-        eta_source_ey,
-        eta_source_ez,
-        direct_ca_step,
-        direct_cb_step,
-        step_ratio_eff);
+    if (storage_bf16) {
+      born_bggrad_prepare_direct_3d<__nv_bfloat16>
+          <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+             stream_compute>>>(
+              dca,
+              lambda_ex,
+              lambda_ey,
+              lambda_ez,
+              reinterpret_cast<__nv_bfloat16 const *>(dex_store),
+              reinterpret_cast<__nv_bfloat16 const *>(dey_store),
+              reinterpret_cast<__nv_bfloat16 const *>(dez_store),
+              reinterpret_cast<__nv_bfloat16 const *>(dcurl_x_store),
+              reinterpret_cast<__nv_bfloat16 const *>(dcurl_y_store),
+              reinterpret_cast<__nv_bfloat16 const *>(dcurl_z_store),
+              grad_ca,
+              grad_cb,
+              grad_ca_shot,
+              grad_cb_shot,
+              eta_source_ex,
+              eta_source_ey,
+              eta_source_ez,
+              direct_ca_step,
+              direct_cb_step,
+              step_ratio_eff);
+    } else {
+      born_bggrad_prepare_direct_3d<TIDE_DTYPE>
+          <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+             stream_compute>>>(
+              dca,
+              lambda_ex,
+              lambda_ey,
+              lambda_ez,
+              reinterpret_cast<TIDE_DTYPE const *>(dex_store),
+              reinterpret_cast<TIDE_DTYPE const *>(dey_store),
+              reinterpret_cast<TIDE_DTYPE const *>(dez_store),
+              reinterpret_cast<TIDE_DTYPE const *>(dcurl_x_store),
+              reinterpret_cast<TIDE_DTYPE const *>(dcurl_y_store),
+              reinterpret_cast<TIDE_DTYPE const *>(dcurl_z_store),
+              grad_ca,
+              grad_cb,
+              grad_ca_shot,
+              grad_cb_shot,
+              eta_source_ex,
+              eta_source_ey,
+              eta_source_ez,
+              direct_ca_step,
+              direct_cb_step,
+              step_ratio_eff);
+    }
 
     born_bggrad_direct_dcb_to_eta_h_3d<<<(unsigned)launch_cfg.blocks_cells,
                                          launch_cfg.threads_cells, 0,
@@ -4673,45 +4721,87 @@ extern "C" void FUNC(born_backward_bggrad)(
         kyh,
         kxh);
 
-    backward_kernel_lambda_e_with_grad<TIDE_DTYPE>
-        <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
-           stream_compute>>>(
-            ca,
-            cq,
-            eta_hx,
-            eta_hy,
-            eta_hz,
-            eta_ex,
-            eta_ey,
-            eta_ez,
-            m_eta_hz_y,
-            m_eta_hy_z,
-            m_eta_hx_z,
-            m_eta_hz_x,
-            m_eta_hy_x,
-            m_eta_hx_y,
-            az,
-            bz,
-            ay,
-            by,
-            ax,
-            bx,
-            kz,
-            ky,
-            kx,
-            ex_store,
-            ey_store,
-            ez_store,
-            curl_x_store,
-            curl_y_store,
-            curl_z_store,
-            grad_ca,
-            grad_cb,
-            grad_ca_shot,
-            grad_cb_shot,
-            grad_ca_step,
-            grad_cb_step,
-            step_ratio_eff);
+    if (storage_bf16) {
+      backward_kernel_lambda_e_with_grad<__nv_bfloat16>
+          <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+             stream_compute>>>(
+              ca,
+              cq,
+              eta_hx,
+              eta_hy,
+              eta_hz,
+              eta_ex,
+              eta_ey,
+              eta_ez,
+              m_eta_hz_y,
+              m_eta_hy_z,
+              m_eta_hx_z,
+              m_eta_hz_x,
+              m_eta_hy_x,
+              m_eta_hx_y,
+              az,
+              bz,
+              ay,
+              by,
+              ax,
+              bx,
+              kz,
+              ky,
+              kx,
+              reinterpret_cast<__nv_bfloat16 const *>(ex_store),
+              reinterpret_cast<__nv_bfloat16 const *>(ey_store),
+              reinterpret_cast<__nv_bfloat16 const *>(ez_store),
+              reinterpret_cast<__nv_bfloat16 const *>(curl_x_store),
+              reinterpret_cast<__nv_bfloat16 const *>(curl_y_store),
+              reinterpret_cast<__nv_bfloat16 const *>(curl_z_store),
+              grad_ca,
+              grad_cb,
+              grad_ca_shot,
+              grad_cb_shot,
+              grad_ca_step,
+              grad_cb_step,
+              step_ratio_eff);
+    } else {
+      backward_kernel_lambda_e_with_grad<TIDE_DTYPE>
+          <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+             stream_compute>>>(
+              ca,
+              cq,
+              eta_hx,
+              eta_hy,
+              eta_hz,
+              eta_ex,
+              eta_ey,
+              eta_ez,
+              m_eta_hz_y,
+              m_eta_hy_z,
+              m_eta_hx_z,
+              m_eta_hz_x,
+              m_eta_hy_x,
+              m_eta_hx_y,
+              az,
+              bz,
+              ay,
+              by,
+              ax,
+              bx,
+              kz,
+              ky,
+              kx,
+              reinterpret_cast<TIDE_DTYPE const *>(ex_store),
+              reinterpret_cast<TIDE_DTYPE const *>(ey_store),
+              reinterpret_cast<TIDE_DTYPE const *>(ez_store),
+              reinterpret_cast<TIDE_DTYPE const *>(curl_x_store),
+              reinterpret_cast<TIDE_DTYPE const *>(curl_y_store),
+              reinterpret_cast<TIDE_DTYPE const *>(curl_z_store),
+              grad_ca,
+              grad_cb,
+              grad_ca_shot,
+              grad_cb_shot,
+              grad_ca_step,
+              grad_cb_step,
+              step_ratio_eff);
+    }
 
     add_eta_source_3d<<<(unsigned)launch_cfg.blocks_cells,
                         launch_cfg.threads_cells, 0, stream_compute>>>(
@@ -4722,45 +4812,87 @@ extern "C" void FUNC(born_backward_bggrad)(
         eta_source_ey,
         eta_source_ez);
 
-    backward_kernel_lambda_e_with_grad<TIDE_DTYPE>
-        <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
-           stream_compute>>>(
-            ca,
-            cq,
-            lambda_hx,
-            lambda_hy,
-            lambda_hz,
-            lambda_ex,
-            lambda_ey,
-            lambda_ez,
-            m_lambda_hz_y,
-            m_lambda_hy_z,
-            m_lambda_hx_z,
-            m_lambda_hz_x,
-            m_lambda_hy_x,
-            m_lambda_hx_y,
-            az,
-            bz,
-            ay,
-            by,
-            ax,
-            bx,
-            kz,
-            ky,
-            kx,
-            ex_store,
-            ey_store,
-            ez_store,
-            curl_x_store,
-            curl_y_store,
-            curl_z_store,
-            grad_dca,
-            grad_dcb,
-            grad_dca_shot,
-            grad_dcb_shot,
-            grad_dca_step,
-            grad_dcb_step,
-            step_ratio_eff);
+    if (storage_bf16) {
+      backward_kernel_lambda_e_with_grad<__nv_bfloat16>
+          <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+             stream_compute>>>(
+              ca,
+              cq,
+              lambda_hx,
+              lambda_hy,
+              lambda_hz,
+              lambda_ex,
+              lambda_ey,
+              lambda_ez,
+              m_lambda_hz_y,
+              m_lambda_hy_z,
+              m_lambda_hx_z,
+              m_lambda_hz_x,
+              m_lambda_hy_x,
+              m_lambda_hx_y,
+              az,
+              bz,
+              ay,
+              by,
+              ax,
+              bx,
+              kz,
+              ky,
+              kx,
+              reinterpret_cast<__nv_bfloat16 const *>(ex_store),
+              reinterpret_cast<__nv_bfloat16 const *>(ey_store),
+              reinterpret_cast<__nv_bfloat16 const *>(ez_store),
+              reinterpret_cast<__nv_bfloat16 const *>(curl_x_store),
+              reinterpret_cast<__nv_bfloat16 const *>(curl_y_store),
+              reinterpret_cast<__nv_bfloat16 const *>(curl_z_store),
+              grad_dca,
+              grad_dcb,
+              grad_dca_shot,
+              grad_dcb_shot,
+              grad_dca_step,
+              grad_dcb_step,
+              step_ratio_eff);
+    } else {
+      backward_kernel_lambda_e_with_grad<TIDE_DTYPE>
+          <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+             stream_compute>>>(
+              ca,
+              cq,
+              lambda_hx,
+              lambda_hy,
+              lambda_hz,
+              lambda_ex,
+              lambda_ey,
+              lambda_ez,
+              m_lambda_hz_y,
+              m_lambda_hy_z,
+              m_lambda_hx_z,
+              m_lambda_hz_x,
+              m_lambda_hy_x,
+              m_lambda_hx_y,
+              az,
+              bz,
+              ay,
+              by,
+              ax,
+              bx,
+              kz,
+              ky,
+              kx,
+              reinterpret_cast<TIDE_DTYPE const *>(ex_store),
+              reinterpret_cast<TIDE_DTYPE const *>(ey_store),
+              reinterpret_cast<TIDE_DTYPE const *>(ez_store),
+              reinterpret_cast<TIDE_DTYPE const *>(curl_x_store),
+              reinterpret_cast<TIDE_DTYPE const *>(curl_y_store),
+              reinterpret_cast<TIDE_DTYPE const *>(curl_z_store),
+              grad_dca,
+              grad_dcb,
+              grad_dca_shot,
+              grad_dcb_shot,
+              grad_dca_step,
+              grad_dcb_step,
+              step_ratio_eff);
+    }
   }
 
   if (reduce_grad_ca || reduce_grad_cb || reduce_grad_dca || reduce_grad_dcb) {

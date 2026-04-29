@@ -110,7 +110,9 @@ class BornTMForwardFunc(torch.autograd.Function):
         dca_requires_grad = dca.requires_grad
         dcb_requires_grad = dcb.requires_grad
         df_requires_grad = df.requires_grad
-        background_grad_possible = ca.requires_grad or cb.requires_grad or f0.requires_grad
+        background_grad_possible = (
+            ca.requires_grad or cb.requires_grad or f0.requires_grad
+        )
         store_ey_needed = dca_requires_grad or background_grad_possible
         store_curl_needed = dcb_requires_grad or background_grad_possible
         needs_storage = store_ey_needed or store_curl_needed
@@ -135,10 +137,11 @@ class BornTMForwardFunc(torch.autograd.Function):
         backward_storage_filename_arrays: list[Any] = []
         storage_mode = STORAGE_NONE
         shot_bytes_uncomp = 0
+        store_dtype = coeff_dtype
         stream_keepalive: tuple[Any, ...] = ()
         direct_snapshot_tensors = (
-            torch.empty(0, device=device, dtype=coeff_dtype),
-            torch.empty(0, device=device, dtype=coeff_dtype),
+            torch.empty(0, device=device, dtype=store_dtype),
+            torch.empty(0, device=device, dtype=store_dtype),
         )
 
         if needs_storage:
@@ -171,7 +174,7 @@ class BornTMForwardFunc(torch.autograd.Function):
                         ny,
                         nx,
                         device=device,
-                        dtype=coeff_dtype,
+                        dtype=store_dtype,
                     ),
                     torch.empty(
                         num_steps_stored,
@@ -179,7 +182,7 @@ class BornTMForwardFunc(torch.autograd.Function):
                         ny,
                         nx,
                         device=device,
-                        dtype=coeff_dtype,
+                        dtype=store_dtype,
                     ),
                 )
 
@@ -187,8 +190,8 @@ class BornTMForwardFunc(torch.autograd.Function):
             is_cuda = device.type == "cuda"
 
             def alloc_storage(requires_grad_cond: bool):
-                store_1 = torch.empty(0)
-                store_3 = torch.empty(0)
+                store_1 = torch.empty(0, device=device, dtype=store_dtype)
+                store_3 = torch.empty(0, device=device, dtype=store_dtype)
                 filenames_arr = (char_ptr_type * 0)()
 
                 if requires_grad_cond and storage_mode != STORAGE_NONE:
@@ -424,10 +427,10 @@ class BornTMForwardFunc(torch.autograd.Function):
 
         if not backward_storage_tensors:
             backward_storage_tensors = [
-                torch.empty(0, device=device, dtype=coeff_dtype),
-                torch.empty(0, device=device, dtype=coeff_dtype),
-                torch.empty(0, device=device, dtype=coeff_dtype),
-                torch.empty(0, device=device, dtype=coeff_dtype),
+                torch.empty(0, device=device, dtype=store_dtype),
+                torch.empty(0, device=device, dtype=store_dtype),
+                torch.empty(0, device=device, dtype=store_dtype),
+                torch.empty(0, device=device, dtype=store_dtype),
             ]
         if not backward_storage_filename_arrays:
             backward_storage_filename_arrays = [None, None]
@@ -610,7 +613,9 @@ class BornTMForwardFunc(torch.autograd.Function):
         bg_ca_requires_grad = ctx.needs_input_grad[2]
         bg_cb_requires_grad = ctx.needs_input_grad[3]
         f0_requires_grad = ctx.needs_input_grad[5]
-        model_grad_requested = bg_ca_requires_grad or bg_cb_requires_grad or f0_requires_grad
+        model_grad_requested = (
+            bg_ca_requires_grad or bg_cb_requires_grad or f0_requires_grad
+        )
 
         receiver_grad_needed = bool(
             grad_r is not None
@@ -649,8 +654,10 @@ class BornTMForwardFunc(torch.autograd.Function):
             grad_background_r = torch.empty(0, device=device, dtype=coeff_dtype)
 
         needs_bggrad = receiver_grad_needed and model_grad_requested
-        needs_born_backward = receiver_grad_needed and not needs_bggrad and (
-            ctx.dca_requires_grad or ctx.dcb_requires_grad or ctx.df_requires_grad
+        needs_born_backward = (
+            receiver_grad_needed
+            and not needs_bggrad
+            and (ctx.dca_requires_grad or ctx.dcb_requires_grad or ctx.df_requires_grad)
         )
         needs_background_backward = (
             background_receiver_grad_needed and model_grad_requested
@@ -750,7 +757,11 @@ class BornTMForwardFunc(torch.autograd.Function):
         else:
             grad_cb_shot = torch.empty(0, device=device, dtype=coeff_dtype)
 
-        if f0_requires_grad and (needs_bggrad or needs_background_backward) and ctx.n_sources > 0:
+        if (
+            f0_requires_grad
+            and (needs_bggrad or needs_background_backward)
+            and ctx.n_sources > 0
+        ):
             grad_f0 = torch.zeros(
                 ctx.nt, ctx.n_shots, ctx.n_sources, device=device, dtype=coeff_dtype
             )
@@ -876,9 +887,15 @@ class BornTMForwardFunc(torch.autograd.Function):
             bggrad_grad_ca = grad_ca
             bggrad_grad_cb = grad_cb
             if needs_background_backward:
-                bggrad_grad_f0 = torch.zeros_like(grad_f0) if grad_f0.numel() > 0 else grad_f0
-                bggrad_grad_ca = torch.zeros_like(grad_ca) if grad_ca.numel() > 0 else grad_ca
-                bggrad_grad_cb = torch.zeros_like(grad_cb) if grad_cb.numel() > 0 else grad_cb
+                bggrad_grad_f0 = (
+                    torch.zeros_like(grad_f0) if grad_f0.numel() > 0 else grad_f0
+                )
+                bggrad_grad_ca = (
+                    torch.zeros_like(grad_ca) if grad_ca.numel() > 0 else grad_ca
+                )
+                bggrad_grad_cb = (
+                    torch.zeros_like(grad_cb) if grad_cb.numel() > 0 else grad_cb
+                )
             bggrad_grad_ca_shot_ptr = (
                 bggrad_grad_ca if ctx.ca_batched else grad_ca_shot_ptr
             )
@@ -1124,6 +1141,7 @@ class BornTMForwardFunc(torch.autograd.Function):
 
         _release_ctx_handle(getattr(ctx, "_ctx_handle_id", None))
         return tuple(grads)
+
 
 def tm2d_receiver_hvp_naive(
     epsilon: torch.Tensor,

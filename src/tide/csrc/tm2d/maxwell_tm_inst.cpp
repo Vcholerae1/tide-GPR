@@ -416,8 +416,8 @@ static void born_kernel_e_with_storage_bf16(
     bool const ca_batched, bool const cb_batched, bool const ca_requires_grad,
     bool const cb_requires_grad, tide_bfloat16 *__restrict const ey_store,
     tide_bfloat16 *__restrict const curl_h_store,
-    TIDE_DTYPE *__restrict const dey_store,
-    TIDE_DTYPE *__restrict const dcurl_h_store) {
+    tide_bfloat16 *__restrict const dey_store,
+    tide_bfloat16 *__restrict const dcurl_h_store) {
 
   ::tide::GridParams<TIDE_DTYPE> params = {
       ay,      ayh,        ax,         axh,        by,     byh,    bx,
@@ -511,8 +511,8 @@ static inline void born_kernel_e_with_storage_dispatch(
     bool const ca_batched, bool const cb_batched, bool const ca_requires_grad,
     bool const cb_requires_grad, tide_bfloat16 *__restrict const ey_store,
     tide_bfloat16 *__restrict const curl_store,
-    TIDE_DTYPE *__restrict const dey_store,
-    TIDE_DTYPE *__restrict const dcurl_store) {
+    tide_bfloat16 *__restrict const dey_store,
+    tide_bfloat16 *__restrict const dcurl_store) {
   born_kernel_e_with_storage_bf16(
       ca, cb, dca, dcb, hx, hz, ey, m_hx_z, m_hz_x, dhx, dhz, dey, dm_hx_z,
       dm_hz_x, ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx,
@@ -606,8 +606,8 @@ static inline void born_step_with_storage(
     int64_t const pml_y1, int64_t const pml_x0, int64_t const pml_x1,
     bool const ca_batched, bool const cb_batched,
     StoreT *__restrict const ey_store_1, StoreT *__restrict const curl_store_1,
-    TIDE_DTYPE *__restrict const dey_store_1,
-    TIDE_DTYPE *__restrict const dcurl_store_1,
+    StoreT *__restrict const dey_store_1,
+    StoreT *__restrict const dcurl_store_1,
     bool const store_ey, bool const store_curl, int64_t const storage_mode,
     FILE *const *const fp_ey, FILE *const *const fp_curl,
     int64_t const store_offset, int64_t const step_idx,
@@ -616,11 +616,11 @@ static inline void born_step_with_storage(
   StoreT *const curl_store_1_t =
       store_curl ? (curl_store_1 + store_offset) : NULL;
   bool const store_direct = store_ey || store_curl;
-  TIDE_DTYPE *const dey_store_1_t =
+  StoreT *const dey_store_1_t =
       (store_direct && dey_store_1 != NULL)
           ? (dey_store_1 + step_idx * n_shots * shot_numel)
           : NULL;
-  TIDE_DTYPE *const dcurl_store_1_t =
+  StoreT *const dcurl_store_1_t =
       (store_direct && dcurl_store_1 != NULL)
           ? (dcurl_store_1 + step_idx * n_shots * shot_numel)
           : NULL;
@@ -1158,7 +1158,7 @@ extern "C"
         void *const ey_store_3, char const *const *const ey_filenames,
         TIDE_DTYPE *const curl_store_1, void *const curl_store_3,
         char const *const *const curl_filenames,
-        TIDE_DTYPE *const dey_store, TIDE_DTYPE *const dcurl_store,
+        void *const dey_store, void *const dcurl_store,
         TIDE_DTYPE const *const ay, TIDE_DTYPE const *const by,
         TIDE_DTYPE const *const ayh,
         TIDE_DTYPE const *const byh, TIDE_DTYPE const *const ax,
@@ -1233,17 +1233,18 @@ extern "C"
           dm_hx_z, dm_hz_x, ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx,
           kxh, rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0, pml_y1, pml_x0,
           pml_x1, ca_batched, cb_batched, (tide_bfloat16 *)ey_store_1,
-          (tide_bfloat16 *)curl_store_1, dey_store, dcurl_store, store_ey,
-          store_curl, storage_mode, fp_ey, fp_curl, store_offset, step_idx,
-          shot_bytes_uncomp);
+          (tide_bfloat16 *)curl_store_1, (tide_bfloat16 *)dey_store,
+          (tide_bfloat16 *)dcurl_store, store_ey, store_curl, storage_mode,
+          fp_ey, fp_curl, store_offset, step_idx, shot_bytes_uncomp);
     } else {
       born_step_with_storage<TIDE_DTYPE>(
           ca, cb, dca, dcb, hx, hz, ey, m_hx_z, m_hz_x, dhx, dhz, dey,
           dm_hx_z, dm_hz_x, ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx,
           kxh, rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0, pml_y1, pml_x0,
-          pml_x1, ca_batched, cb_batched, ey_store_1, curl_store_1, dey_store,
-          dcurl_store, store_ey, store_curl, storage_mode, fp_ey, fp_curl,
-          store_offset, step_idx, shot_bytes_uncomp);
+          pml_x1, ca_batched, cb_batched, ey_store_1, curl_store_1,
+          (TIDE_DTYPE *)dey_store, (TIDE_DTYPE *)dcurl_store, store_ey,
+          store_curl, storage_mode, fp_ey, fp_curl, store_offset, step_idx,
+          shot_bytes_uncomp);
     }
 
     if (n_sources_per_shot > 0) {
@@ -1648,12 +1649,13 @@ static void inverse_kernel_born_e_and_curl_no_pml(
   }
 }
 
+template <typename StoreT>
 static void born_background_prepare_direct(
     TIDE_DTYPE const *__restrict const dca,
     TIDE_DTYPE const *__restrict const dcb,
     TIDE_DTYPE const *__restrict const lambda_sc_ey,
-    TIDE_DTYPE const *__restrict const dey_old,
-    TIDE_DTYPE const *__restrict const dcurl_h_old,
+    StoreT const *__restrict const dey_old,
+    StoreT const *__restrict const dcurl_h_old,
     TIDE_DTYPE *__restrict const grad_ca_shot,
     TIDE_DTYPE *__restrict const grad_cb_shot,
     TIDE_DTYPE *__restrict const eta_source_old,
@@ -1688,7 +1690,8 @@ static void born_background_prepare_direct(
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
     for (y = 0; y < ny; ++y) {
       for (x = 0; x < nx; ++x) {
-        ::tide::born_background_prepare_direct_core<TIDE_DTYPE, TIDE_STENCIL>(
+        ::tide::born_background_prepare_direct_core<TIDE_DTYPE, StoreT,
+                                                    TIDE_STENCIL>(
             params, dca, dcb, lambda_sc_ey, dey_old, dcurl_h_old, grad_ca_shot,
             grad_cb_shot, eta_source_old, work_x, work_z, step_ratio, y, x,
             shot_idx);
@@ -1712,8 +1715,8 @@ extern "C"
         TIDE_DTYPE *const ey_store_1, void *const ey_store_3,
         char const *const *const ey_filenames, TIDE_DTYPE *const curl_store_1,
         void *const curl_store_3, char const *const *const curl_filenames,
-        TIDE_DTYPE const *const dey_store,
-        TIDE_DTYPE const *const dcurl_store,
+        void const *const dey_store,
+        void const *const dcurl_store,
         TIDE_DTYPE *const ey, TIDE_DTYPE *const hx, TIDE_DTYPE *const hz,
         TIDE_DTYPE *const dey, TIDE_DTYPE *const dhx, TIDE_DTYPE *const dhz,
         TIDE_DTYPE *const grad_f0, TIDE_DTYPE *const grad_df,
@@ -1836,9 +1839,12 @@ extern "C"
     bool const load_curl = do_grad && store_curl_needed;
     int64_t const store_offset =
         (storage_mode == STORAGE_DEVICE ? store_idx * store_size : 0);
-    TIDE_DTYPE const *const dey_store_t = dey_store + store_idx * store_size;
-    TIDE_DTYPE const *const dcurl_store_t =
-        dcurl_store + store_idx * store_size;
+    size_t const direct_store_offset =
+        (size_t)store_idx * (size_t)shot_bytes_uncomp * (size_t)n_shots;
+    void const *const dey_store_t =
+        (uint8_t const *)dey_store + direct_store_offset;
+    void const *const dcurl_store_t =
+        (uint8_t const *)dcurl_store + direct_store_offset;
 
     if (n_receivers_per_shot > 0) {
       add_sources_ey(lambda_ey, grad_r + t * n_shots * n_receivers_per_shot,
@@ -1851,11 +1857,21 @@ extern "C"
                           sources_i, n_shots, shot_numel, n_sources_per_shot);
     }
 
-    born_background_prepare_direct(
-        dca, dcb, lambda_ey, dey_store_t, dcurl_store_t, grad_ca_shot,
-        grad_cb_shot, eta_source_old, work_x, work_z, ay, ayh, ax, axh, by,
-        byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel,
-        pml_y0, pml_y1, pml_x0, pml_x1, ca_batched, cb_batched, step_ratio);
+    if (storage_bf16) {
+      born_background_prepare_direct<tide_bfloat16>(
+          dca, dcb, lambda_ey, (tide_bfloat16 const *)dey_store_t,
+          (tide_bfloat16 const *)dcurl_store_t, grad_ca_shot, grad_cb_shot,
+          eta_source_old, work_x, work_z, ay, ayh, ax, axh, by, byh, bx, bxh,
+          ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0,
+          pml_y1, pml_x0, pml_x1, ca_batched, cb_batched, step_ratio);
+    } else {
+      born_background_prepare_direct<TIDE_DTYPE>(
+          dca, dcb, lambda_ey, (TIDE_DTYPE const *)dey_store_t,
+          (TIDE_DTYPE const *)dcurl_store_t, grad_ca_shot, grad_cb_shot,
+          eta_source_old, work_x, work_z, ay, ayh, ax, axh, by, byh, bx, bxh,
+          ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0,
+          pml_y1, pml_x0, pml_x1, ca_batched, cb_batched, step_ratio);
+    }
     born_backward_apply_e_to_h(work_x, work_z, eta_hx, eta_hz, ay, ayh, ax,
                                axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy,
                                rdx, n_shots, ny, nx, shot_numel, pml_y0,
