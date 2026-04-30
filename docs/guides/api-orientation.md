@@ -6,6 +6,8 @@ Use this page to decide which public API layer matches your workflow.
 
 - `tide.maxwelltm(...)`
 - `tide.maxwell3d(...)`
+- `tide.borntm(...)`
+- `tide.born3d(...)`
 
 Use the functional APIs when:
 
@@ -17,6 +19,8 @@ Use the functional APIs when:
 
 - `tide.MaxwellTM(...)`
 - `tide.Maxwell3D(...)`
+- `tide.BornTM(...)`
+- `tide.Born3D(...)`
 
 Use the module APIs when:
 
@@ -35,5 +39,6 @@ Use the module APIs when:
 
 1. Start with `tide.maxwelltm(...)` unless you already need 3D geometry.
 2. Move to `tide.maxwell3d(...)` when component selection or full 3D layouts matter.
-3. Adopt `MaxwellTM(...)` or `Maxwell3D(...)` when you want a reusable model object inside a training or inversion loop.
-4. Read `guides/configuration.md` before tuning storage, callbacks, or backend behavior.
+3. Use `tide.borntm(...)` or `tide.born3d(...)` when you want a unified Born propagator that advances background and scattered wavefields together.
+4. Adopt `MaxwellTM(...)`, `Maxwell3D(...)`, `BornTM(...)`, or `Born3D(...)` when you want a reusable model object inside a training or inversion loop.
+5. Read `guides/configuration.md` before tuning storage, callbacks, or backend behavior.

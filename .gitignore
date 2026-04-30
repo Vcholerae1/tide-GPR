@@ -2,6 +2,8 @@
 __pycache__/
 *.py[oc]
 *.egg-info
+.pytest_cache/
+.ruff_cache/
 
 # Virtual environments
 .venv/
@@ -9,6 +11,7 @@ __pycache__/
 
 # Build artifacts
 build/
+build_profile/
 dist/
 wheels/
 site/
@@ -42,5 +45,7 @@ test.md
 *.png
 *.html
 !README.md
+!talks/*.html
 
 examples/
+.artifacts/

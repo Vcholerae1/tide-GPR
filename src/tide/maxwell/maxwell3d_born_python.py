@@ -269,10 +269,29 @@ def born3d_python(
     source_amplitude: torch.Tensor | None,
     source_location: torch.Tensor | None,
     receiver_location: torch.Tensor | None,
+    bg_receiver_location: torch.Tensor | None = None,
     *,
     stencil: int = 2,
     pml_width: int | Sequence[int] = 20,
     max_vel: float | None = None,
+    Ex_0: torch.Tensor | None = None,
+    Ey_0: torch.Tensor | None = None,
+    Ez_0: torch.Tensor | None = None,
+    Hx_0: torch.Tensor | None = None,
+    Hy_0: torch.Tensor | None = None,
+    Hz_0: torch.Tensor | None = None,
+    m_hz_y_0: torch.Tensor | None = None,
+    m_hy_z_0: torch.Tensor | None = None,
+    m_hx_z_0: torch.Tensor | None = None,
+    m_hz_x_0: torch.Tensor | None = None,
+    m_hy_x_0: torch.Tensor | None = None,
+    m_hx_y_0: torch.Tensor | None = None,
+    m_ey_z_0: torch.Tensor | None = None,
+    m_ez_y_0: torch.Tensor | None = None,
+    m_ez_x_0: torch.Tensor | None = None,
+    m_ex_z_0: torch.Tensor | None = None,
+    m_ex_y_0: torch.Tensor | None = None,
+    m_ey_x_0: torch.Tensor | None = None,
     dEx_0: torch.Tensor | None = None,
     dEy_0: torch.Tensor | None = None,
     dEz_0: torch.Tensor | None = None,
@@ -321,6 +340,12 @@ def born3d_python(
         receiver_location,
         shape=(model_nz, model_ny, model_nx),
         name="Receiver location",
+        check_lower_bound=False,
+    )
+    _validate_location_bounds(
+        bg_receiver_location,
+        shape=(model_nz, model_ny, model_nx),
+        name="Background receiver location",
         check_lower_bound=False,
     )
 
@@ -428,7 +453,7 @@ def born3d_python(
 
     size_with_batch = (n_shots, padded_nz, padded_ny, padded_nx)
     Ex = _init_wavefield_3d(
-        None,
+        Ex_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -436,7 +461,7 @@ def born3d_python(
         dtype=dtype,
     )
     Ey = _init_wavefield_3d(
-        None,
+        Ey_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -444,7 +469,7 @@ def born3d_python(
         dtype=dtype,
     )
     Ez = _init_wavefield_3d(
-        None,
+        Ez_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -452,7 +477,7 @@ def born3d_python(
         dtype=dtype,
     )
     Hx = _init_wavefield_3d(
-        None,
+        Hx_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -460,7 +485,7 @@ def born3d_python(
         dtype=dtype,
     )
     Hy = _init_wavefield_3d(
-        None,
+        Hy_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -468,7 +493,7 @@ def born3d_python(
         dtype=dtype,
     )
     Hz = _init_wavefield_3d(
-        None,
+        Hz_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -477,7 +502,7 @@ def born3d_python(
     )
 
     m_hz_y = _init_wavefield_3d(
-        None,
+        m_hz_y_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -485,7 +510,7 @@ def born3d_python(
         dtype=dtype,
     )
     m_hy_z = _init_wavefield_3d(
-        None,
+        m_hy_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -493,7 +518,7 @@ def born3d_python(
         dtype=dtype,
     )
     m_hx_z = _init_wavefield_3d(
-        None,
+        m_hx_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -501,7 +526,7 @@ def born3d_python(
         dtype=dtype,
     )
     m_hz_x = _init_wavefield_3d(
-        None,
+        m_hz_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -509,7 +534,7 @@ def born3d_python(
         dtype=dtype,
     )
     m_hy_x = _init_wavefield_3d(
-        None,
+        m_hy_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -517,7 +542,7 @@ def born3d_python(
         dtype=dtype,
     )
     m_hx_y = _init_wavefield_3d(
-        None,
+        m_hx_y_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -525,7 +550,7 @@ def born3d_python(
         dtype=dtype,
     )
     m_ey_z = _init_wavefield_3d(
-        None,
+        m_ey_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -533,7 +558,7 @@ def born3d_python(
         dtype=dtype,
     )
     m_ez_y = _init_wavefield_3d(
-        None,
+        m_ez_y_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -541,7 +566,7 @@ def born3d_python(
         dtype=dtype,
     )
     m_ez_x = _init_wavefield_3d(
-        None,
+        m_ez_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -549,7 +574,7 @@ def born3d_python(
         dtype=dtype,
     )
     m_ex_z = _init_wavefield_3d(
-        None,
+        m_ex_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -557,7 +582,7 @@ def born3d_python(
         dtype=dtype,
     )
     m_ex_y = _init_wavefield_3d(
-        None,
+        m_ex_y_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -565,7 +590,7 @@ def born3d_python(
         dtype=dtype,
     )
     m_ey_x = _init_wavefield_3d(
-        None,
+        m_ey_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -807,6 +832,18 @@ def born3d_python(
         receivers_i = torch.empty(0, device=device, dtype=torch.long)
         n_receivers = 0
 
+    if bg_receiver_location is not None and bg_receiver_location.numel() > 0:
+        bg_receiver_z = bg_receiver_location[..., 0] + total_pad[0]
+        bg_receiver_y = bg_receiver_location[..., 1] + total_pad[2]
+        bg_receiver_x = bg_receiver_location[..., 2] + total_pad[4]
+        bg_receivers_i = (
+            (bg_receiver_z * padded_ny + bg_receiver_y) * padded_nx + bg_receiver_x
+        ).long()
+        n_bg_receivers = int(bg_receiver_location.shape[1])
+    else:
+        bg_receivers_i = torch.empty(0, device=device, dtype=torch.long)
+        n_bg_receivers = 0
+
     source_coeff = -1.0 / (dx * dy * dz)
     if n_sources > 0 and source_amplitude is not None and source_amplitude.numel() > 0:
         cb_flat = cb.reshape(1, flat_model_shape).expand(n_shots, -1)
@@ -820,6 +857,7 @@ def born3d_python(
         cb_at_src = torch.empty(0, device=device, dtype=dtype)
         dcb_at_src = None
 
+    bg_receiver_samples: list[torch.Tensor] = []
     receiver_samples: list[torch.Tensor] = []
 
     for step in range(nt_steps):
@@ -1000,11 +1038,24 @@ def born3d_python(
                         size_with_batch,
                     )
 
+        if n_bg_receivers > 0:
+            bg_rec_field = _select_component(receiver_component, Ex, Ey, Ez)
+            bg_receiver_samples.append(
+                bg_rec_field.reshape(n_shots, flat_model_shape).gather(
+                    1, bg_receivers_i
+                )
+            )
+
         if n_receivers > 0:
             rec_field = _select_component(receiver_component, dEx, dEy, dEz)
             receiver_samples.append(
                 rec_field.reshape(n_shots, flat_model_shape).gather(1, receivers_i)
             )
+
+    if n_bg_receivers > 0:
+        bg_receiver_amplitudes = torch.stack(bg_receiver_samples, dim=0)
+    else:
+        bg_receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
 
     if n_receivers > 0:
         receiver_amplitudes = torch.stack(receiver_samples, dim=0)
@@ -1024,6 +1075,24 @@ def born3d_python(
         ),
     )
     return (
+        Ex[s],
+        Ey[s],
+        Ez[s],
+        Hx[s],
+        Hy[s],
+        Hz[s],
+        m_hz_y[s],
+        m_hy_z[s],
+        m_hx_z[s],
+        m_hz_x[s],
+        m_hy_x[s],
+        m_hx_y[s],
+        m_ey_z[s],
+        m_ez_y[s],
+        m_ez_x[s],
+        m_ex_z[s],
+        m_ex_y[s],
+        m_ey_x[s],
         dEx[s],
         dEy[s],
         dEz[s],
@@ -1042,6 +1111,7 @@ def born3d_python(
         dm_ex_z[s],
         dm_ex_y[s],
         dm_ey_x[s],
+        bg_receiver_amplitudes,
         receiver_amplitudes,
     )
 

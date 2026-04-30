@@ -4,10 +4,11 @@ Start here if you already know which workflow you want:
 
 1. `tide.maxwelltm` for 2D TM forward modeling and inversion
 2. `tide.maxwell3d` for 3D forward modeling and inversion
-3. `tide.MaxwellTM` / `tide.Maxwell3D` for reusable module-based workflows
-4. `tide.ricker` for source generation
-5. `tide.CallbackState` for forward and backward callbacks
-6. `tide.DebyeDispersion` and storage/backend helpers for advanced workflows
+3. `tide.borntm` / `tide.born3d` for unified two-wavefield Born-Maxwell propagation
+4. `tide.MaxwellTM` / `tide.Maxwell3D` / `tide.BornTM` / `tide.Born3D` for reusable module-based workflows
+5. `tide.ricker` for source generation
+6. `tide.CallbackState` for forward and backward callbacks
+7. `tide.DebyeDispersion` and storage/backend helpers for advanced workflows
 
 ## Public Modules
 - tide (top-level)

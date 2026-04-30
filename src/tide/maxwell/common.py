@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -9,6 +10,8 @@ from ..storage import STORAGE_CPU, STORAGE_DISK, STORAGE_NONE
 
 _CTX_HANDLE_REGISTRY: dict[int, dict[str, Any]] = {}
 _CTX_HANDLE_COUNTER = iter(range(1 << 62))
+
+ReceiverMisfit = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 def _register_ctx_handle(ctx_data: dict[str, Any]) -> torch.Tensor:
@@ -64,6 +67,29 @@ def _make_compute_stream(
 def _copy_if_present(dst: torch.Tensor, src: torch.Tensor) -> None:
     if dst.numel() > 0:
         dst.copy_(src)
+
+
+def _clone_param(param: torch.Tensor) -> torch.Tensor:
+    return param.detach().clone().requires_grad_(True)
+
+
+def _directional_receiver_hvp(
+    *,
+    params: tuple[torch.Tensor, ...],
+    observed_data: torch.Tensor,
+    misfit_fn: ReceiverMisfit,
+    predicted_data: torch.Tensor,
+    delta_predicted_data: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Apply H to a fixed direction via <dPhi/dd, Jv>."""
+    loss = misfit_fn(predicted_data, observed_data)
+    grad_data = torch.autograd.grad(
+        loss,
+        predicted_data,
+        create_graph=True,
+    )[0]
+    directional_objective = (grad_data * delta_predicted_data).sum()
+    return torch.autograd.grad(directional_objective, params)
 
 
 def _init_polarization_state(

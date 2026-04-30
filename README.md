@@ -150,7 +150,8 @@ out = tide.maxwelltm(
 
 Notes:
 - `storage_mode` accepts device, cpu, disk, none, and auto.
-- `storage_compression` accepts none or bf16 for TM2D snapshot storage.
+- `storage_compression` accepts none or bf16 for float32 snapshot storage on
+  Maxwell and Born native paths that save backward intermediates.
 
 ## Documentation
 

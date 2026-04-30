@@ -399,6 +399,143 @@ class TestGradientMultiSource:
 class TestGradientBackendConsistency:
     """Regression tests for eager vs native backend gradient consistency."""
 
+    def test_eager_vs_native_gradients_cpu_no_pml_match_reference(self):
+        try:
+            from tide import backend_utils
+        except Exception:  # pragma: no cover
+            pytest.skip("backend_utils unavailable")
+
+        if not backend_utils.is_backend_available():
+            pytest.skip("native backend unavailable")
+
+        device = torch.device("cpu")
+        dtype = torch.float64
+        ny, nx = 8, 9
+        nt = 12
+
+        epsilon = torch.full((ny, nx), 4.0, device=device, dtype=dtype)
+        epsilon[ny // 2 - 1 : ny // 2 + 1, nx // 2 - 1 : nx // 2 + 1] = 4.3
+        sigma = torch.full((ny, nx), 5e-4, device=device, dtype=dtype)
+        mu = torch.ones_like(epsilon)
+
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 3]]], dtype=torch.long, device=device
+        )
+        receiver_locations = torch.tensor(
+            [[[ny // 2, nx // 2], [ny // 2, nx // 2 + 1]]],
+            dtype=torch.long,
+            device=device,
+        )
+        source_amplitude = tide.ricker(
+            90e6,
+            nt,
+            4e-11,
+            peak_time=1.0 / 90e6,
+            dtype=dtype,
+            device=device,
+        ).view(1, 1, nt)
+
+        def compute_grads(backend: bool | str) -> tuple[torch.Tensor, torch.Tensor]:
+            eps = epsilon.clone().detach().requires_grad_(True)
+            sig = sigma.clone().detach().requires_grad_(True)
+            rec = tide.maxwelltm(
+                eps,
+                sig,
+                mu,
+                grid_spacing=0.02,
+                dt=4e-11,
+                source_amplitude=source_amplitude,
+                source_location=source_locations,
+                receiver_location=receiver_locations,
+                pml_width=0,
+                stencil=2,
+                python_backend=backend,
+            )[-1]
+            loss = 0.5 * rec.square().sum() + 0.01 * rec.sin().sum()
+            loss.backward()
+            assert eps.grad is not None
+            assert sig.grad is not None
+            return eps.grad.detach().clone(), sig.grad.detach().clone()
+
+        g_eps_ref, g_sig_ref = compute_grads("eager")
+        g_eps_native, g_sig_native = compute_grads(False)
+
+        torch.testing.assert_close(g_eps_native, g_eps_ref, rtol=1e-10, atol=1e-12)
+        torch.testing.assert_close(g_sig_native, g_sig_ref, rtol=1e-10, atol=1e-12)
+
+    def test_eager_vs_native_source_and_model_gradients_cpu_no_pml_match_reference(self):
+        try:
+            from tide import backend_utils
+        except Exception:  # pragma: no cover
+            pytest.skip("backend_utils unavailable")
+
+        if not backend_utils.is_backend_available():
+            pytest.skip("native backend unavailable")
+
+        device = torch.device("cpu")
+        dtype = torch.float64
+        ny, nx = 8, 9
+        nt = 12
+
+        epsilon = torch.full((ny, nx), 4.0, device=device, dtype=dtype)
+        epsilon[ny // 2 - 1 : ny // 2 + 1, nx // 2 - 1 : nx // 2 + 1] = 4.3
+        sigma = torch.full((ny, nx), 5e-4, device=device, dtype=dtype)
+        mu = torch.ones_like(epsilon)
+
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 3]]], dtype=torch.long, device=device
+        )
+        receiver_locations = torch.tensor(
+            [[[ny // 2, nx // 2], [ny // 2, nx // 2 + 1]]],
+            dtype=torch.long,
+            device=device,
+        )
+        source_wavelet = tide.ricker(
+            90e6,
+            nt,
+            4e-11,
+            peak_time=1.0 / 90e6,
+            dtype=dtype,
+            device=device,
+        ).view(1, 1, nt)
+
+        def compute_grads(
+            backend: bool | str,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            eps = epsilon.clone().detach().requires_grad_(True)
+            sig = sigma.clone().detach().requires_grad_(True)
+            src = source_wavelet.clone().detach().requires_grad_(True)
+            rec = tide.maxwelltm(
+                eps,
+                sig,
+                mu,
+                grid_spacing=0.02,
+                dt=4e-11,
+                source_amplitude=src,
+                source_location=source_locations,
+                receiver_location=receiver_locations,
+                pml_width=0,
+                stencil=2,
+                python_backend=backend,
+            )[-1]
+            loss = 0.5 * rec.square().sum() + 0.01 * rec.sin().sum()
+            loss.backward()
+            assert eps.grad is not None
+            assert sig.grad is not None
+            assert src.grad is not None
+            return (
+                eps.grad.detach().clone(),
+                sig.grad.detach().clone(),
+                src.grad.detach().clone(),
+            )
+
+        g_eps_ref, g_sig_ref, g_src_ref = compute_grads("eager")
+        g_eps_native, g_sig_native, g_src_native = compute_grads(False)
+
+        torch.testing.assert_close(g_eps_native, g_eps_ref, rtol=1e-10, atol=1e-12)
+        torch.testing.assert_close(g_sig_native, g_sig_ref, rtol=1e-10, atol=1e-12)
+        torch.testing.assert_close(g_src_native, g_src_ref, rtol=1e-10, atol=1e-12)
+
     def test_eager_vs_native_gradients_cpu(self):
         try:
             from tide import backend_utils

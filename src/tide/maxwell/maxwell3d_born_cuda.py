@@ -3,6 +3,7 @@ from collections.abc import Sequence
 
 import torch
 
+from ..storage import _normalize_storage_compression
 from .. import staggered
 from ..grid_utils import _normalize_grid_spacing_3d, _normalize_pml_width_3d
 from ..padding import create_or_pad, zero_interior
@@ -11,9 +12,262 @@ from ..utils import (
     compile_material_coefficients,
     linearize_material_coefficients,
 )
+from ..validation import validate_model_gradient_sampling_interval
 from .maxwell3d_born_autograd import Born3DForwardFunc
 from .maxwell3d_born_python import born3d_python
 from .validation_internal import _COMPONENT_TO_INDEX_3D
+
+
+_HYBRID_TENSOR_ARG_NAMES = (
+    "epsilon",
+    "sigma",
+    "mu",
+    "depsilon",
+    "dsigma",
+    "dca",
+    "dcb",
+    "source_amplitude",
+    "source_location",
+    "receiver_location",
+    "Ex_0",
+    "Ey_0",
+    "Ez_0",
+    "Hx_0",
+    "Hy_0",
+    "Hz_0",
+    "m_hz_y_0",
+    "m_hy_z_0",
+    "m_hx_z_0",
+    "m_hz_x_0",
+    "m_hy_x_0",
+    "m_hx_y_0",
+    "m_ey_z_0",
+    "m_ez_y_0",
+    "m_ez_x_0",
+    "m_ex_z_0",
+    "m_ex_y_0",
+    "m_ey_x_0",
+    "dEx_0",
+    "dEy_0",
+    "dEz_0",
+    "dHx_0",
+    "dHy_0",
+    "dHz_0",
+    "dm_hz_y_0",
+    "dm_hy_z_0",
+    "dm_hx_z_0",
+    "dm_hz_x_0",
+    "dm_hy_x_0",
+    "dm_hx_y_0",
+    "dm_ey_z_0",
+    "dm_ez_y_0",
+    "dm_ez_x_0",
+    "dm_ex_z_0",
+    "dm_ex_y_0",
+    "dm_ey_x_0",
+)
+
+
+class _Born3DNativeAutogradFallbackFunc(torch.autograd.Function):
+    """Native 3D Born forward with Python reference gradients for unsupported grads."""
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx,
+        *args,
+    ) -> tuple[torch.Tensor, ...]:
+        meta = args[-1]
+        values = dict(zip(_HYBRID_TENSOR_ARG_NAMES, args[:-1], strict=True))
+        ctx.meta = meta
+        ctx.values = values
+
+        def detached(name: str) -> torch.Tensor | None:
+            value = values[name]
+            return value.detach() if isinstance(value, torch.Tensor) else None
+
+        outputs = born3d_c_cuda(
+            detached("epsilon"),
+            detached("sigma"),
+            detached("mu"),
+            detached("depsilon"),
+            detached("dsigma"),
+            detached("dca"),
+            detached("dcb"),
+            meta["grid_spacing"],
+            meta["dt"],
+            detached("source_amplitude"),
+            detached("source_location"),
+            detached("receiver_location"),
+            meta["stencil"],
+            meta["pml_width"],
+            meta["max_vel"],
+            detached("Ex_0"),
+            detached("Ey_0"),
+            detached("Ez_0"),
+            detached("Hx_0"),
+            detached("Hy_0"),
+            detached("Hz_0"),
+            detached("m_hz_y_0"),
+            detached("m_hy_z_0"),
+            detached("m_hx_z_0"),
+            detached("m_hz_x_0"),
+            detached("m_hy_x_0"),
+            detached("m_hx_y_0"),
+            detached("m_ey_z_0"),
+            detached("m_ez_y_0"),
+            detached("m_ez_x_0"),
+            detached("m_ex_z_0"),
+            detached("m_ex_y_0"),
+            detached("m_ey_x_0"),
+            detached("dEx_0"),
+            detached("dEy_0"),
+            detached("dEz_0"),
+            detached("dHx_0"),
+            detached("dHy_0"),
+            detached("dHz_0"),
+            detached("dm_hz_y_0"),
+            detached("dm_hy_z_0"),
+            detached("dm_hx_z_0"),
+            detached("dm_hz_x_0"),
+            detached("dm_hy_x_0"),
+            detached("dm_hx_y_0"),
+            detached("dm_ey_z_0"),
+            detached("dm_ez_y_0"),
+            detached("dm_ez_x_0"),
+            detached("dm_ex_z_0"),
+            detached("dm_ex_y_0"),
+            detached("dm_ey_x_0"),
+            meta["nt"],
+            meta["parameterization"],
+            meta["model_gradient_sampling_interval"],
+            meta["linearize_source"],
+            meta["source_component"],
+            meta["receiver_component"],
+            storage_mode=meta["storage_mode"],
+            storage_path=meta["storage_path"],
+            storage_compression=meta["storage_compression"],
+            storage_bytes_limit_device=meta["storage_bytes_limit_device"],
+            storage_bytes_limit_host=meta["storage_bytes_limit_host"],
+            n_threads=meta["n_threads"],
+            _force_no_gradient_fallback=True,
+        )
+        return tuple(outputs)
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):  # type: ignore[override]
+        meta = ctx.meta
+        values = ctx.values
+
+        differentiable_names: list[str] = []
+        differentiable_values: list[torch.Tensor] = []
+        ref_values: dict[str, torch.Tensor | None] = {}
+
+        for idx, name in enumerate(_HYBRID_TENSOR_ARG_NAMES):
+            value = values[name]
+            if not isinstance(value, torch.Tensor):
+                ref_values[name] = None
+                continue
+            if ctx.needs_input_grad[idx] and torch.is_floating_point(value):
+                ref = value.detach().requires_grad_(True)
+                differentiable_names.append(name)
+                differentiable_values.append(ref)
+            else:
+                ref = value.detach()
+            ref_values[name] = ref
+
+        if not differentiable_values:
+            return (None,) * (len(_HYBRID_TENSOR_ARG_NAMES) + 1)
+
+        with torch.enable_grad():
+            ref_outputs = born3d_python(
+                ref_values["epsilon"],
+                ref_values["sigma"],
+                ref_values["mu"],
+                ref_values["depsilon"],
+                ref_values["dsigma"],
+                ref_values["dca"],
+                ref_values["dcb"],
+                meta["grid_spacing"],
+                meta["dt"],
+                ref_values["source_amplitude"],
+                ref_values["source_location"],
+                ref_values["receiver_location"],
+                None,
+                stencil=meta["stencil"],
+                pml_width=meta["pml_width"],
+                max_vel=meta["max_vel"],
+                Ex_0=ref_values["Ex_0"],
+                Ey_0=ref_values["Ey_0"],
+                Ez_0=ref_values["Ez_0"],
+                Hx_0=ref_values["Hx_0"],
+                Hy_0=ref_values["Hy_0"],
+                Hz_0=ref_values["Hz_0"],
+                m_hz_y_0=ref_values["m_hz_y_0"],
+                m_hy_z_0=ref_values["m_hy_z_0"],
+                m_hx_z_0=ref_values["m_hx_z_0"],
+                m_hz_x_0=ref_values["m_hz_x_0"],
+                m_hy_x_0=ref_values["m_hy_x_0"],
+                m_hx_y_0=ref_values["m_hx_y_0"],
+                m_ey_z_0=ref_values["m_ey_z_0"],
+                m_ez_y_0=ref_values["m_ez_y_0"],
+                m_ez_x_0=ref_values["m_ez_x_0"],
+                m_ex_z_0=ref_values["m_ex_z_0"],
+                m_ex_y_0=ref_values["m_ex_y_0"],
+                m_ey_x_0=ref_values["m_ey_x_0"],
+                dEx_0=ref_values["dEx_0"],
+                dEy_0=ref_values["dEy_0"],
+                dEz_0=ref_values["dEz_0"],
+                dHx_0=ref_values["dHx_0"],
+                dHy_0=ref_values["dHy_0"],
+                dHz_0=ref_values["dHz_0"],
+                dm_hz_y_0=ref_values["dm_hz_y_0"],
+                dm_hy_z_0=ref_values["dm_hy_z_0"],
+                dm_hx_z_0=ref_values["dm_hx_z_0"],
+                dm_hz_x_0=ref_values["dm_hz_x_0"],
+                dm_hy_x_0=ref_values["dm_hy_x_0"],
+                dm_hx_y_0=ref_values["dm_hx_y_0"],
+                dm_ey_z_0=ref_values["dm_ey_z_0"],
+                dm_ez_y_0=ref_values["dm_ez_y_0"],
+                dm_ez_x_0=ref_values["dm_ez_x_0"],
+                dm_ex_z_0=ref_values["dm_ex_z_0"],
+                dm_ex_y_0=ref_values["dm_ex_y_0"],
+                dm_ey_x_0=ref_values["dm_ey_x_0"],
+                nt=meta["nt"],
+                parameterization=meta["parameterization"],
+                linearize_source=meta["linearize_source"],
+                source_component=meta["source_component"],
+                receiver_component=meta["receiver_component"],
+            )
+            ref_outputs = (*ref_outputs[:-2], ref_outputs[-1])
+            active_outputs: list[torch.Tensor] = []
+            active_grad_outputs: list[torch.Tensor] = []
+            for out, grad in zip(ref_outputs, grad_outputs, strict=True):
+                if grad is None or not out.requires_grad:
+                    continue
+                active_outputs.append(out)
+                active_grad_outputs.append(grad)
+            if not active_outputs:
+                return (None,) * (len(_HYBRID_TENSOR_ARG_NAMES) + 1)
+            computed_grads = torch.autograd.grad(
+                active_outputs,
+                differentiable_values,
+                grad_outputs=active_grad_outputs,
+                allow_unused=True,
+            )
+
+        grads_by_name = dict(zip(differentiable_names, computed_grads, strict=True))
+        grads: list[torch.Tensor | None] = []
+        for name in _HYBRID_TENSOR_ARG_NAMES:
+            grads.append(grads_by_name.get(name))
+        grads.append(None)
+        return tuple(grads)
+
+
+def _to_native_output_layout(
+    result: tuple[torch.Tensor, ...],
+) -> tuple[torch.Tensor, ...]:
+    """Drop the Python-only background receiver output from Born fallback results."""
+    return (*result[:-2], result[-1])
 
 
 def _init_wavefield_3d(
@@ -83,6 +337,24 @@ def born3d_c_cuda(
     stencil: int,
     pml_width: int | Sequence[int],
     max_vel: float | None,
+    Ex_0: torch.Tensor | None,
+    Ey_0: torch.Tensor | None,
+    Ez_0: torch.Tensor | None,
+    Hx_0: torch.Tensor | None,
+    Hy_0: torch.Tensor | None,
+    Hz_0: torch.Tensor | None,
+    m_hz_y_0: torch.Tensor | None,
+    m_hy_z_0: torch.Tensor | None,
+    m_hx_z_0: torch.Tensor | None,
+    m_hz_x_0: torch.Tensor | None,
+    m_hy_x_0: torch.Tensor | None,
+    m_hx_y_0: torch.Tensor | None,
+    m_ey_z_0: torch.Tensor | None,
+    m_ez_y_0: torch.Tensor | None,
+    m_ez_x_0: torch.Tensor | None,
+    m_ex_z_0: torch.Tensor | None,
+    m_ex_y_0: torch.Tensor | None,
+    m_ey_x_0: torch.Tensor | None,
     dEx_0: torch.Tensor | None,
     dEy_0: torch.Tensor | None,
     dEz_0: torch.Tensor | None,
@@ -103,6 +375,7 @@ def born3d_c_cuda(
     dm_ey_x_0: torch.Tensor | None,
     nt: int | None,
     parameterization: str,
+    model_gradient_sampling_interval: int,
     linearize_source: bool,
     source_component: str,
     receiver_component: str,
@@ -112,10 +385,9 @@ def born3d_c_cuda(
     storage_bytes_limit_device: int | None = None,
     storage_bytes_limit_host: int | None = None,
     n_threads: int | None = None,
+    _force_no_gradient_fallback: bool = False,
 ):
     from .. import backend_utils
-
-    del storage_path, storage_bytes_limit_device, storage_bytes_limit_host
 
     if epsilon.ndim != 3:
         raise NotImplementedError(
@@ -129,14 +401,75 @@ def born3d_c_cuda(
             f"got {parameterization!r}."
         )
 
-    if epsilon.requires_grad or sigma.requires_grad or mu.requires_grad:
-        warnings.warn(
-            "Native born3d treats the background model as fixed. "
-            "Falling back to the Python reference path because the background "
-            "model requires gradients.",
-            RuntimeWarning,
+    source_requires_grad = bool(
+        source_amplitude is not None and source_amplitude.requires_grad
+    )
+    state_requires_grad = any(
+        tensor is not None and tensor.requires_grad
+        for tensor in (
+            Ex_0,
+            Ey_0,
+            Ez_0,
+            Hx_0,
+            Hy_0,
+            Hz_0,
+            m_hz_y_0,
+            m_hy_z_0,
+            m_hx_z_0,
+            m_hz_x_0,
+            m_hy_x_0,
+            m_hx_y_0,
+            m_ey_z_0,
+            m_ez_y_0,
+            m_ez_x_0,
+            m_ex_z_0,
+            m_ex_y_0,
+            m_ey_x_0,
+            dEx_0,
+            dEy_0,
+            dEz_0,
+            dHx_0,
+            dHy_0,
+            dHz_0,
+            dm_hz_y_0,
+            dm_hy_z_0,
+            dm_hx_z_0,
+            dm_hz_x_0,
+            dm_hy_x_0,
+            dm_hx_y_0,
+            dm_ey_z_0,
+            dm_ez_y_0,
+            dm_ez_x_0,
+            dm_ex_z_0,
+            dm_ex_y_0,
+            dm_ey_x_0,
         )
-        return born3d_python(
+    )
+
+    unsupported_gradient_fallback = (
+        mu.requires_grad or source_requires_grad or state_requires_grad
+    )
+    if unsupported_gradient_fallback and not _force_no_gradient_fallback:
+        meta = {
+            "grid_spacing": grid_spacing,
+            "dt": dt,
+            "stencil": stencil,
+            "pml_width": pml_width,
+            "max_vel": max_vel,
+            "nt": nt,
+            "parameterization": parameterization,
+            "model_gradient_sampling_interval": model_gradient_sampling_interval,
+            "linearize_source": linearize_source,
+            "source_component": source_component,
+            "receiver_component": receiver_component,
+            "storage_mode": storage_mode,
+            "storage_path": storage_path,
+            "storage_compression": storage_compression,
+            "storage_bytes_limit_device": storage_bytes_limit_device,
+            "storage_bytes_limit_host": storage_bytes_limit_host,
+            "n_threads": n_threads,
+        }
+        return _Born3DNativeAutogradFallbackFunc.apply(
             epsilon,
             sigma,
             mu,
@@ -144,37 +477,46 @@ def born3d_c_cuda(
             dsigma,
             dca,
             dcb,
-            grid_spacing,
-            dt,
             source_amplitude,
             source_location,
             receiver_location,
-            stencil=stencil,
-            pml_width=pml_width,
-            max_vel=max_vel,
-            dEx_0=dEx_0,
-            dEy_0=dEy_0,
-            dEz_0=dEz_0,
-            dHx_0=dHx_0,
-            dHy_0=dHy_0,
-            dHz_0=dHz_0,
-            dm_hz_y_0=dm_hz_y_0,
-            dm_hy_z_0=dm_hy_z_0,
-            dm_hx_z_0=dm_hx_z_0,
-            dm_hz_x_0=dm_hz_x_0,
-            dm_hy_x_0=dm_hy_x_0,
-            dm_hx_y_0=dm_hx_y_0,
-            dm_ey_z_0=dm_ey_z_0,
-            dm_ez_y_0=dm_ez_y_0,
-            dm_ez_x_0=dm_ez_x_0,
-            dm_ex_z_0=dm_ex_z_0,
-            dm_ex_y_0=dm_ex_y_0,
-            dm_ey_x_0=dm_ey_x_0,
-            nt=nt,
-            parameterization=parameterization,
-            linearize_source=linearize_source,
-            source_component=source_component,
-            receiver_component=receiver_component,
+            Ex_0,
+            Ey_0,
+            Ez_0,
+            Hx_0,
+            Hy_0,
+            Hz_0,
+            m_hz_y_0,
+            m_hy_z_0,
+            m_hx_z_0,
+            m_hz_x_0,
+            m_hy_x_0,
+            m_hx_y_0,
+            m_ey_z_0,
+            m_ez_y_0,
+            m_ez_x_0,
+            m_ex_z_0,
+            m_ex_y_0,
+            m_ey_x_0,
+            dEx_0,
+            dEy_0,
+            dEz_0,
+            dHx_0,
+            dHy_0,
+            dHz_0,
+            dm_hz_y_0,
+            dm_hy_z_0,
+            dm_hx_z_0,
+            dm_hz_x_0,
+            dm_hy_x_0,
+            dm_hx_y_0,
+            dm_ey_z_0,
+            dm_ez_y_0,
+            dm_ez_x_0,
+            dm_ex_z_0,
+            dm_ex_y_0,
+            dm_ey_x_0,
+            meta,
         )
 
     if torch._C._are_functorch_transforms_active():
@@ -193,6 +535,13 @@ def born3d_c_cuda(
             raise ValueError("Either nt or source_amplitude must be provided")
         nt = int(source_amplitude.shape[-1])
     nt_steps = int(nt)
+    gradient_sampling_interval = validate_model_gradient_sampling_interval(
+        model_gradient_sampling_interval
+    )
+    if gradient_sampling_interval < 1:
+        gradient_sampling_interval = 1
+    if nt_steps > 0:
+        gradient_sampling_interval = min(gradient_sampling_interval, nt_steps)
 
     if source_amplitude is not None and source_amplitude.numel() > 0:
         n_shots = int(source_amplitude.shape[0])
@@ -359,7 +708,7 @@ def born3d_c_cuda(
 
     size_with_batch = (n_shots, padded_nz, padded_ny, padded_nx)
     Ex = _init_wavefield_3d(
-        None,
+        Ex_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -368,7 +717,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     Ey = _init_wavefield_3d(
-        None,
+        Ey_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -377,7 +726,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     Ez = _init_wavefield_3d(
-        None,
+        Ez_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -386,7 +735,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     Hx = _init_wavefield_3d(
-        None,
+        Hx_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -395,7 +744,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     Hy = _init_wavefield_3d(
-        None,
+        Hy_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -404,7 +753,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     Hz = _init_wavefield_3d(
-        None,
+        Hz_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -414,7 +763,7 @@ def born3d_c_cuda(
     )
 
     m_hz_y = _init_wavefield_3d(
-        None,
+        m_hz_y_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -423,7 +772,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_hy_z = _init_wavefield_3d(
-        None,
+        m_hy_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -432,7 +781,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_hx_z = _init_wavefield_3d(
-        None,
+        m_hx_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -441,7 +790,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_hz_x = _init_wavefield_3d(
-        None,
+        m_hz_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -450,7 +799,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_hy_x = _init_wavefield_3d(
-        None,
+        m_hy_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -459,7 +808,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_hx_y = _init_wavefield_3d(
-        None,
+        m_hx_y_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -468,7 +817,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_ey_z = _init_wavefield_3d(
-        None,
+        m_ey_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -477,7 +826,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_ez_y = _init_wavefield_3d(
-        None,
+        m_ez_y_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -486,7 +835,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_ez_x = _init_wavefield_3d(
-        None,
+        m_ez_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -495,7 +844,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_ex_z = _init_wavefield_3d(
-        None,
+        m_ex_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -504,7 +853,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_ex_y = _init_wavefield_3d(
-        None,
+        m_ex_y_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -513,7 +862,7 @@ def born3d_c_cuda(
         contiguous=True,
     )
     m_ey_x = _init_wavefield_3d(
-        None,
+        m_ey_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -775,7 +1124,14 @@ def born3d_c_cuda(
     pml_y1 = padded_ny - fd_pad_list[3] - pml_width_list[3]
     pml_x1 = padded_nx - fd_pad_list[5] - pml_width_list[5]
 
-    needs_storage = dca_native.requires_grad or dcb_native.requires_grad
+    background_coeff_requires_grad = (
+        ca.requires_grad or cb.requires_grad or f0.requires_grad
+    )
+    needs_storage = (
+        dca_native.requires_grad
+        or dcb_native.requires_grad
+        or background_coeff_requires_grad
+    )
     needs_autograd = needs_storage or df.requires_grad
 
     storage_mode_str = str(storage_mode).lower()
@@ -785,96 +1141,57 @@ def born3d_c_cuda(
             "falling back to Python reference path.",
             RuntimeWarning,
         )
-        return born3d_python(
-            epsilon,
-            sigma,
-            mu,
-            depsilon,
-            dsigma,
-            dca,
-            dcb,
-            grid_spacing,
-            dt,
-            source_amplitude,
-            source_location,
-            receiver_location,
-            stencil=stencil,
-            pml_width=pml_width,
-            max_vel=max_vel,
-            dEx_0=dEx_0,
-            dEy_0=dEy_0,
-            dEz_0=dEz_0,
-            dHx_0=dHx_0,
-            dHy_0=dHy_0,
-            dHz_0=dHz_0,
-            dm_hz_y_0=dm_hz_y_0,
-            dm_hy_z_0=dm_hy_z_0,
-            dm_hx_z_0=dm_hx_z_0,
-            dm_hz_x_0=dm_hz_x_0,
-            dm_hy_x_0=dm_hy_x_0,
-            dm_hx_y_0=dm_hx_y_0,
-            dm_ey_z_0=dm_ey_z_0,
-            dm_ez_y_0=dm_ez_y_0,
-            dm_ez_x_0=dm_ez_x_0,
-            dm_ex_z_0=dm_ex_z_0,
-            dm_ex_y_0=dm_ex_y_0,
-            dm_ey_x_0=dm_ey_x_0,
-            nt=nt,
-            parameterization=parameterization,
-            linearize_source=linearize_source,
-            source_component=source_component,
-            receiver_component=receiver_component,
+        return _to_native_output_layout(
+            born3d_python(
+                epsilon,
+                sigma,
+                mu,
+                depsilon,
+                dsigma,
+                dca,
+                dcb,
+                grid_spacing,
+                dt,
+                source_amplitude,
+                source_location,
+                receiver_location,
+                stencil=stencil,
+                pml_width=pml_width,
+                max_vel=max_vel,
+                dEx_0=dEx_0,
+                dEy_0=dEy_0,
+                dEz_0=dEz_0,
+                dHx_0=dHx_0,
+                dHy_0=dHy_0,
+                dHz_0=dHz_0,
+                dm_hz_y_0=dm_hz_y_0,
+                dm_hy_z_0=dm_hy_z_0,
+                dm_hx_z_0=dm_hx_z_0,
+                dm_hz_x_0=dm_hz_x_0,
+                dm_hy_x_0=dm_hy_x_0,
+                dm_hx_y_0=dm_hx_y_0,
+                dm_ey_z_0=dm_ey_z_0,
+                dm_ez_y_0=dm_ez_y_0,
+                dm_ez_x_0=dm_ez_x_0,
+                dm_ex_z_0=dm_ex_z_0,
+                dm_ex_y_0=dm_ex_y_0,
+                dm_ey_x_0=dm_ey_x_0,
+                nt=nt,
+                parameterization=parameterization,
+                linearize_source=linearize_source,
+                source_component=source_component,
+                receiver_component=receiver_component,
+            )
         )
     if needs_storage and storage_mode_str == "none":
         raise ValueError(
             "storage_mode='none' is not compatible with gradient computation "
             "for native born3d."
         )
-    if needs_autograd and str(storage_compression).lower() not in {"false", "none"}:
-        warnings.warn(
-            "Native born3d currently supports only full-precision device storage; "
-            "falling back to Python reference path.",
-            RuntimeWarning,
-        )
-        return born3d_python(
-            epsilon,
-            sigma,
-            mu,
-            depsilon,
-            dsigma,
-            dca,
-            dcb,
-            grid_spacing,
-            dt,
-            source_amplitude,
-            source_location,
-            receiver_location,
-            stencil=stencil,
-            pml_width=pml_width,
-            max_vel=max_vel,
-            dEx_0=dEx_0,
-            dEy_0=dEy_0,
-            dEz_0=dEz_0,
-            dHx_0=dHx_0,
-            dHy_0=dHy_0,
-            dHz_0=dHz_0,
-            dm_hz_y_0=dm_hz_y_0,
-            dm_hy_z_0=dm_hy_z_0,
-            dm_hx_z_0=dm_hx_z_0,
-            dm_hz_x_0=dm_hz_x_0,
-            dm_hy_x_0=dm_hy_x_0,
-            dm_hx_y_0=dm_hx_y_0,
-            dm_ey_z_0=dm_ey_z_0,
-            dm_ez_y_0=dm_ez_y_0,
-            dm_ez_x_0=dm_ez_x_0,
-            dm_ex_z_0=dm_ex_z_0,
-            dm_ex_y_0=dm_ex_y_0,
-            dm_ey_x_0=dm_ey_x_0,
-            nt=nt,
-            parameterization=parameterization,
-            linearize_source=linearize_source,
-            source_component=source_component,
-            receiver_component=receiver_component,
+    storage_kind = _normalize_storage_compression(storage_compression)
+    if needs_autograd and storage_kind == "bf16" and device.type != "cuda":
+        raise NotImplementedError(
+            "Native born3d BF16 snapshot storage is currently supported only on CUDA."
         )
 
     source_component_idx = _COMPONENT_TO_INDEX_3D[source_component]
@@ -896,50 +1213,60 @@ def born3d_c_cuda(
                 dtype,
                 backend_device,
             )
+        if background_coeff_requires_grad:
+            _ = backend_utils.get_backend_function(
+                "maxwell_3d",
+                "born_backward_bggrad",
+                stencil,
+                dtype,
+                backend_device,
+            )
     except (RuntimeError, AttributeError, TypeError) as exc:
         warnings.warn(
             f"3D native born symbols are unavailable ({exc}); falling back to Python reference path.",
             RuntimeWarning,
         )
-        return born3d_python(
-            epsilon,
-            sigma,
-            mu,
-            depsilon,
-            dsigma,
-            dca,
-            dcb,
-            grid_spacing,
-            dt,
-            source_amplitude,
-            source_location,
-            receiver_location,
-            stencil=stencil,
-            pml_width=pml_width,
-            max_vel=max_vel,
-            dEx_0=dEx_0,
-            dEy_0=dEy_0,
-            dEz_0=dEz_0,
-            dHx_0=dHx_0,
-            dHy_0=dHy_0,
-            dHz_0=dHz_0,
-            dm_hz_y_0=dm_hz_y_0,
-            dm_hy_z_0=dm_hy_z_0,
-            dm_hx_z_0=dm_hx_z_0,
-            dm_hz_x_0=dm_hz_x_0,
-            dm_hy_x_0=dm_hy_x_0,
-            dm_hx_y_0=dm_hx_y_0,
-            dm_ey_z_0=dm_ey_z_0,
-            dm_ez_y_0=dm_ez_y_0,
-            dm_ez_x_0=dm_ez_x_0,
-            dm_ex_z_0=dm_ex_z_0,
-            dm_ex_y_0=dm_ex_y_0,
-            dm_ey_x_0=dm_ey_x_0,
-            nt=nt,
-            parameterization=parameterization,
-            linearize_source=linearize_source,
-            source_component=source_component,
-            receiver_component=receiver_component,
+        return _to_native_output_layout(
+            born3d_python(
+                epsilon,
+                sigma,
+                mu,
+                depsilon,
+                dsigma,
+                dca,
+                dcb,
+                grid_spacing,
+                dt,
+                source_amplitude,
+                source_location,
+                receiver_location,
+                stencil=stencil,
+                pml_width=pml_width,
+                max_vel=max_vel,
+                dEx_0=dEx_0,
+                dEy_0=dEy_0,
+                dEz_0=dEz_0,
+                dHx_0=dHx_0,
+                dHy_0=dHy_0,
+                dHz_0=dHz_0,
+                dm_hz_y_0=dm_hz_y_0,
+                dm_hy_z_0=dm_hy_z_0,
+                dm_hx_z_0=dm_hx_z_0,
+                dm_hz_x_0=dm_hz_x_0,
+                dm_hy_x_0=dm_hy_x_0,
+                dm_hx_y_0=dm_hx_y_0,
+                dm_ey_z_0=dm_ey_z_0,
+                dm_ez_y_0=dm_ez_y_0,
+                dm_ez_x_0=dm_ez_x_0,
+                dm_ex_z_0=dm_ex_z_0,
+                dm_ex_y_0=dm_ex_y_0,
+                dm_ey_x_0=dm_ey_x_0,
+                nt=nt,
+                parameterization=parameterization,
+                linearize_source=linearize_source,
+                source_component=source_component,
+                receiver_component=receiver_component,
+            )
         )
 
     if needs_autograd:
@@ -952,6 +1279,7 @@ def born3d_c_cuda(
             "nx": padded_nx,
             "n_sources": n_sources,
             "n_receivers": n_receivers,
+            "step_ratio": gradient_sampling_interval,
             "accuracy": stencil,
             "pml_z0": pml_z0,
             "pml_y0": pml_y0,
@@ -966,6 +1294,7 @@ def born3d_c_cuda(
             "rdy": 1.0 / dy,
             "rdx": 1.0 / dx,
             "backend_device": backend_device,
+            "storage_compression": storage_compression,
         }
         outputs = Born3DForwardFunc.apply(
             dca_native,
@@ -1123,7 +1452,7 @@ def born3d_c_cuda(
             padded_nx,
             n_sources,
             n_receivers,
-            1,
+            gradient_sampling_interval,
             False,
             False,
             False,
@@ -1194,6 +1523,24 @@ def born3d_c_cuda(
         ),
     )
     return (
+        Ex[s],
+        Ey[s],
+        Ez[s],
+        Hx[s],
+        Hy[s],
+        Hz[s],
+        m_hz_y[s],
+        m_hy_z[s],
+        m_hx_z[s],
+        m_hz_x[s],
+        m_hy_x[s],
+        m_hx_y[s],
+        m_ey_z[s],
+        m_ez_y[s],
+        m_ez_x[s],
+        m_ex_z[s],
+        m_ex_y[s],
+        m_ey_x[s],
         dEx_out[s],
         dEy_out[s],
         dEz_out[s],

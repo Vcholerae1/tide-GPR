@@ -12,6 +12,7 @@ from ..utils import (
     compile_material_coefficients,
     linearize_material_coefficients,
 )
+from ..validation import validate_model_gradient_sampling_interval
 from .tm2d_born_autograd import BornTMForwardFunc
 from .tm2d_born_python import borntm_python
 from .tm2d_helpers import (
@@ -37,6 +38,13 @@ def borntm_c_cuda(
     stencil: int,
     pml_width: int | Sequence[int],
     max_vel: float | None,
+    Ey_0: torch.Tensor | None,
+    Hx_0: torch.Tensor | None,
+    Hz_0: torch.Tensor | None,
+    m_Ey_x_0: torch.Tensor | None,
+    m_Ey_z_0: torch.Tensor | None,
+    m_Hx_z_0: torch.Tensor | None,
+    m_Hz_x_0: torch.Tensor | None,
     dEy_0: torch.Tensor | None,
     dHx_0: torch.Tensor | None,
     dHz_0: torch.Tensor | None,
@@ -46,6 +54,7 @@ def borntm_c_cuda(
     dm_Hz_x_0: torch.Tensor | None,
     nt: int | None,
     parameterization: str,
+    model_gradient_sampling_interval: int,
     linearize_source: bool,
     storage_mode: str = "device",
     storage_path: str = ".",
@@ -53,6 +62,7 @@ def borntm_c_cuda(
     storage_bytes_limit_device: int | None = None,
     storage_bytes_limit_host: int | None = None,
     n_threads: int | None = None,
+    return_background_receiver_amplitudes: bool = False,
 ):
     from .. import backend_utils
 
@@ -67,12 +77,39 @@ def borntm_c_cuda(
             "parameterization must be 'epsilon_sigma' or 'ca_cb', "
             f"got {parameterization!r}."
         )
+    device = epsilon.device
 
-    if epsilon.requires_grad or sigma.requires_grad or mu.requires_grad:
+    source_requires_grad = bool(
+        source_amplitude is not None and source_amplitude.requires_grad
+    )
+    state_requires_grad = any(
+        tensor is not None and tensor.requires_grad
+        for tensor in (
+            Ey_0,
+            Hx_0,
+            Hz_0,
+            m_Ey_x_0,
+            m_Ey_z_0,
+            m_Hx_z_0,
+            m_Hz_x_0,
+            dEy_0,
+            dHx_0,
+            dHz_0,
+            dm_Ey_x_0,
+            dm_Ey_z_0,
+            dm_Hx_z_0,
+            dm_Hz_x_0,
+        )
+    )
+
+    grid_spacing = _normalize_grid_spacing_2d(grid_spacing)
+    dy, dx = grid_spacing
+    pml_width_list = _normalize_pml_width_2d(pml_width)
+
+    if mu.requires_grad:
         warnings.warn(
-            "Native borntm treats the background model as fixed. "
-            "Falling back to the Python reference path because the background "
-            "model requires gradients.",
+            "Native borntm does not yet support gradients with respect to mu. "
+            "Falling back to the Python reference path.",
             RuntimeWarning,
         )
         return borntm_python(
@@ -88,9 +125,60 @@ def borntm_c_cuda(
             source_amplitude,
             source_location,
             receiver_location,
+            None,
             stencil=stencil,
             pml_width=pml_width,
             max_vel=max_vel,
+            Ey_0=Ey_0,
+            Hx_0=Hx_0,
+            Hz_0=Hz_0,
+            m_Ey_x_0=m_Ey_x_0,
+            m_Ey_z_0=m_Ey_z_0,
+            m_Hx_z_0=m_Hx_z_0,
+            m_Hz_x_0=m_Hz_x_0,
+            dEy_0=dEy_0,
+            dHx_0=dHx_0,
+            dHz_0=dHz_0,
+            dm_Ey_x_0=dm_Ey_x_0,
+            dm_Ey_z_0=dm_Ey_z_0,
+            dm_Hx_z_0=dm_Hx_z_0,
+            dm_Hz_x_0=dm_Hz_x_0,
+            nt=nt,
+            parameterization=parameterization,
+            linearize_source=linearize_source,
+        )
+
+    if source_requires_grad or state_requires_grad:
+        warnings.warn(
+            "Native borntm does not support gradients with respect to source "
+            "amplitudes or initial wavefields. Falling back to the Python "
+            "reference path.",
+            RuntimeWarning,
+        )
+        return borntm_python(
+            epsilon,
+            sigma,
+            mu,
+            depsilon,
+            dsigma,
+            dca,
+            dcb,
+            grid_spacing,
+            dt,
+            source_amplitude,
+            source_location,
+            receiver_location,
+            None,
+            stencil=stencil,
+            pml_width=pml_width,
+            max_vel=max_vel,
+            Ey_0=Ey_0,
+            Hx_0=Hx_0,
+            Hz_0=Hz_0,
+            m_Ey_x_0=m_Ey_x_0,
+            m_Ey_z_0=m_Ey_z_0,
+            m_Hx_z_0=m_Hx_z_0,
+            m_Hz_x_0=m_Hz_x_0,
             dEy_0=dEy_0,
             dHx_0=dHx_0,
             dHz_0=dHz_0,
@@ -108,15 +196,10 @@ def borntm_c_cuda(
             "torch.func transforms are not supported for the native born backend."
         )
 
-    device = epsilon.device
     dtype = epsilon.dtype
     backend_device = device
     if device.type not in {"cpu", "cuda"}:
         raise NotImplementedError("C/CUDA backend supports only cpu and cuda devices.")
-
-    grid_spacing = _normalize_grid_spacing_2d(grid_spacing)
-    dy, dx = grid_spacing
-    pml_width_list = _normalize_pml_width_2d(pml_width)
 
     n_threads_val = 0
     if n_threads is not None:
@@ -129,6 +212,13 @@ def borntm_c_cuda(
             raise ValueError("Either nt or source_amplitude must be provided")
         nt = int(source_amplitude.shape[-1])
     nt_steps = int(nt)
+    gradient_sampling_interval = validate_model_gradient_sampling_interval(
+        model_gradient_sampling_interval
+    )
+    if gradient_sampling_interval < 1:
+        gradient_sampling_interval = 1
+    if nt_steps > 0:
+        gradient_sampling_interval = min(gradient_sampling_interval, nt_steps)
 
     if source_amplitude is not None and source_amplitude.numel() > 0:
         n_shots = int(source_amplitude.shape[0])
@@ -280,7 +370,7 @@ def borntm_c_cuda(
 
     size_with_batch = (n_shots, padded_ny, padded_nx)
     Ey = _init_tm_wavefield(
-        None,
+        Ey_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -289,7 +379,7 @@ def borntm_c_cuda(
         contiguous=True,
     )
     Hx = _init_tm_wavefield(
-        None,
+        Hx_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -298,7 +388,7 @@ def borntm_c_cuda(
         contiguous=True,
     )
     Hz = _init_tm_wavefield(
-        None,
+        Hz_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -307,7 +397,7 @@ def borntm_c_cuda(
         contiguous=True,
     )
     m_Ey_x = _init_tm_wavefield(
-        None,
+        m_Ey_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -316,7 +406,7 @@ def borntm_c_cuda(
         contiguous=True,
     )
     m_Ey_z = _init_tm_wavefield(
-        None,
+        m_Ey_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -325,7 +415,7 @@ def borntm_c_cuda(
         contiguous=True,
     )
     m_Hx_z = _init_tm_wavefield(
-        None,
+        m_Hx_z_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -334,7 +424,7 @@ def borntm_c_cuda(
         contiguous=True,
     )
     m_Hz_x = _init_tm_wavefield(
-        None,
+        m_Hz_x_0,
         n_shots=n_shots,
         size_with_batch=size_with_batch,
         fd_pad_list=fd_pad_list,
@@ -458,7 +548,15 @@ def borntm_c_cuda(
     pml_x1 = padded_nx - fd_pad_list[3] - pml_width_list[3]
 
     needs_storage = dca_native.requires_grad or dcb_native.requires_grad
-    needs_autograd = needs_storage or df.requires_grad
+    needs_autograd = (
+        needs_storage
+        or df.requires_grad
+    )
+    if device.type == "cpu" and needs_autograd and gradient_sampling_interval != 1:
+        raise NotImplementedError(
+            "Native TM2D Born model/background gradients on CPU currently require "
+            "model_gradient_sampling_interval in {0, 1}."
+        )
     _, _, storage_bytes_per_elem, storage_format = _resolve_tm2d_storage_spec(
         storage_compression=storage_compression,
         dtype=dtype,
@@ -483,7 +581,9 @@ def borntm_c_cuda(
         if storage_mode_str == "auto":
             num_elements_per_shot = padded_ny * padded_nx
             shot_bytes_uncomp = num_elements_per_shot * storage_bytes_per_elem
-            n_stored = nt_steps
+            n_stored = (
+                (nt_steps + gradient_sampling_interval - 1) // gradient_sampling_interval
+            )
             total_bytes = n_stored * n_shots * shot_bytes_uncomp * 2
             limit_device = (
                 storage_bytes_limit_device
@@ -503,6 +603,8 @@ def borntm_c_cuda(
                 storage_mode_str = "disk"
     elif storage_mode_str == "auto":
         storage_mode_str = "none"
+
+    capture_background_receivers = return_background_receiver_amplitudes
 
     if needs_autograd:
         result = BornTMForwardFunc.apply(
@@ -536,7 +638,7 @@ def borntm_c_cuda(
             padded_nx,
             n_sources,
             n_receivers,
-            1,
+            gradient_sampling_interval,
             stencil,
             False,
             False,
@@ -576,6 +678,7 @@ def borntm_c_cuda(
             dm_Hz_x_out,
             receiver_amplitudes,
         ) = result[:8]
+        background_receiver_amplitudes = result[8]
     else:
         forward_func = backend_utils.get_backend_function(
             "maxwell_tm",
@@ -591,8 +694,16 @@ def borntm_c_cuda(
             receiver_amplitudes = torch.zeros(
                 nt_steps, n_shots, n_receivers, device=device, dtype=dtype
             )
+            background_receiver_amplitudes = (
+                torch.zeros_like(receiver_amplitudes)
+                if capture_background_receivers
+                else torch.empty(0, device=device, dtype=dtype)
+            )
         else:
             receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
+            background_receiver_amplitudes = torch.empty(
+                0, device=device, dtype=dtype
+            )
 
         compute_stream_handle = 0
         if device.type == "cuda":
@@ -623,6 +734,7 @@ def borntm_c_cuda(
             backend_utils.tensor_to_ptr(dm_Hx_z),
             backend_utils.tensor_to_ptr(dm_Hz_x),
             backend_utils.tensor_to_ptr(receiver_amplitudes),
+            backend_utils.tensor_to_ptr(background_receiver_amplitudes),
             backend_utils.tensor_to_ptr(ay_flat),
             backend_utils.tensor_to_ptr(by_flat),
             backend_utils.tensor_to_ptr(ay_h_flat),
@@ -646,7 +758,7 @@ def borntm_c_cuda(
             padded_nx,
             n_sources,
             n_receivers,
-            1,
+            gradient_sampling_interval,
             False,
             False,
             False,
@@ -677,6 +789,13 @@ def borntm_c_cuda(
         ),
     )
     return (
+        Ey[s],
+        Hx[s],
+        Hz[s],
+        m_Ey_x[s],
+        m_Ey_z[s],
+        m_Hx_z[s],
+        m_Hz_x[s],
         dEy_out[s],
         dHx_out[s],
         dHz_out[s],
@@ -685,6 +804,8 @@ def borntm_c_cuda(
         dm_Hx_z_out[s],
         dm_Hz_x_out[s],
         receiver_amplitudes,
+    ) + (
+        (background_receiver_amplitudes,) if return_background_receiver_amplitudes else ()
     )
 
 

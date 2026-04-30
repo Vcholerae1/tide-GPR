@@ -3,8 +3,12 @@
 ## Public API
 - class MaxwellTM
 - class Maxwell3D
+- class BornTM
+- class Born3D
 - function maxwelltm
 - function maxwell3d
+- function borntm
+- function born3d
 
 ## maxwelltm
 
@@ -70,16 +74,49 @@ Return tuple:
 - receiver_amplitudes shaped [nt, n_shots, n_receivers] for shared models
 - receiver_amplitudes shaped [nt, B, n_shots, n_receivers] for batched models
 
+## borntm / born3d
+
+The Born propagators now follow a unified two-wavefield layout similar to
+Deepwave's `ScalarBorn`.
+
+Key inputs:
+- background model tensors: `epsilon`, `sigma`, `mu`
+- perturbation tensors: `depsilon` / `dsigma` or `dca` / `dcb`
+- `receiver_location` for scattered traces
+- `bg_receiver_location` for background traces
+- optional background and scattered initial wavefields
+
+Return tuple:
+- background final state tensors, in the same order as `maxwelltm` or `maxwell3d`
+- scattered final state tensors, in the same order as the background states
+- `bg_receiver_amplitudes`
+- `receiver_amplitudes`
+
+Autograd behavior:
+- use PyTorch autograd directly on the perturbation inputs to obtain Born
+  Jacobian-vector or vector-Jacobian products
+- the explicit `borntm_adjoint` and `born3d_adjoint` APIs were removed
+- native backend gradients are supported for perturbation inputs and supported
+  background/source-gradient paths
+- `storage_compression="bf16"` stores saved Born backward snapshots in bf16 for
+  float32 native workflows that support compressed storage. This includes TM2D
+  CPU/CUDA and 3D CUDA scattered direct snapshots used by background-gradient
+  adjoints
+- unsupported gradient requests, such as some initial-wavefield gradients, fall
+  back to the Python reference path
+
 ## Class Wrappers
 
-- MaxwellTM and Maxwell3D are torch.nn.Module wrappers that store model tensors and call maxwelltm/maxwell3d in forward.
+- MaxwellTM and Maxwell3D are torch.nn.Module wrappers that store background model tensors and call maxwelltm/maxwell3d in forward.
+- BornTM and Born3D are torch.nn.Module wrappers that store the background model plus an optional Born perturbation and call the unified two-wavefield borntm/born3d propagators in forward.
 - Useful when integrating with training loops that repeatedly propagate on the same model object.
 
 ## Choosing The Right Maxwell Entry Point
 
 - Use `maxwelltm` for the fastest onboarding path and most 2D examples.
 - Use `maxwell3d` when component selection and full 3D geometry matter.
-- Use `MaxwellTM` or `Maxwell3D` when you want model tensors stored inside a `torch.nn.Module`.
+- Use `borntm` or `born3d` when you want a Deepwave-style two-wavefield Born propagator that returns both background and scattered states.
+- Use `MaxwellTM`, `Maxwell3D`, `BornTM`, or `Born3D` when you want model tensors stored inside a `torch.nn.Module`.
 
 See:
 

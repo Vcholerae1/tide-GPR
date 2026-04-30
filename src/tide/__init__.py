@@ -23,14 +23,16 @@ from .callbacks import Callback, CallbackState, create_callback_state
 from .cfl import cfl_condition
 from .dispersion import DebyeDispersion
 from .maxwell import (
+    Born3D,
+    BornTM,
     Maxwell3D,
     MaxwellTM,
     born3d,
-    born3d_adjoint,
     borntm,
-    borntm_adjoint,
     maxwell3d,
+    maxwell3d_hvp,
     maxwelltm,
+    maxwelltm_hvp,
 )
 from .padding import create_or_pad, reverse_pad, zero_interior
 from .resampling import downsample, downsample_and_movedim, upsample
@@ -53,6 +55,8 @@ __all__ = [
     "utils",
     "wavelets",
     # Classes
+    "BornTM",
+    "Born3D",
     "MaxwellTM",
     "Maxwell3D",
     "CallbackState",
@@ -62,10 +66,10 @@ __all__ = [
     # Functions
     "maxwelltm",
     "maxwell3d",
+    "maxwelltm_hvp",
+    "maxwell3d_hvp",
     "born3d",
-    "born3d_adjoint",
     "borntm",
-    "borntm_adjoint",
     "create_callback_state",
     # Signal processing
     "upsample",
@@ -85,4 +89,4 @@ __all__ = [
 ]
 
 
-__version__ = "0.0.25"
+__version__ = "0.0.28"

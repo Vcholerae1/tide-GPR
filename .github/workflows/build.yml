@@ -17,17 +17,17 @@ jobs:
         os: [ubuntu-22.04, windows-2022, macos-14]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v8.1.0
         with:
           version: "latest"
 
-      # Cache CUDA on Windows to avoid reinstalling  
+      # Cache CUDA on Windows to avoid reinstalling
       - name: Cache CUDA (Windows)
         if: startsWith(matrix.os, 'windows')
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA
           key: ${{ runner.os }}-cuda-12.4.0-v3
@@ -35,12 +35,12 @@ jobs:
 
       # Setup ccache for faster C++/CUDA compilation
       - name: Setup ccache
-        uses: hendrikmuhs/ccache-action@v1.2
+        uses: hendrikmuhs/ccache-action@v1.2.23
         with:
           key: ${{ matrix.os }}
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.21.3
+        uses: pypa/cibuildwheel@v3.4.1
         env:
           # Use uv as build frontend for faster builds
           CIBW_BUILD_FRONTEND: "build[uv]"
@@ -90,7 +90,7 @@ jobs:
 
           CIBW_TEST_SKIP: "*"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cibw-wheels-${{ matrix.os }}-${{ strategy.job-index }}
           path: ./wheelhouse/*.whl
@@ -99,17 +99,17 @@ jobs:
     name: Build source distribution
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v8.1.0
         with:
           version: "latest"
 
       - name: Build sdist
         run: uv build --sdist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -124,14 +124,14 @@ jobs:
       id-token: write
     steps:
       - name: Download wheels
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: cibw-wheels-*
           path: wheelhouse
           merge-multiple: true
 
       - name: Download sdist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: sdist
           path: dist
@@ -142,7 +142,7 @@ jobs:
           mv wheelhouse/*.whl dist/
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v8.1.0
         with:
           version: "latest"
 
