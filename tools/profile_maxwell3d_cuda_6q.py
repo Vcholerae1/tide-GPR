@@ -7,7 +7,9 @@ JSON workload record that can be reused with Nsight Systems or Nsight Compute.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import os
 import statistics
 import time
 from contextlib import contextmanager
@@ -18,6 +20,7 @@ import torch
 
 import tide
 from tide import backend_utils
+from tide.maxwell.compact_pml import build_compact_pml_layout_3d
 
 
 @contextmanager
@@ -119,6 +122,151 @@ def padded_shape(
     )
 
 
+def normalize_cell_threads(n_threads: int) -> int:
+    if n_threads <= 0:
+        return 256
+    if n_threads <= 32:
+        return 32
+    if n_threads <= 64:
+        return 64
+    if n_threads <= 128:
+        return 128
+    if n_threads <= 256:
+        return 256
+    return 512
+
+
+def spatial_block_shape(threads: int) -> list[int]:
+    if threads <= 32:
+        return [32, 1, 1]
+    if threads <= 64:
+        return [32, 2, 1]
+    if threads <= 128:
+        return [32, 4, 1]
+    if threads <= 256:
+        return [32, 8, 1]
+    return [32, 8, 2]
+
+
+def ceil_div(num: int, den: int) -> int:
+    return (num + den - 1) // den
+
+
+def env_flag_enabled(name: str) -> bool:
+    value = os.environ.get(name)
+    return value is not None and value != "" and value[0] != "0"
+
+
+def launch_config_estimate(
+    *,
+    shots: int,
+    padded_nz: int,
+    padded_ny: int,
+    padded_nx: int,
+    n_threads: int,
+    enable_spatial_3d: bool,
+    spatial_disable_reason: str | None,
+) -> dict[str, Any]:
+    threads = normalize_cell_threads(n_threads)
+    padded_cells = padded_nz * padded_ny * padded_nx
+    total_cells = shots * padded_cells
+    if n_threads <= 0 or not enable_spatial_3d:
+        return {
+            "cell_launch_mode": "legacy_1d",
+            "requested_n_threads": n_threads,
+            "normalized_threads_per_block": threads,
+            "spatial_3d_enabled": False,
+            "spatial_3d_disable_reason": (
+                "n_threads<=0" if n_threads <= 0 else spatial_disable_reason
+            ),
+            "cell_block_shape_xyz": [threads, 1, 1],
+            "cell_grid_shape_xyz": [ceil_div(total_cells, threads), 1, 1],
+            "x_contiguous_threads": min(threads, 32),
+            "padded_cells_per_shot": padded_cells,
+            "total_launched_cell_threads": ceil_div(total_cells, threads) * threads,
+        }
+
+    bx, by, bz = spatial_block_shape(threads)
+    gx = ceil_div(padded_nx, bx)
+    gy = ceil_div(padded_ny, by)
+    gz_per_shot = ceil_div(padded_nz, bz)
+    gz = shots * gz_per_shot
+    return {
+        "cell_launch_mode": "spatial_3d",
+        "requested_n_threads": n_threads,
+        "normalized_threads_per_block": threads,
+        "spatial_3d_enabled": True,
+        "spatial_3d_disable_reason": None,
+        "cell_block_shape_xyz": [bx, by, bz],
+        "cell_grid_shape_xyz": [gx, gy, gz],
+        "spatial_blocks_z_per_shot": gz_per_shot,
+        "x_contiguous_threads": bx,
+        "padded_cells_per_shot": padded_cells,
+        "total_launched_cell_threads": gx * gy * gz * bx * by * bz,
+    }
+
+
+_NCU_METRIC_KEYS = {
+    "launch__registers_per_thread": "registers_per_thread",
+    "launch__occupancy_limit_registers": "occupancy_limit_registers",
+    "launch__occupancy_limit_shared_mem": "occupancy_limit_shared_mem",
+    "launch__occupancy_limit_blocks": "occupancy_limit_blocks",
+    "launch__occupancy_limit_warps": "occupancy_limit_warps",
+    "sm__throughput.avg.pct_of_peak_sustained_elapsed": "sm_throughput_pct",
+    "dram__throughput.avg.pct_of_peak_sustained_elapsed": "dram_throughput_pct",
+    "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": "dram_throughput_pct",
+    "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": "memory_throughput_pct",
+    "lts__throughput.avg.pct_of_peak_sustained_elapsed": "l2_throughput_pct",
+    "dram__bytes.sum": "dram_bytes_sum",
+    "dram__bytes.sum.per_second": "dram_bytes_per_second",
+    "lts__t_bytes.sum": "l2_bytes_sum",
+    "lts__t_sectors.sum": "l2_t_sectors_sum",
+}
+
+
+def parse_ncu_value(raw_value: str) -> float | str:
+    value_text = raw_value.replace(",", "").strip()
+    try:
+        return float(value_text)
+    except ValueError:
+        return raw_value.strip()
+
+
+def parse_ncu_csv(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    metrics: dict[str, Any] = {value: None for value in _NCU_METRIC_KEYS.values()}
+    if not path.exists():
+        return {"path": str(path), "error": "missing", **metrics}
+
+    with path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(row for row in f if not row.startswith("=="))
+        for row in reader:
+            metric_name = (
+                row.get("Metric Name")
+                or row.get("Metric Name ")
+                or row.get("Name")
+                or row.get("Metric")
+            )
+            if metric_name in _NCU_METRIC_KEYS:
+                raw_value = (
+                    row.get("Metric Value")
+                    or row.get("Metric Value ")
+                    or row.get("Value")
+                    or row.get("Avg")
+                )
+                if raw_value is not None:
+                    metrics[_NCU_METRIC_KEYS[metric_name]] = parse_ncu_value(
+                        raw_value
+                    )
+                continue
+            for metric_name, output_name in _NCU_METRIC_KEYS.items():
+                raw_value = row.get(metric_name)
+                if raw_value is not None and raw_value.strip() != "":
+                    metrics[output_name] = parse_ncu_value(raw_value)
+    return {"path": str(path), **metrics}
+
+
 def build_case(args: argparse.Namespace, device: torch.device) -> dict[str, Any]:
     dtype = getattr(torch, args.dtype)
 
@@ -191,6 +339,14 @@ def run_forward(args: argparse.Namespace, case: dict[str, Any]):
         python_backend=False,
         storage_mode="device",
         n_threads=args.n_threads,
+        dispersion=(
+            tide.DebyeDispersion(
+                delta_epsilon=args.debye_delta_epsilon,
+                tau=args.debye_tau,
+            )
+            if args.debye
+            else None
+        ),
     )
 
 
@@ -212,6 +368,9 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
 
     device = torch.device(f"cuda:{args.device}")
     torch.cuda.set_device(device)
+    if args.spatial_launch:
+        os.environ["TIDE_EM3D_SPATIAL_LAUNCH"] = "1"
+    spatial_launch_requested = env_flag_enabled("TIDE_EM3D_SPATIAL_LAUNCH")
 
     with nvtx_range("tide_em3d_setup", not args.no_nvtx):
         case = build_case(args, device)
@@ -251,6 +410,36 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
     padded_cells = padded_nz * padded_ny * padded_nx
     cell_steps = args.shots * padded_cells * nt_internal
     mean_s = statistics.fmean(times_s)
+    spatial_disable_reason = None
+    if not spatial_launch_requested:
+        spatial_disable_reason = "env_disabled"
+    elif args.debye:
+        spatial_disable_reason = "debye"
+    elif args.shots != 1:
+        spatial_disable_reason = "multi_shot"
+    elif args.stencil != 2:
+        spatial_disable_reason = "stencil"
+
+    launch_config = launch_config_estimate(
+        shots=args.shots,
+        padded_nz=padded_nz,
+        padded_ny=padded_ny,
+        padded_nx=padded_nx,
+        n_threads=args.n_threads,
+        enable_spatial_3d=spatial_disable_reason is None,
+        spatial_disable_reason=spatial_disable_reason,
+    )
+    fd_pad = args.stencil // 2
+    fd_pad_list = (fd_pad, fd_pad - 1, fd_pad, fd_pad - 1, fd_pad, fd_pad - 1)
+    pml_width_list = (args.pml,) * 6
+    compact_pml_layout = build_compact_pml_layout_3d(
+        n_shots=args.shots,
+        nz=padded_nz,
+        ny=padded_ny,
+        nx=padded_nx,
+        fd_pad=fd_pad_list,
+        pml_width=pml_width_list,
+    )
 
     result = {
         "operator": "tide.maxwell3d native CUDA forward",
@@ -281,9 +470,17 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "epsilon": args.epsilon,
             "sigma": args.sigma,
             "mu": args.mu,
+            "debye": {
+                "enabled": args.debye,
+                "delta_epsilon": args.debye_delta_epsilon if args.debye else None,
+                "tau": args.debye_tau if args.debye else None,
+            },
             "source_component": args.source_component,
             "receiver_component": args.receiver_component,
             "n_threads_arg": args.n_threads,
+            "spatial_launch_requested": spatial_launch_requested,
+            "launch_config_estimate": launch_config,
+            "compact_pml_layout_estimate": compact_pml_layout.as_dict(),
             "expected_forward_kernels_per_step": 4,
         },
         "measurement": {
@@ -297,6 +494,10 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "peak_memory_allocated_bytes": torch.cuda.max_memory_allocated(device),
             "receiver_norm": receiver_norm,
             "ey_norm": field_norm,
+        },
+        "profiler_metrics": {
+            "forward_kernel_h": parse_ncu_csv(args.ncu_forward_kernel_h_csv),
+            "forward_kernel_e": parse_ncu_csv(args.ncu_forward_kernel_e_csv),
         },
     }
     return result
@@ -323,16 +524,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epsilon", type=float, default=4.0)
     parser.add_argument("--sigma", type=float, default=0.0)
     parser.add_argument("--mu", type=float, default=1.0)
+    parser.add_argument("--debye", action="store_true")
+    parser.add_argument("--debye-delta-epsilon", type=float, default=1.0)
+    parser.add_argument("--debye-tau", type=float, default=5.0e-10)
     parser.add_argument("--source-component", choices=("ex", "ey", "ez"), default="ey")
     parser.add_argument(
         "--receiver-component", choices=("ex", "ey", "ez"), default="ey"
     )
     parser.add_argument("--model-batched", action="store_true")
     parser.add_argument("--n-threads", type=nonnegative_int, default=0)
+    parser.add_argument(
+        "--spatial-launch",
+        action="store_true",
+        help="Set TIDE_EM3D_SPATIAL_LAUNCH=1 for experimental 3D cell launch.",
+    )
     parser.add_argument("--warmup", type=nonnegative_int, default=2)
     parser.add_argument("--iters", type=positive_int, default=5)
     parser.add_argument("--device", type=nonnegative_int, default=0)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--ncu-forward-kernel-h-csv", type=Path, default=None)
+    parser.add_argument("--ncu-forward-kernel-e-csv", type=Path, default=None)
     parser.add_argument("--no-nvtx", action="store_true")
     return parser.parse_args()
 

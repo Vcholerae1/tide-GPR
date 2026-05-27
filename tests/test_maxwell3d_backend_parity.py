@@ -59,13 +59,24 @@ def test_maxwell3d_backend_parity_via_fallback():
         torch.testing.assert_close(a, b)
 
 
-def test_maxwell3d_native_cuda_matches_python_without_callback():
+@pytest.mark.parametrize(
+    ("n_threads", "spatial_launch"),
+    [(0, False), (128, False), (256, False), (256, True)],
+)
+def test_maxwell3d_native_cuda_matches_python_without_callback(
+    n_threads, spatial_launch, monkeypatch
+):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for native 3D CUDA parity test.")
     if not backend_utils.is_backend_available():
         pytest.skip("Native backend is required for native 3D CUDA parity test.")
 
     device = torch.device("cuda")
+    if spatial_launch:
+        monkeypatch.setenv("TIDE_EM3D_SPATIAL_LAUNCH", "1")
+    else:
+        monkeypatch.delenv("TIDE_EM3D_SPATIAL_LAUNCH", raising=False)
+
     epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _case(
         device
     )
@@ -97,6 +108,7 @@ def test_maxwell3d_native_cuda_matches_python_without_callback():
         source_component="ey",
         receiver_component="ey",
         python_backend=False,
+        n_threads=n_threads,
     )
 
     torch.testing.assert_close(out_backend[-1], out_py[-1], atol=1e-4, rtol=1e-4)
