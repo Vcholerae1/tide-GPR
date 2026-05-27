@@ -739,6 +739,30 @@ __global__ void forward_kernel_e_with_storage(
 #undef HZ_S
 }
 
+template <typename SnapshotT>
+__global__ void store_final_e_3d(
+    TIDE_DTYPE const *__restrict const ex,
+    TIDE_DTYPE const *__restrict const ey,
+    TIDE_DTYPE const *__restrict const ez,
+    SnapshotT *__restrict const ex_store,
+    SnapshotT *__restrict const ey_store,
+    SnapshotT *__restrict const ez_store) {
+  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t total = n_shots * shot_numel;
+  if (i >= total) {
+    return;
+  }
+
+  LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
+  if (!is_active_cell_3d(idx)) {
+    return;
+  }
+
+  ex_store[i] = encode_snapshot<SnapshotT>(ex[i]);
+  ey_store[i] = encode_snapshot<SnapshotT>(ey[i]);
+  ez_store[i] = encode_snapshot<SnapshotT>(ez[i]);
+}
+
 __global__ void born_forward_kernel_h(
     TIDE_DTYPE const *__restrict const cq,
     TIDE_DTYPE const *__restrict const dex,
@@ -1243,150 +1267,11 @@ __global__ void record_adjoint_at_sources_component(
   }
 }
 
-__global__ void backward_kernel_lambda_h(
-    TIDE_DTYPE const *__restrict const cb,
+template <typename SnapshotT>
+__global__ void coeff_grad_3d(
     TIDE_DTYPE const *__restrict const lambda_ex,
     TIDE_DTYPE const *__restrict const lambda_ey,
     TIDE_DTYPE const *__restrict const lambda_ez,
-    TIDE_DTYPE *__restrict const lambda_hx,
-    TIDE_DTYPE *__restrict const lambda_hy,
-    TIDE_DTYPE *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const m_lambda_ey_z,
-    TIDE_DTYPE *__restrict const m_lambda_ez_y,
-    TIDE_DTYPE *__restrict const m_lambda_ez_x,
-    TIDE_DTYPE *__restrict const m_lambda_ex_z,
-    TIDE_DTYPE *__restrict const m_lambda_ex_y,
-    TIDE_DTYPE *__restrict const m_lambda_ey_x,
-    TIDE_DTYPE const *__restrict const azh,
-    TIDE_DTYPE const *__restrict const bzh,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const kzh,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kxh) {
-  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t total = n_shots * shot_numel;
-  if (i >= total) {
-    return;
-  }
-
-  LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
-  int const j = idx.j;
-  int const z = idx.z;
-  int const y = idx.y;
-  int const x = idx.x;
-
-  if (!is_active_cell_3d(idx)) {
-    return;
-  }
-
-#define LEX_H(dz, dy, dx) lambda_ex[ND_INDEX(i, dz, dy, dx)]
-#define LEY_H(dz, dy, dx) lambda_ey[ND_INDEX(i, dz, dy, dx)]
-#define LEZ_H(dz, dy, dx) lambda_ez[ND_INDEX(i, dz, dy, dx)]
-
-  int const pml_z0h = static_cast<int>(pml_z0);
-  int const pml_z1h = tide_max(pml_z0h, static_cast<int>(pml_z1) - 1);
-  int const pml_y0h = static_cast<int>(pml_y0);
-  int const pml_y1h = tide_max(pml_y0h, static_cast<int>(pml_y1) - 1);
-  int const pml_x0h = static_cast<int>(pml_x0);
-  int const pml_x1h = tide_max(pml_x0h, static_cast<int>(pml_x1) - 1);
-
-  bool const pml_z_h = (z < pml_z0h) || (z >= pml_z1h);
-  bool const pml_y_h = (y < pml_y0h) || (y >= pml_y1h);
-  bool const pml_x_h = (x < pml_x0h) || (x >= pml_x1h);
-
-  TIDE_DTYPE dLey_dz_pml = 0;
-  TIDE_DTYPE dLez_dy_pml = 0;
-  TIDE_DTYPE dLez_dx_pml = 0;
-  TIDE_DTYPE dLex_dz_pml = 0;
-  TIDE_DTYPE dLex_dy_pml = 0;
-  TIDE_DTYPE dLey_dx_pml = 0;
-
-  if (z < idx.nz_i - FD_PAD) {
-    TIDE_DTYPE dLey_dz = -DIFFZ1_ADJ(CB_I, LEY_H);
-    if (pml_z_h) {
-      m_lambda_ey_z[i] = bzh[z] * m_lambda_ey_z[i] + azh[z] * dLey_dz;
-      dLey_dz = dLey_dz / kzh[z] + m_lambda_ey_z[i];
-    }
-    dLey_dz_pml = dLey_dz;
-  }
-  if (y < idx.ny_i - FD_PAD) {
-    TIDE_DTYPE dLez_dy = -DIFFY1_ADJ(CB_I, LEZ_H);
-    if (pml_y_h) {
-      m_lambda_ez_y[i] = byh[y] * m_lambda_ez_y[i] + ayh[y] * dLez_dy;
-      dLez_dy = dLez_dy / kyh[y] + m_lambda_ez_y[i];
-    }
-    dLez_dy_pml = dLez_dy;
-  }
-  if (x < idx.nx_i - FD_PAD) {
-    TIDE_DTYPE dLez_dx = -DIFFX1_ADJ(CB_I, LEZ_H);
-    if (pml_x_h) {
-      m_lambda_ez_x[i] = bxh[x] * m_lambda_ez_x[i] + axh[x] * dLez_dx;
-      dLez_dx = dLez_dx / kxh[x] + m_lambda_ez_x[i];
-    }
-    dLez_dx_pml = dLez_dx;
-  }
-  if (z < idx.nz_i - FD_PAD) {
-    TIDE_DTYPE dLex_dz = -DIFFZ1_ADJ(CB_I, LEX_H);
-    if (pml_z_h) {
-      m_lambda_ex_z[i] = bzh[z] * m_lambda_ex_z[i] + azh[z] * dLex_dz;
-      dLex_dz = dLex_dz / kzh[z] + m_lambda_ex_z[i];
-    }
-    dLex_dz_pml = dLex_dz;
-  }
-  if (y < idx.ny_i - FD_PAD) {
-    TIDE_DTYPE dLex_dy = -DIFFY1_ADJ(CB_I, LEX_H);
-    if (pml_y_h) {
-      m_lambda_ex_y[i] = byh[y] * m_lambda_ex_y[i] + ayh[y] * dLex_dy;
-      dLex_dy = dLex_dy / kyh[y] + m_lambda_ex_y[i];
-    }
-    dLex_dy_pml = dLex_dy;
-  }
-  if (x < idx.nx_i - FD_PAD) {
-    TIDE_DTYPE dLey_dx = -DIFFX1_ADJ(CB_I, LEY_H);
-    if (pml_x_h) {
-      m_lambda_ey_x[i] = bxh[x] * m_lambda_ey_x[i] + axh[x] * dLey_dx;
-      dLey_dx = dLey_dx / kxh[x] + m_lambda_ey_x[i];
-    }
-    dLey_dx_pml = dLey_dx;
-  }
-
-  lambda_hx[i] += dLey_dz_pml - dLez_dy_pml;
-  lambda_hy[i] += dLez_dx_pml - dLex_dz_pml;
-  lambda_hz[i] += dLex_dy_pml - dLey_dx_pml;
-
-#undef LEX_H
-#undef LEY_H
-#undef LEZ_H
-}
-
-template <typename SnapshotT>
-__global__ void backward_kernel_lambda_e_with_grad(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hy,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const lambda_ex,
-    TIDE_DTYPE *__restrict const lambda_ey,
-    TIDE_DTYPE *__restrict const lambda_ez,
-    TIDE_DTYPE *__restrict const m_lambda_hz_y,
-    TIDE_DTYPE *__restrict const m_lambda_hy_z,
-    TIDE_DTYPE *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE *__restrict const m_lambda_hz_x,
-    TIDE_DTYPE *__restrict const m_lambda_hy_x,
-    TIDE_DTYPE *__restrict const m_lambda_hx_y,
-    TIDE_DTYPE const *__restrict const az,
-    TIDE_DTYPE const *__restrict const bz,
-    TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const bx,
-    TIDE_DTYPE const *__restrict const kz,
-    TIDE_DTYPE const *__restrict const ky,
-    TIDE_DTYPE const *__restrict const kx,
     SnapshotT const *__restrict const ex_store,
     SnapshotT const *__restrict const ey_store,
     SnapshotT const *__restrict const ez_store,
@@ -1408,70 +1293,16 @@ __global__ void backward_kernel_lambda_e_with_grad(
 
   LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
   int const j = idx.j;
-  int const z = idx.z;
-  int const y = idx.y;
-  int const x = idx.x;
-
   if (!is_active_cell_3d(idx)) {
     return;
   }
-
-#define LHX_E(dz, dy, dx) lambda_hx[ND_INDEX(i, dz, dy, dx)]
-#define LHY_E(dz, dy, dx) lambda_hy[ND_INDEX(i, dz, dy, dx)]
-#define LHZ_E(dz, dy, dx) lambda_hz[ND_INDEX(i, dz, dy, dx)]
-
-  TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
-
-  int const pml_z0i = static_cast<int>(pml_z0);
-  int const pml_z1i = static_cast<int>(pml_z1);
-  int const pml_y0i = static_cast<int>(pml_y0);
-  int const pml_y1i = static_cast<int>(pml_y1);
-  int const pml_x0i = static_cast<int>(pml_x0);
-  int const pml_x1i = static_cast<int>(pml_x1);
-  bool const pml_z_v = (z < pml_z0i) || (z >= pml_z1i);
-  bool const pml_y_v = (y < pml_y0i) || (y >= pml_y1i);
-  bool const pml_x_v = (x < pml_x0i) || (x >= pml_x1i);
-
-  TIDE_DTYPE dLhy_dz = DIFFZH1_ADJ(CQ_I, LHY_E);
-  TIDE_DTYPE dLhz_dy = DIFFYH1_ADJ(CQ_I, LHZ_E);
-  TIDE_DTYPE dLhz_dx = DIFFXH1_ADJ(CQ_I, LHZ_E);
-  TIDE_DTYPE dLhx_dz = DIFFZH1_ADJ(CQ_I, LHX_E);
-  TIDE_DTYPE dLhx_dy = DIFFYH1_ADJ(CQ_I, LHX_E);
-  TIDE_DTYPE dLhy_dx = DIFFXH1_ADJ(CQ_I, LHY_E);
-
-  if (pml_z_v) {
-    m_lambda_hy_z[i] = bz[z] * m_lambda_hy_z[i] + az[z] * dLhy_dz;
-    dLhy_dz = dLhy_dz / kz[z] + m_lambda_hy_z[i];
-    m_lambda_hx_z[i] = bz[z] * m_lambda_hx_z[i] + az[z] * dLhx_dz;
-    dLhx_dz = dLhx_dz / kz[z] + m_lambda_hx_z[i];
-  }
-  if (pml_y_v) {
-    m_lambda_hz_y[i] = by[y] * m_lambda_hz_y[i] + ay[y] * dLhz_dy;
-    dLhz_dy = dLhz_dy / ky[y] + m_lambda_hz_y[i];
-    m_lambda_hx_y[i] = by[y] * m_lambda_hx_y[i] + ay[y] * dLhx_dy;
-    dLhx_dy = dLhx_dy / ky[y] + m_lambda_hx_y[i];
-  }
-  if (pml_x_v) {
-    m_lambda_hz_x[i] = bx[x] * m_lambda_hz_x[i] + ax[x] * dLhz_dx;
-    dLhz_dx = dLhz_dx / kx[x] + m_lambda_hz_x[i];
-    m_lambda_hy_x[i] = bx[x] * m_lambda_hy_x[i] + ax[x] * dLhy_dx;
-    dLhy_dx = dLhy_dx / kx[x] + m_lambda_hy_x[i];
-  }
-
-  TIDE_DTYPE const curl_lambda_x = dLhy_dz - dLhz_dy;
-  TIDE_DTYPE const curl_lambda_y = dLhz_dx - dLhx_dz;
-  TIDE_DTYPE const curl_lambda_z = dLhx_dy - dLhy_dx;
 
   TIDE_DTYPE const lex_curr = lambda_ex[i];
   TIDE_DTYPE const ley_curr = lambda_ey[i];
   TIDE_DTYPE const lez_curr = lambda_ez[i];
 
-  lambda_ex[i] = ca_val * lex_curr + curl_lambda_x;
-  lambda_ey[i] = ca_val * ley_curr + curl_lambda_y;
-  lambda_ez[i] = ca_val * lez_curr + curl_lambda_z;
-
-  if (grad_ca_step && grad_ca != nullptr && ex_store != nullptr && ey_store != nullptr &&
-      ez_store != nullptr) {
+  if (grad_ca_step && grad_ca != nullptr && ex_store != nullptr &&
+      ey_store != nullptr && ez_store != nullptr) {
     TIDE_DTYPE const acc_ca = lex_curr * decode_snapshot(ex_store[i]) +
                               ley_curr * decode_snapshot(ey_store[i]) +
                               lez_curr * decode_snapshot(ez_store[i]);
@@ -1499,10 +1330,85 @@ __global__ void backward_kernel_lambda_e_with_grad(
       atomic_add_tide(&grad_cb[j], scaled);
     }
   }
+}
 
-#undef LHX_E
-#undef LHY_E
-#undef LHZ_E
+template <typename SnapshotT>
+__global__ void coeff_grad_eonly_3d(
+    TIDE_DTYPE const *__restrict const lambda_ex,
+    TIDE_DTYPE const *__restrict const lambda_ey,
+    TIDE_DTYPE const *__restrict const lambda_ez,
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cb,
+    SnapshotT const *__restrict const ex_store,
+    SnapshotT const *__restrict const ey_store,
+    SnapshotT const *__restrict const ez_store,
+    SnapshotT const *__restrict const ex_next_store,
+    SnapshotT const *__restrict const ey_next_store,
+    SnapshotT const *__restrict const ez_next_store,
+    TIDE_DTYPE *__restrict const grad_ca,
+    TIDE_DTYPE *__restrict const grad_cb,
+    TIDE_DTYPE *__restrict const grad_ca_shot,
+    TIDE_DTYPE *__restrict const grad_cb_shot,
+    bool const grad_ca_step,
+    bool const grad_cb_step,
+    int64_t const step_ratio_eff) {
+  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t total = n_shots * shot_numel;
+  if (i >= total) {
+    return;
+  }
+
+  LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
+  int const j = idx.j;
+  if (!is_active_cell_3d(idx)) {
+    return;
+  }
+
+  if (ex_store == nullptr || ey_store == nullptr || ez_store == nullptr) {
+    return;
+  }
+
+  TIDE_DTYPE const ex_curr = decode_snapshot(ex_store[i]);
+  TIDE_DTYPE const ey_curr = decode_snapshot(ey_store[i]);
+  TIDE_DTYPE const ez_curr = decode_snapshot(ez_store[i]);
+  TIDE_DTYPE const lex_curr = lambda_ex[i];
+  TIDE_DTYPE const ley_curr = lambda_ey[i];
+  TIDE_DTYPE const lez_curr = lambda_ez[i];
+
+  if (grad_ca_step && grad_ca != nullptr) {
+    TIDE_DTYPE const acc_ca =
+        lex_curr * ex_curr + ley_curr * ey_curr + lez_curr * ez_curr;
+    TIDE_DTYPE const scaled = acc_ca * (TIDE_DTYPE)step_ratio_eff;
+    if (ca_batched) {
+      grad_ca[i] += scaled;
+    } else if (grad_ca_shot != nullptr) {
+      grad_ca_shot[i] += scaled;
+    } else {
+      atomic_add_tide(&grad_ca[j], scaled);
+    }
+  }
+
+  if (grad_cb_step && grad_cb != nullptr && ex_next_store != nullptr &&
+      ey_next_store != nullptr && ez_next_store != nullptr) {
+    TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
+    TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];
+    TIDE_DTYPE const curl_x =
+        (decode_snapshot(ex_next_store[i]) - ca_val * ex_curr) / cb_val;
+    TIDE_DTYPE const curl_y =
+        (decode_snapshot(ey_next_store[i]) - ca_val * ey_curr) / cb_val;
+    TIDE_DTYPE const curl_z =
+        (decode_snapshot(ez_next_store[i]) - ca_val * ez_curr) / cb_val;
+    TIDE_DTYPE const acc_cb =
+        lex_curr * curl_x + ley_curr * curl_y + lez_curr * curl_z;
+    TIDE_DTYPE const scaled = acc_cb * (TIDE_DTYPE)step_ratio_eff;
+    if (cb_batched) {
+      grad_cb[i] += scaled;
+    } else if (grad_cb_shot != nullptr) {
+      grad_cb_shot[i] += scaled;
+    } else {
+      atomic_add_tide(&grad_cb[j], scaled);
+    }
+  }
 }
 
 template <typename SnapshotT>
@@ -1710,105 +1616,6 @@ __global__ void combine_grad_shot_3d(TIDE_DTYPE *__restrict const grad,
     sum += grad_shot[shot_idx * shot_numel + idx];
   }
   grad[idx] += sum;
-}
-
-__global__ void backward_kernel_lambda_e(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hy,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const lambda_ex,
-    TIDE_DTYPE *__restrict const lambda_ey,
-    TIDE_DTYPE *__restrict const lambda_ez,
-    TIDE_DTYPE *__restrict const m_lambda_hz_y,
-    TIDE_DTYPE *__restrict const m_lambda_hy_z,
-    TIDE_DTYPE *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE *__restrict const m_lambda_hz_x,
-    TIDE_DTYPE *__restrict const m_lambda_hy_x,
-    TIDE_DTYPE *__restrict const m_lambda_hx_y,
-    TIDE_DTYPE const *__restrict const az,
-    TIDE_DTYPE const *__restrict const bz,
-    TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const bx,
-    TIDE_DTYPE const *__restrict const kz,
-    TIDE_DTYPE const *__restrict const ky,
-    TIDE_DTYPE const *__restrict const kx) {
-  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t total = n_shots * shot_numel;
-  if (i >= total) {
-    return;
-  }
-
-  LinearCellIndex3D const idx = decode_linear_cell_index_3d(i);
-  int const j = idx.j;
-  int const z = idx.z;
-  int const y = idx.y;
-  int const x = idx.x;
-
-  if (!is_active_cell_3d(idx)) {
-    return;
-  }
-
-#define LHX_ENG(dz, dy, dx) lambda_hx[ND_INDEX(i, dz, dy, dx)]
-#define LHY_ENG(dz, dy, dx) lambda_hy[ND_INDEX(i, dz, dy, dx)]
-#define LHZ_ENG(dz, dy, dx) lambda_hz[ND_INDEX(i, dz, dy, dx)]
-
-  TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
-
-  int const pml_z0i = static_cast<int>(pml_z0);
-  int const pml_z1i = static_cast<int>(pml_z1);
-  int const pml_y0i = static_cast<int>(pml_y0);
-  int const pml_y1i = static_cast<int>(pml_y1);
-  int const pml_x0i = static_cast<int>(pml_x0);
-  int const pml_x1i = static_cast<int>(pml_x1);
-  bool const pml_z_v = (z < pml_z0i) || (z >= pml_z1i);
-  bool const pml_y_v = (y < pml_y0i) || (y >= pml_y1i);
-  bool const pml_x_v = (x < pml_x0i) || (x >= pml_x1i);
-
-  TIDE_DTYPE dLhy_dz = DIFFZH1_ADJ(CQ_I, LHY_ENG);
-  TIDE_DTYPE dLhz_dy = DIFFYH1_ADJ(CQ_I, LHZ_ENG);
-  TIDE_DTYPE dLhz_dx = DIFFXH1_ADJ(CQ_I, LHZ_ENG);
-  TIDE_DTYPE dLhx_dz = DIFFZH1_ADJ(CQ_I, LHX_ENG);
-  TIDE_DTYPE dLhx_dy = DIFFYH1_ADJ(CQ_I, LHX_ENG);
-  TIDE_DTYPE dLhy_dx = DIFFXH1_ADJ(CQ_I, LHY_ENG);
-
-  if (pml_z_v) {
-    m_lambda_hy_z[i] = bz[z] * m_lambda_hy_z[i] + az[z] * dLhy_dz;
-    dLhy_dz = dLhy_dz / kz[z] + m_lambda_hy_z[i];
-    m_lambda_hx_z[i] = bz[z] * m_lambda_hx_z[i] + az[z] * dLhx_dz;
-    dLhx_dz = dLhx_dz / kz[z] + m_lambda_hx_z[i];
-  }
-  if (pml_y_v) {
-    m_lambda_hz_y[i] = by[y] * m_lambda_hz_y[i] + ay[y] * dLhz_dy;
-    dLhz_dy = dLhz_dy / ky[y] + m_lambda_hz_y[i];
-    m_lambda_hx_y[i] = by[y] * m_lambda_hx_y[i] + ay[y] * dLhx_dy;
-    dLhx_dy = dLhx_dy / ky[y] + m_lambda_hx_y[i];
-  }
-  if (pml_x_v) {
-    m_lambda_hz_x[i] = bx[x] * m_lambda_hz_x[i] + ax[x] * dLhz_dx;
-    dLhz_dx = dLhz_dx / kx[x] + m_lambda_hz_x[i];
-    m_lambda_hy_x[i] = bx[x] * m_lambda_hy_x[i] + ax[x] * dLhy_dx;
-    dLhy_dx = dLhy_dx / kx[x] + m_lambda_hy_x[i];
-  }
-
-  TIDE_DTYPE const curl_lambda_x = dLhy_dz - dLhz_dy;
-  TIDE_DTYPE const curl_lambda_y = dLhz_dx - dLhx_dz;
-  TIDE_DTYPE const curl_lambda_z = dLhx_dy - dLhy_dx;
-
-  TIDE_DTYPE const lex_curr = lambda_ex[i];
-  TIDE_DTYPE const ley_curr = lambda_ey[i];
-  TIDE_DTYPE const lez_curr = lambda_ez[i];
-
-  lambda_ex[i] = ca_val * lex_curr + curl_lambda_x;
-  lambda_ey[i] = ca_val * ley_curr + curl_lambda_y;
-  lambda_ez[i] = ca_val * lez_curr + curl_lambda_z;
-
-#undef LHX_ENG
-#undef LHY_ENG
-#undef LHZ_ENG
 }
 
 __global__ void convert_grad_ca_cb_to_eps_sigma_3d(
@@ -2384,11 +2191,10 @@ extern "C" void FUNC(forward_with_storage)(
     int64_t const n_threads,
     int64_t const device,
     int64_t const execution_backend,
-    void *const compute_stream_handle,
-    void *const storage_stream_handle) {
+  void *const compute_stream_handle,
+  void *const storage_stream_handle) {
   (void)dt_h;
   (void)n_threads;
-  (void)execution_backend;
 
   cudaSetDevice((int)device);
   cudaStream_t const stream_compute =
@@ -2412,6 +2218,9 @@ extern "C" void FUNC(forward_with_storage)(
       (storage_mode == STORAGE_CPU || storage_mode == STORAGE_DISK) &&
       ((storage_full && shot_bytes_uncomp == (int64_t)full_bytes_per_shot) ||
        (storage_bf16 && shot_bytes_uncomp == (int64_t)bf16_bytes_per_shot));
+  bool const eonly_snapshot =
+      execution_backend == 1 && storage_direct && step_ratio_eff == 1 &&
+      ca_requires_grad && cb_requires_grad;
   bool const use_storage_pipeline =
       host_backed_storage && (ca_requires_grad || cb_requires_grad) &&
       stream_storage != nullptr && stream_storage != stream_compute;
@@ -2462,8 +2271,10 @@ extern "C" void FUNC(forward_with_storage)(
                                      store_filenames_3, store_filenames_4,
                                      store_filenames_5, store_filenames_6};
   bool const component_required[6] = {ca_requires_grad, ca_requires_grad,
-                                      ca_requires_grad, cb_requires_grad,
-                                      cb_requires_grad, cb_requires_grad};
+                                      ca_requires_grad,
+                                      cb_requires_grad && !eonly_snapshot,
+                                      cb_requires_grad && !eonly_snapshot,
+                                      cb_requires_grad && !eonly_snapshot};
   void *async_disk_handles[6] = {};
   if (storage_mode == STORAGE_DISK) {
     for (int i = 0; i < 6; ++i) {
@@ -2550,17 +2361,17 @@ extern "C" void FUNC(forward_with_storage)(
                     reinterpret_cast<uint8_t *>(device_stores[2]) + device_offset)
               : nullptr;
       void *const curl_x_store_t =
-          (cb_requires_grad && device_stores[3] != nullptr)
+          (cb_requires_grad && !eonly_snapshot && device_stores[3] != nullptr)
               ? reinterpret_cast<void *>(
                     reinterpret_cast<uint8_t *>(device_stores[3]) + device_offset)
               : nullptr;
       void *const curl_y_store_t =
-          (cb_requires_grad && device_stores[4] != nullptr)
+          (cb_requires_grad && !eonly_snapshot && device_stores[4] != nullptr)
               ? reinterpret_cast<void *>(
                     reinterpret_cast<uint8_t *>(device_stores[4]) + device_offset)
               : nullptr;
       void *const curl_z_store_t =
-          (cb_requires_grad && device_stores[5] != nullptr)
+          (cb_requires_grad && !eonly_snapshot && device_stores[5] != nullptr)
               ? reinterpret_cast<void *>(
                     reinterpret_cast<uint8_t *>(device_stores[5]) + device_offset)
               : nullptr;
@@ -2599,7 +2410,7 @@ extern "C" void FUNC(forward_with_storage)(
                   reinterpret_cast<__nv_bfloat16 *>(curl_y_store_t),
                   reinterpret_cast<__nv_bfloat16 *>(curl_z_store_t),
                   ca_requires_grad,
-                  cb_requires_grad);
+                  cb_requires_grad && !eonly_snapshot);
       } else {
           forward_kernel_e_with_storage<TIDE_DTYPE>
               <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
@@ -2634,7 +2445,7 @@ extern "C" void FUNC(forward_with_storage)(
                   reinterpret_cast<TIDE_DTYPE *>(curl_y_store_t),
                   reinterpret_cast<TIDE_DTYPE *>(curl_z_store_t),
                   ca_requires_grad,
-                  cb_requires_grad);
+                  cb_requires_grad && !eonly_snapshot);
       }
 
       if (host_backed_storage) {
@@ -2731,6 +2542,25 @@ extern "C" void FUNC(forward_with_storage)(
           r + t * n_shots_h * n_receivers_per_shot_h,
           receiver_field,
           receivers_i);
+    }
+  }
+
+  if (eonly_snapshot && store_7 != nullptr && store_9 != nullptr &&
+      store_11 != nullptr) {
+    if (storage_bf16) {
+      store_final_e_3d<__nv_bfloat16>
+          <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+             stream_compute>>>(
+              ex,
+              ey,
+              ez,
+              reinterpret_cast<__nv_bfloat16 *>(store_7),
+              reinterpret_cast<__nv_bfloat16 *>(store_9),
+              reinterpret_cast<__nv_bfloat16 *>(store_11));
+    } else {
+      store_final_e_3d<TIDE_DTYPE>
+          <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+             stream_compute>>>(ex, ey, ez, store_7, store_9, store_11);
     }
   }
 
@@ -3618,6 +3448,9 @@ extern "C" void FUNC(backward)(
       (storage_mode == STORAGE_CPU || storage_mode == STORAGE_DISK) &&
       ((storage_full && shot_bytes_uncomp == (int64_t)full_bytes_per_shot) ||
        (storage_bf16 && shot_bytes_uncomp == (int64_t)bf16_bytes_per_shot));
+  bool const eonly_snapshot =
+      execution_backend == 1 && storage_direct && step_ratio_eff == 1 &&
+      ca_requires_grad && cb_requires_grad;
   bool const use_storage_pipeline =
       host_backed_storage && (ca_requires_grad || cb_requires_grad) &&
       stream_storage != nullptr && stream_storage != stream_compute;
@@ -3674,8 +3507,10 @@ extern "C" void FUNC(backward)(
                                      store_filenames_3, store_filenames_4,
                                      store_filenames_5, store_filenames_6};
   bool const component_required[6] = {ca_requires_grad, ca_requires_grad,
-                                      ca_requires_grad, cb_requires_grad,
-                                      cb_requires_grad, cb_requires_grad};
+                                      ca_requires_grad,
+                                      cb_requires_grad && !eonly_snapshot,
+                                      cb_requires_grad && !eonly_snapshot,
+                                      cb_requires_grad && !eonly_snapshot};
   void *async_disk_handles[6] = {};
   if (storage_mode == STORAGE_DISK) {
     for (int i = 0; i < 6; ++i) {
@@ -3794,11 +3629,16 @@ extern "C" void FUNC(backward)(
           store_6 != nullptr));
     bool const grad_cb_step =
         do_grad && cb_requires_grad &&
-        ((storage_direct && store_7 != nullptr && store_9 != nullptr &&
-          store_11 != nullptr) ||
-         (host_backed_storage && store_7 != nullptr && store_8 != nullptr &&
-          store_9 != nullptr && store_10 != nullptr && store_11 != nullptr &&
-          store_12 != nullptr));
+        (eonly_snapshot
+             ? (storage_direct && store_1 != nullptr && store_3 != nullptr &&
+                store_5 != nullptr && store_7 != nullptr && store_9 != nullptr &&
+                store_11 != nullptr)
+             : ((storage_direct && store_7 != nullptr && store_9 != nullptr &&
+                 store_11 != nullptr) ||
+                (host_backed_storage && store_7 != nullptr &&
+                 store_8 != nullptr && store_9 != nullptr &&
+                 store_10 != nullptr && store_11 != nullptr &&
+                 store_12 != nullptr)));
     bool const want_load = grad_ca_step || grad_cb_step;
     int slot = 0;
     cudaEvent_t slot_storage_done = nullptr;
@@ -3820,34 +3660,62 @@ extern "C" void FUNC(backward)(
         store_idx, storage_mode, bytes_per_step_store);
 
     void const *const ex_store =
-        grad_ca_step
+        (grad_ca_step || (eonly_snapshot && grad_cb_step))
             ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(device_stores[0]) + device_offset)
             : nullptr;
     void const *const ey_store =
-        grad_ca_step
+        (grad_ca_step || (eonly_snapshot && grad_cb_step))
             ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(device_stores[1]) + device_offset)
             : nullptr;
     void const *const ez_store =
-        grad_ca_step
+        (grad_ca_step || (eonly_snapshot && grad_cb_step))
             ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(device_stores[2]) + device_offset)
             : nullptr;
     void const *const curl_x_store =
-        grad_cb_step
+        (grad_cb_step && !eonly_snapshot)
             ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(device_stores[3]) + device_offset)
             : nullptr;
     void const *const curl_y_store =
-        grad_cb_step
+        (grad_cb_step && !eonly_snapshot)
             ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(device_stores[4]) + device_offset)
             : nullptr;
     void const *const curl_z_store =
-        grad_cb_step
+        (grad_cb_step && !eonly_snapshot)
             ? reinterpret_cast<void const *>(
                   reinterpret_cast<uint8_t *>(device_stores[5]) + device_offset)
+            : nullptr;
+    size_t const next_device_offset = ring_storage_offset_bytes(
+        store_idx + 1, storage_mode, bytes_per_step_store);
+    bool const eonly_use_final_next =
+        eonly_snapshot && grad_cb_step && (t + 1 == start_t);
+    void const *const ex_next_store =
+        (eonly_snapshot && grad_cb_step)
+            ? (eonly_use_final_next
+                   ? reinterpret_cast<void const *>(device_stores[3])
+                   : reinterpret_cast<void const *>(
+                         reinterpret_cast<uint8_t *>(device_stores[0]) +
+                         next_device_offset))
+            : nullptr;
+    void const *const ey_next_store =
+        (eonly_snapshot && grad_cb_step)
+            ? (eonly_use_final_next
+                   ? reinterpret_cast<void const *>(device_stores[4])
+                   : reinterpret_cast<void const *>(
+                         reinterpret_cast<uint8_t *>(device_stores[1]) +
+                         next_device_offset))
+            : nullptr;
+    void const *const ez_next_store =
+        (eonly_snapshot && grad_cb_step)
+            ? (eonly_use_final_next
+                   ? reinterpret_cast<void const *>(device_stores[5])
+                   : reinterpret_cast<void const *>(
+                         reinterpret_cast<uint8_t *>(device_stores[2]) +
+                         next_device_offset))
             : nullptr;
 
     if (storage_mode == STORAGE_CPU && want_load) {
@@ -3929,31 +3797,9 @@ extern "C" void FUNC(backward)(
       }
     }
 
-    if (n_receivers_per_shot_h > 0 && grad_r != nullptr && receivers_i != nullptr) {
-      add_adjoint_receivers_component<<<(unsigned)launch_cfg.blocks_receivers,
-                                        launch_cfg.threads_sr, 0, stream_compute>>>(
-          lambda_recv_field,
-          grad_r + t * n_shots_h * n_receivers_per_shot_h,
-          receivers_i);
-    }
-
-    if (n_sources_per_shot_h > 0 && grad_f != nullptr && sources_i != nullptr) {
-      record_adjoint_at_sources_component<<<(unsigned)launch_cfg.blocks_sources,
-                                            launch_cfg.threads_sr, 0,
-                                            stream_compute>>>(
-          grad_f + t * n_shots_h * n_sources_per_shot_h,
-          lambda_src_field,
-          sources_i);
-    }
-    if (want_load && use_storage_pipeline) {
-      tide::cuda_check_or_abort(
-          cudaStreamWaitEvent(stream_compute, slot_storage_done, 0), __FILE__,
-          __LINE__);
-    }
-
-    backward_kernel_lambda_h<<<(unsigned)launch_cfg.blocks_cells,
-                               launch_cfg.threads_cells, 0, stream_compute>>>(
-        cb,
+    forward_kernel_h<<<(unsigned)launch_cfg.blocks_cells,
+                       launch_cfg.threads_cells, 0, stream_compute>>>(
+        cq,
         lambda_ex,
         lambda_ey,
         lambda_ez,
@@ -3976,34 +3822,86 @@ extern "C" void FUNC(backward)(
         kyh,
         kxh);
 
+    forward_kernel_e<<<(unsigned)launch_cfg.blocks_cells,
+                       launch_cfg.threads_cells, 0, stream_compute>>>(
+        ca,
+        cb,
+        lambda_ex,
+        lambda_ey,
+        lambda_ez,
+        lambda_hx,
+        lambda_hy,
+        lambda_hz,
+        m_lambda_hy_z,
+        m_lambda_hz_y,
+        m_lambda_hz_x,
+        m_lambda_hx_z,
+        m_lambda_hx_y,
+        m_lambda_hy_x,
+        az,
+        bz,
+        ay,
+        by,
+        ax,
+        bx,
+        kz,
+        ky,
+        kx);
+
+    if (n_receivers_per_shot_h > 0 && grad_r != nullptr && receivers_i != nullptr) {
+      add_adjoint_receivers_component<<<(unsigned)launch_cfg.blocks_receivers,
+                                        launch_cfg.threads_sr, 0, stream_compute>>>(
+          lambda_recv_field,
+          grad_r + t * n_shots_h * n_receivers_per_shot_h,
+          receivers_i);
+    }
+
+    if (n_sources_per_shot_h > 0 && grad_f != nullptr && sources_i != nullptr) {
+      record_adjoint_at_sources_component<<<(unsigned)launch_cfg.blocks_sources,
+                                            launch_cfg.threads_sr, 0,
+                                            stream_compute>>>(
+          grad_f + t * n_shots_h * n_sources_per_shot_h,
+          lambda_src_field,
+          sources_i);
+    }
+
+    if (want_load && use_storage_pipeline) {
+      tide::cuda_check_or_abort(
+          cudaStreamWaitEvent(stream_compute, slot_storage_done, 0), __FILE__,
+          __LINE__);
+    }
+
     if (want_load) {
       if (storage_bf16) {
-          backward_kernel_lambda_e_with_grad<__nv_bfloat16>
+        if (eonly_snapshot) {
+          coeff_grad_eonly_3d<__nv_bfloat16>
               <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
                  stream_compute>>>(
-                  ca,
-                  cq,
-                  lambda_hx,
-                  lambda_hy,
-                  lambda_hz,
                   lambda_ex,
                   lambda_ey,
                   lambda_ez,
-                  m_lambda_hz_y,
-                  m_lambda_hy_z,
-                  m_lambda_hx_z,
-                  m_lambda_hz_x,
-                  m_lambda_hy_x,
-                  m_lambda_hx_y,
-                  az,
-                  bz,
-                  ay,
-                  by,
-                  ax,
-                  bx,
-                  kz,
-                  ky,
-                  kx,
+                  ca,
+                  cb,
+                  reinterpret_cast<__nv_bfloat16 const *>(ex_store),
+                  reinterpret_cast<__nv_bfloat16 const *>(ey_store),
+                  reinterpret_cast<__nv_bfloat16 const *>(ez_store),
+                  reinterpret_cast<__nv_bfloat16 const *>(ex_next_store),
+                  reinterpret_cast<__nv_bfloat16 const *>(ey_next_store),
+                  reinterpret_cast<__nv_bfloat16 const *>(ez_next_store),
+                  grad_ca,
+                  grad_cb,
+                  grad_ca_shot,
+                  grad_cb_shot,
+                  grad_ca_step,
+                  grad_cb_step,
+                  step_ratio_eff);
+        } else {
+          coeff_grad_3d<__nv_bfloat16>
+              <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+                 stream_compute>>>(
+                  lambda_ex,
+                  lambda_ey,
+                  lambda_ez,
                   reinterpret_cast<__nv_bfloat16 const *>(ex_store),
                   reinterpret_cast<__nv_bfloat16 const *>(ey_store),
                   reinterpret_cast<__nv_bfloat16 const *>(ez_store),
@@ -4017,33 +3915,37 @@ extern "C" void FUNC(backward)(
                   grad_ca_step,
                   grad_cb_step,
                   step_ratio_eff);
+        }
       } else {
-          backward_kernel_lambda_e_with_grad<TIDE_DTYPE>
+        if (eonly_snapshot) {
+          coeff_grad_eonly_3d<TIDE_DTYPE>
               <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
                  stream_compute>>>(
-                  ca,
-                  cq,
-                  lambda_hx,
-                  lambda_hy,
-                  lambda_hz,
                   lambda_ex,
                   lambda_ey,
                   lambda_ez,
-                  m_lambda_hz_y,
-                  m_lambda_hy_z,
-                  m_lambda_hx_z,
-                  m_lambda_hz_x,
-                  m_lambda_hy_x,
-                  m_lambda_hx_y,
-                  az,
-                  bz,
-                  ay,
-                  by,
-                  ax,
-                  bx,
-                  kz,
-                  ky,
-                  kx,
+                  ca,
+                  cb,
+                  reinterpret_cast<TIDE_DTYPE const *>(ex_store),
+                  reinterpret_cast<TIDE_DTYPE const *>(ey_store),
+                  reinterpret_cast<TIDE_DTYPE const *>(ez_store),
+                  reinterpret_cast<TIDE_DTYPE const *>(ex_next_store),
+                  reinterpret_cast<TIDE_DTYPE const *>(ey_next_store),
+                  reinterpret_cast<TIDE_DTYPE const *>(ez_next_store),
+                  grad_ca,
+                  grad_cb,
+                  grad_ca_shot,
+                  grad_cb_shot,
+                  grad_ca_step,
+                  grad_cb_step,
+                  step_ratio_eff);
+        } else {
+          coeff_grad_3d<TIDE_DTYPE>
+              <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+                 stream_compute>>>(
+                  lambda_ex,
+                  lambda_ey,
+                  lambda_ez,
                   reinterpret_cast<TIDE_DTYPE const *>(ex_store),
                   reinterpret_cast<TIDE_DTYPE const *>(ey_store),
                   reinterpret_cast<TIDE_DTYPE const *>(ez_store),
@@ -4057,33 +3959,8 @@ extern "C" void FUNC(backward)(
                   grad_ca_step,
                   grad_cb_step,
                   step_ratio_eff);
+        }
       }
-    } else {
-      backward_kernel_lambda_e<<<(unsigned)launch_cfg.blocks_cells,
-                                 launch_cfg.threads_cells, 0, stream_compute>>>(
-          ca,
-          cq,
-          lambda_hx,
-          lambda_hy,
-          lambda_hz,
-          lambda_ex,
-          lambda_ey,
-          lambda_ez,
-          m_lambda_hz_y,
-          m_lambda_hy_z,
-          m_lambda_hx_z,
-          m_lambda_hz_x,
-          m_lambda_hy_x,
-          m_lambda_hx_y,
-          az,
-          bz,
-          ay,
-          by,
-          ax,
-          bx,
-          kz,
-          ky,
-          kx);
     }
 
     if (want_load && use_storage_pipeline) {
@@ -4315,9 +4192,6 @@ extern "C" void FUNC(born_backward_bggrad)(
   (void)store_filenames_5;
   (void)store_12;
   (void)store_filenames_6;
-  (void)bzh;
-  (void)byh;
-  (void)bxh;
 
   cudaStream_t const stream_compute =
       resolve_cuda_stream(compute_stream_handle);
@@ -4571,6 +4445,108 @@ extern "C" void FUNC(born_backward_bggrad)(
                   device_offset)
             : nullptr;
 
+    forward_kernel_h<<<(unsigned)launch_cfg.blocks_cells,
+                       launch_cfg.threads_cells, 0, stream_compute>>>(
+        cq,
+        lambda_ex,
+        lambda_ey,
+        lambda_ez,
+        lambda_hx,
+        lambda_hy,
+        lambda_hz,
+        m_lambda_ey_z,
+        m_lambda_ez_y,
+        m_lambda_ez_x,
+        m_lambda_ex_z,
+        m_lambda_ex_y,
+        m_lambda_ey_x,
+        azh,
+        bzh,
+        ayh,
+        byh,
+        axh,
+        bxh,
+        kzh,
+        kyh,
+        kxh);
+
+    forward_kernel_e<<<(unsigned)launch_cfg.blocks_cells,
+                       launch_cfg.threads_cells, 0, stream_compute>>>(
+        ca,
+        cb,
+        lambda_ex,
+        lambda_ey,
+        lambda_ez,
+        lambda_hx,
+        lambda_hy,
+        lambda_hz,
+        m_lambda_hy_z,
+        m_lambda_hz_y,
+        m_lambda_hz_x,
+        m_lambda_hx_z,
+        m_lambda_hx_y,
+        m_lambda_hy_x,
+        az,
+        bz,
+        ay,
+        by,
+        ax,
+        bx,
+        kz,
+        ky,
+        kx);
+
+    forward_kernel_h<<<(unsigned)launch_cfg.blocks_cells,
+                       launch_cfg.threads_cells, 0, stream_compute>>>(
+        cq,
+        eta_ex,
+        eta_ey,
+        eta_ez,
+        eta_hx,
+        eta_hy,
+        eta_hz,
+        m_eta_ey_z,
+        m_eta_ez_y,
+        m_eta_ez_x,
+        m_eta_ex_z,
+        m_eta_ex_y,
+        m_eta_ey_x,
+        azh,
+        bzh,
+        ayh,
+        byh,
+        axh,
+        bxh,
+        kzh,
+        kyh,
+        kxh);
+
+    forward_kernel_e<<<(unsigned)launch_cfg.blocks_cells,
+                       launch_cfg.threads_cells, 0, stream_compute>>>(
+        ca,
+        cb,
+        eta_ex,
+        eta_ey,
+        eta_ez,
+        eta_hx,
+        eta_hy,
+        eta_hz,
+        m_eta_hy_z,
+        m_eta_hz_y,
+        m_eta_hz_x,
+        m_eta_hx_z,
+        m_eta_hx_y,
+        m_eta_hy_x,
+        az,
+        bz,
+        ay,
+        by,
+        ax,
+        bx,
+        kz,
+        ky,
+        kx);
+
     if (n_receivers_per_shot_h > 0 && grad_r != nullptr &&
         receivers_i != nullptr) {
       add_adjoint_receivers_component<<<(unsigned)launch_cfg.blocks_receivers,
@@ -4579,6 +4555,126 @@ extern "C" void FUNC(born_backward_bggrad)(
           lambda_recv_field,
           grad_r + t * n_shots_h * n_receivers_per_shot_h,
           receivers_i);
+    }
+
+    if (do_grad) {
+      if (storage_bf16) {
+        born_bggrad_prepare_direct_3d<__nv_bfloat16>
+            <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+               stream_compute>>>(
+                dca,
+                lambda_ex,
+                lambda_ey,
+                lambda_ez,
+                reinterpret_cast<__nv_bfloat16 const *>(dex_store),
+                reinterpret_cast<__nv_bfloat16 const *>(dey_store),
+                reinterpret_cast<__nv_bfloat16 const *>(dez_store),
+                reinterpret_cast<__nv_bfloat16 const *>(dcurl_x_store),
+                reinterpret_cast<__nv_bfloat16 const *>(dcurl_y_store),
+                reinterpret_cast<__nv_bfloat16 const *>(dcurl_z_store),
+                grad_ca,
+                grad_cb,
+                grad_ca_shot,
+                grad_cb_shot,
+                eta_source_ex,
+                eta_source_ey,
+                eta_source_ez,
+                direct_ca_step,
+                direct_cb_step,
+                step_ratio_eff);
+      } else {
+        born_bggrad_prepare_direct_3d<TIDE_DTYPE>
+            <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+               stream_compute>>>(
+                dca,
+                lambda_ex,
+                lambda_ey,
+                lambda_ez,
+                reinterpret_cast<TIDE_DTYPE const *>(dex_store),
+                reinterpret_cast<TIDE_DTYPE const *>(dey_store),
+                reinterpret_cast<TIDE_DTYPE const *>(dez_store),
+                reinterpret_cast<TIDE_DTYPE const *>(dcurl_x_store),
+                reinterpret_cast<TIDE_DTYPE const *>(dcurl_y_store),
+                reinterpret_cast<TIDE_DTYPE const *>(dcurl_z_store),
+                grad_ca,
+                grad_cb,
+                grad_ca_shot,
+                grad_cb_shot,
+                eta_source_ex,
+                eta_source_ey,
+                eta_source_ez,
+                direct_ca_step,
+                direct_cb_step,
+                step_ratio_eff);
+      }
+
+      born_bggrad_direct_dcb_to_eta_h_3d<<<(unsigned)launch_cfg.blocks_cells,
+                                           launch_cfg.threads_cells, 0,
+                                           stream_compute>>>(
+          dcb,
+          lambda_ex,
+          lambda_ey,
+          lambda_ez,
+          eta_hx,
+          eta_hy,
+          eta_hz,
+          azh,
+          ayh,
+          axh,
+          kzh,
+          kyh,
+          kxh);
+
+      if (storage_bf16) {
+        coeff_grad_3d<__nv_bfloat16>
+            <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+               stream_compute>>>(
+                lambda_ex,
+                lambda_ey,
+                lambda_ez,
+                reinterpret_cast<__nv_bfloat16 const *>(ex_store),
+                reinterpret_cast<__nv_bfloat16 const *>(ey_store),
+                reinterpret_cast<__nv_bfloat16 const *>(ez_store),
+                reinterpret_cast<__nv_bfloat16 const *>(curl_x_store),
+                reinterpret_cast<__nv_bfloat16 const *>(curl_y_store),
+                reinterpret_cast<__nv_bfloat16 const *>(curl_z_store),
+                grad_dca,
+                grad_dcb,
+                grad_dca_shot,
+                grad_dcb_shot,
+                grad_dca_step,
+                grad_dcb_step,
+                step_ratio_eff);
+      } else {
+        coeff_grad_3d<TIDE_DTYPE>
+            <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
+               stream_compute>>>(
+                lambda_ex,
+                lambda_ey,
+                lambda_ez,
+                reinterpret_cast<TIDE_DTYPE const *>(ex_store),
+                reinterpret_cast<TIDE_DTYPE const *>(ey_store),
+                reinterpret_cast<TIDE_DTYPE const *>(ez_store),
+                reinterpret_cast<TIDE_DTYPE const *>(curl_x_store),
+                reinterpret_cast<TIDE_DTYPE const *>(curl_y_store),
+                reinterpret_cast<TIDE_DTYPE const *>(curl_z_store),
+                grad_dca,
+                grad_dcb,
+                grad_dca_shot,
+                grad_dcb_shot,
+                grad_dca_step,
+                grad_dcb_step,
+                step_ratio_eff);
+      }
+
+      add_eta_source_3d<<<(unsigned)launch_cfg.blocks_cells,
+                          launch_cfg.threads_cells, 0, stream_compute>>>(
+          eta_ex,
+          eta_ey,
+          eta_ez,
+          eta_source_ex,
+          eta_source_ey,
+          eta_source_ez);
     }
 
     if (n_sources_per_shot_h > 0 && sources_i != nullptr) {
@@ -4602,296 +4698,6 @@ extern "C" void FUNC(born_backward_bggrad)(
             eta_src_field,
             sources_i);
       }
-    }
-
-    if (storage_bf16) {
-      born_bggrad_prepare_direct_3d<__nv_bfloat16>
-          <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
-             stream_compute>>>(
-              dca,
-              lambda_ex,
-              lambda_ey,
-              lambda_ez,
-              reinterpret_cast<__nv_bfloat16 const *>(dex_store),
-              reinterpret_cast<__nv_bfloat16 const *>(dey_store),
-              reinterpret_cast<__nv_bfloat16 const *>(dez_store),
-              reinterpret_cast<__nv_bfloat16 const *>(dcurl_x_store),
-              reinterpret_cast<__nv_bfloat16 const *>(dcurl_y_store),
-              reinterpret_cast<__nv_bfloat16 const *>(dcurl_z_store),
-              grad_ca,
-              grad_cb,
-              grad_ca_shot,
-              grad_cb_shot,
-              eta_source_ex,
-              eta_source_ey,
-              eta_source_ez,
-              direct_ca_step,
-              direct_cb_step,
-              step_ratio_eff);
-    } else {
-      born_bggrad_prepare_direct_3d<TIDE_DTYPE>
-          <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
-             stream_compute>>>(
-              dca,
-              lambda_ex,
-              lambda_ey,
-              lambda_ez,
-              reinterpret_cast<TIDE_DTYPE const *>(dex_store),
-              reinterpret_cast<TIDE_DTYPE const *>(dey_store),
-              reinterpret_cast<TIDE_DTYPE const *>(dez_store),
-              reinterpret_cast<TIDE_DTYPE const *>(dcurl_x_store),
-              reinterpret_cast<TIDE_DTYPE const *>(dcurl_y_store),
-              reinterpret_cast<TIDE_DTYPE const *>(dcurl_z_store),
-              grad_ca,
-              grad_cb,
-              grad_ca_shot,
-              grad_cb_shot,
-              eta_source_ex,
-              eta_source_ey,
-              eta_source_ez,
-              direct_ca_step,
-              direct_cb_step,
-              step_ratio_eff);
-    }
-
-    born_bggrad_direct_dcb_to_eta_h_3d<<<(unsigned)launch_cfg.blocks_cells,
-                                         launch_cfg.threads_cells, 0,
-                                         stream_compute>>>(
-        dcb,
-        lambda_ex,
-        lambda_ey,
-        lambda_ez,
-        eta_hx,
-        eta_hy,
-        eta_hz,
-        azh,
-        ayh,
-        axh,
-        kzh,
-        kyh,
-        kxh);
-
-    backward_kernel_lambda_h<<<(unsigned)launch_cfg.blocks_cells,
-                               launch_cfg.threads_cells, 0, stream_compute>>>(
-        cb,
-        eta_ex,
-        eta_ey,
-        eta_ez,
-        eta_hx,
-        eta_hy,
-        eta_hz,
-        m_eta_ey_z,
-        m_eta_ez_y,
-        m_eta_ez_x,
-        m_eta_ex_z,
-        m_eta_ex_y,
-        m_eta_ey_x,
-        azh,
-        bzh,
-        ayh,
-        byh,
-        axh,
-        bxh,
-        kzh,
-        kyh,
-        kxh);
-
-    backward_kernel_lambda_h<<<(unsigned)launch_cfg.blocks_cells,
-                               launch_cfg.threads_cells, 0, stream_compute>>>(
-        cb,
-        lambda_ex,
-        lambda_ey,
-        lambda_ez,
-        lambda_hx,
-        lambda_hy,
-        lambda_hz,
-        m_lambda_ey_z,
-        m_lambda_ez_y,
-        m_lambda_ez_x,
-        m_lambda_ex_z,
-        m_lambda_ex_y,
-        m_lambda_ey_x,
-        azh,
-        bzh,
-        ayh,
-        byh,
-        axh,
-        bxh,
-        kzh,
-        kyh,
-        kxh);
-
-    if (storage_bf16) {
-      backward_kernel_lambda_e_with_grad<__nv_bfloat16>
-          <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
-             stream_compute>>>(
-              ca,
-              cq,
-              eta_hx,
-              eta_hy,
-              eta_hz,
-              eta_ex,
-              eta_ey,
-              eta_ez,
-              m_eta_hz_y,
-              m_eta_hy_z,
-              m_eta_hx_z,
-              m_eta_hz_x,
-              m_eta_hy_x,
-              m_eta_hx_y,
-              az,
-              bz,
-              ay,
-              by,
-              ax,
-              bx,
-              kz,
-              ky,
-              kx,
-              reinterpret_cast<__nv_bfloat16 const *>(ex_store),
-              reinterpret_cast<__nv_bfloat16 const *>(ey_store),
-              reinterpret_cast<__nv_bfloat16 const *>(ez_store),
-              reinterpret_cast<__nv_bfloat16 const *>(curl_x_store),
-              reinterpret_cast<__nv_bfloat16 const *>(curl_y_store),
-              reinterpret_cast<__nv_bfloat16 const *>(curl_z_store),
-              grad_ca,
-              grad_cb,
-              grad_ca_shot,
-              grad_cb_shot,
-              grad_ca_step,
-              grad_cb_step,
-              step_ratio_eff);
-    } else {
-      backward_kernel_lambda_e_with_grad<TIDE_DTYPE>
-          <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
-             stream_compute>>>(
-              ca,
-              cq,
-              eta_hx,
-              eta_hy,
-              eta_hz,
-              eta_ex,
-              eta_ey,
-              eta_ez,
-              m_eta_hz_y,
-              m_eta_hy_z,
-              m_eta_hx_z,
-              m_eta_hz_x,
-              m_eta_hy_x,
-              m_eta_hx_y,
-              az,
-              bz,
-              ay,
-              by,
-              ax,
-              bx,
-              kz,
-              ky,
-              kx,
-              reinterpret_cast<TIDE_DTYPE const *>(ex_store),
-              reinterpret_cast<TIDE_DTYPE const *>(ey_store),
-              reinterpret_cast<TIDE_DTYPE const *>(ez_store),
-              reinterpret_cast<TIDE_DTYPE const *>(curl_x_store),
-              reinterpret_cast<TIDE_DTYPE const *>(curl_y_store),
-              reinterpret_cast<TIDE_DTYPE const *>(curl_z_store),
-              grad_ca,
-              grad_cb,
-              grad_ca_shot,
-              grad_cb_shot,
-              grad_ca_step,
-              grad_cb_step,
-              step_ratio_eff);
-    }
-
-    add_eta_source_3d<<<(unsigned)launch_cfg.blocks_cells,
-                        launch_cfg.threads_cells, 0, stream_compute>>>(
-        eta_ex,
-        eta_ey,
-        eta_ez,
-        eta_source_ex,
-        eta_source_ey,
-        eta_source_ez);
-
-    if (storage_bf16) {
-      backward_kernel_lambda_e_with_grad<__nv_bfloat16>
-          <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
-             stream_compute>>>(
-              ca,
-              cq,
-              lambda_hx,
-              lambda_hy,
-              lambda_hz,
-              lambda_ex,
-              lambda_ey,
-              lambda_ez,
-              m_lambda_hz_y,
-              m_lambda_hy_z,
-              m_lambda_hx_z,
-              m_lambda_hz_x,
-              m_lambda_hy_x,
-              m_lambda_hx_y,
-              az,
-              bz,
-              ay,
-              by,
-              ax,
-              bx,
-              kz,
-              ky,
-              kx,
-              reinterpret_cast<__nv_bfloat16 const *>(ex_store),
-              reinterpret_cast<__nv_bfloat16 const *>(ey_store),
-              reinterpret_cast<__nv_bfloat16 const *>(ez_store),
-              reinterpret_cast<__nv_bfloat16 const *>(curl_x_store),
-              reinterpret_cast<__nv_bfloat16 const *>(curl_y_store),
-              reinterpret_cast<__nv_bfloat16 const *>(curl_z_store),
-              grad_dca,
-              grad_dcb,
-              grad_dca_shot,
-              grad_dcb_shot,
-              grad_dca_step,
-              grad_dcb_step,
-              step_ratio_eff);
-    } else {
-      backward_kernel_lambda_e_with_grad<TIDE_DTYPE>
-          <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
-             stream_compute>>>(
-              ca,
-              cq,
-              lambda_hx,
-              lambda_hy,
-              lambda_hz,
-              lambda_ex,
-              lambda_ey,
-              lambda_ez,
-              m_lambda_hz_y,
-              m_lambda_hy_z,
-              m_lambda_hx_z,
-              m_lambda_hz_x,
-              m_lambda_hy_x,
-              m_lambda_hx_y,
-              az,
-              bz,
-              ay,
-              by,
-              ax,
-              bx,
-              kz,
-              ky,
-              kx,
-              reinterpret_cast<TIDE_DTYPE const *>(ex_store),
-              reinterpret_cast<TIDE_DTYPE const *>(ey_store),
-              reinterpret_cast<TIDE_DTYPE const *>(ez_store),
-              reinterpret_cast<TIDE_DTYPE const *>(curl_x_store),
-              reinterpret_cast<TIDE_DTYPE const *>(curl_y_store),
-              reinterpret_cast<TIDE_DTYPE const *>(curl_z_store),
-              grad_dca,
-              grad_dcb,
-              grad_dca_shot,
-              grad_dcb_shot,
-              grad_dca_step,
-              grad_dcb_step,
-              step_ratio_eff);
     }
   }
 
@@ -5037,7 +4843,6 @@ extern "C" void FUNC(born_backward)(
   (void)store_filenames_5;
   (void)store_12;
   (void)store_filenames_6;
-  (void)az;
   cudaStream_t const stream_compute =
       resolve_cuda_stream(compute_stream_handle);
 
@@ -5179,28 +4984,9 @@ extern "C" void FUNC(born_backward)(
                   reinterpret_cast<uint8_t *>(store_11) + device_offset)
             : nullptr;
 
-    if (n_receivers_per_shot_h > 0 && grad_r != nullptr &&
-        receivers_i != nullptr) {
-      add_adjoint_receivers_component<<<(unsigned)launch_cfg.blocks_receivers,
-                                        launch_cfg.threads_sr, 0,
-                                        stream_compute>>>(
-          lambda_recv_field,
-          grad_r + t * n_shots_h * n_receivers_per_shot_h,
-          receivers_i);
-    }
-
-    if (n_sources_per_shot_h > 0 && grad_f != nullptr && sources_i != nullptr) {
-      record_adjoint_at_sources_component<<<(unsigned)launch_cfg.blocks_sources,
-                                            launch_cfg.threads_sr, 0,
-                                            stream_compute>>>(
-          grad_f + t * n_shots_h * n_sources_per_shot_h,
-          lambda_src_field,
-          sources_i);
-    }
-
-    backward_kernel_lambda_h<<<(unsigned)launch_cfg.blocks_cells,
-                               launch_cfg.threads_cells, 0, stream_compute>>>(
-        cb,
+    forward_kernel_h<<<(unsigned)launch_cfg.blocks_cells,
+                       launch_cfg.threads_cells, 0, stream_compute>>>(
+        cq,
         lambda_ex,
         lambda_ey,
         lambda_ez,
@@ -5223,34 +5009,59 @@ extern "C" void FUNC(born_backward)(
         kyh,
         kxh);
 
+    forward_kernel_e<<<(unsigned)launch_cfg.blocks_cells,
+                       launch_cfg.threads_cells, 0, stream_compute>>>(
+        ca,
+        cb,
+        lambda_ex,
+        lambda_ey,
+        lambda_ez,
+        lambda_hx,
+        lambda_hy,
+        lambda_hz,
+        m_lambda_hy_z,
+        m_lambda_hz_y,
+        m_lambda_hz_x,
+        m_lambda_hx_z,
+        m_lambda_hx_y,
+        m_lambda_hy_x,
+        az,
+        bz,
+        ay,
+        by,
+        ax,
+        bx,
+        kz,
+        ky,
+        kx);
+
+    if (n_receivers_per_shot_h > 0 && grad_r != nullptr &&
+        receivers_i != nullptr) {
+      add_adjoint_receivers_component<<<(unsigned)launch_cfg.blocks_receivers,
+                                        launch_cfg.threads_sr, 0,
+                                        stream_compute>>>(
+          lambda_recv_field,
+          grad_r + t * n_shots_h * n_receivers_per_shot_h,
+          receivers_i);
+    }
+
+    if (n_sources_per_shot_h > 0 && grad_f != nullptr && sources_i != nullptr) {
+      record_adjoint_at_sources_component<<<(unsigned)launch_cfg.blocks_sources,
+                                            launch_cfg.threads_sr, 0,
+                                            stream_compute>>>(
+          grad_f + t * n_shots_h * n_sources_per_shot_h,
+          lambda_src_field,
+          sources_i);
+    }
+
     if (want_load) {
       if (storage_bf16) {
-        backward_kernel_lambda_e_with_grad<__nv_bfloat16>
+        coeff_grad_3d<__nv_bfloat16>
             <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
                stream_compute>>>(
-                ca,
-                cq,
-                lambda_hx,
-                lambda_hy,
-                lambda_hz,
                 lambda_ex,
                 lambda_ey,
                 lambda_ez,
-                m_lambda_hz_y,
-                m_lambda_hy_z,
-                m_lambda_hx_z,
-                m_lambda_hz_x,
-                m_lambda_hy_x,
-                m_lambda_hx_y,
-                az,
-                bz,
-                ay,
-                by,
-                ax,
-                bx,
-                kz,
-                ky,
-                kx,
                 reinterpret_cast<__nv_bfloat16 const *>(ex_store),
                 reinterpret_cast<__nv_bfloat16 const *>(ey_store),
                 reinterpret_cast<__nv_bfloat16 const *>(ez_store),
@@ -5265,32 +5076,12 @@ extern "C" void FUNC(born_backward)(
                 grad_cb_step,
                 step_ratio_eff);
       } else {
-        backward_kernel_lambda_e_with_grad<TIDE_DTYPE>
+        coeff_grad_3d<TIDE_DTYPE>
             <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
                stream_compute>>>(
-                ca,
-                cq,
-                lambda_hx,
-                lambda_hy,
-                lambda_hz,
                 lambda_ex,
                 lambda_ey,
                 lambda_ez,
-                m_lambda_hz_y,
-                m_lambda_hy_z,
-                m_lambda_hx_z,
-                m_lambda_hz_x,
-                m_lambda_hy_x,
-                m_lambda_hx_y,
-                az,
-                bz,
-                ay,
-                by,
-                ax,
-                bx,
-                kz,
-                ky,
-                kx,
                 reinterpret_cast<TIDE_DTYPE const *>(ex_store),
                 reinterpret_cast<TIDE_DTYPE const *>(ey_store),
                 reinterpret_cast<TIDE_DTYPE const *>(ez_store),
@@ -5305,32 +5096,6 @@ extern "C" void FUNC(born_backward)(
                 grad_cb_step,
                 step_ratio_eff);
       }
-    } else {
-      backward_kernel_lambda_e<<<(unsigned)launch_cfg.blocks_cells,
-                                 launch_cfg.threads_cells, 0, stream_compute>>>(
-          ca,
-          cq,
-          lambda_hx,
-          lambda_hy,
-          lambda_hz,
-          lambda_ex,
-          lambda_ey,
-          lambda_ez,
-          m_lambda_hz_y,
-          m_lambda_hy_z,
-          m_lambda_hx_z,
-          m_lambda_hz_x,
-          m_lambda_hy_x,
-          m_lambda_hx_y,
-          az,
-          bz,
-          ay,
-          by,
-          ax,
-          bx,
-          kz,
-          ky,
-          kx);
     }
   }
 

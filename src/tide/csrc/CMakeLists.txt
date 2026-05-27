@@ -19,8 +19,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(TIDE_ENABLE_CUDA "Enable CUDA backend" ON)
 option(TIDE_ENABLE_NATIVE_ARCH "Enable native CPU tuning flags (-march=native)" OFF)
 option(TIDE_CUDA_PROFILE_BUILD "Enable CUDA line info and verbose ptxas output" OFF)
+option(TIDE_BUILD_OPTIM_BENCHMARKS "Build tide.optim C++ benchmark executables" OFF)
 set(TIDE_TM_BLOCK_X "32" CACHE STRING "TM CUDA thread block size in X")
 set(TIDE_TM_BLOCK_Y "8" CACHE STRING "TM CUDA thread block size in Y")
+get_filename_component(TIDE_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 
 # Detect and enable CUDA if present and enabled
 if(TIDE_ENABLE_CUDA)
@@ -197,6 +199,7 @@ macro(add_tide_cpu_object_library BASENAME SOURCE_REL_PATH)
         ${CMAKE_CURRENT_SOURCE_DIR}/storage
         ${CMAKE_CURRENT_SOURCE_DIR}/tm2d
         ${CMAKE_CURRENT_SOURCE_DIR}/em3d
+        ${CMAKE_CURRENT_SOURCE_DIR}/optim
     )
     list(APPEND TIDE_OBJECTS $<TARGET_OBJECTS:${TARGET_NAME}>)
     list(APPEND CPU_TARGETS ${TARGET_NAME})
@@ -266,6 +269,7 @@ if(CUDAToolkit_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/storage
             ${CMAKE_CURRENT_SOURCE_DIR}/tm2d
             ${CMAKE_CURRENT_SOURCE_DIR}/em3d
+            ${CMAKE_CURRENT_SOURCE_DIR}/optim
         )
         list(APPEND TIDE_OBJECTS $<TARGET_OBJECTS:${TARGET_NAME}>)
         
@@ -303,6 +307,14 @@ set(STORAGE_UTILS_CUDA_SRC "")
 add_tide_cpu_object_library(maxwell tm2d/maxwell.cpp)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/em3d/maxwell_3d.cpp)
     add_tide_cpu_object_library(maxwell_3d em3d/maxwell_3d.cpp)
+endif()
+add_tide_cpu_object_library(optim optim/optim.cpp)
+if(TARGET optim_cpu_obj)
+    if(MSVC)
+        target_compile_options(optim_cpu_obj PRIVATE /fp:precise)
+    else()
+        target_compile_options(optim_cpu_obj PRIVATE -fno-fast-math -fno-finite-math-only)
+    endif()
 endif()
 
 if(OPENMP_CONFIGURED)
@@ -372,12 +384,31 @@ set_target_properties(tide_C PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
 
+if(TIDE_BUILD_OPTIM_BENCHMARKS)
+    add_executable(tide_optim_cpp_benchmark
+        ${TIDE_PROJECT_ROOT}/benchmarks/optim_cpp_benchmark.cpp
+    )
+    target_include_directories(tide_optim_cpp_benchmark PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(tide_optim_cpp_benchmark PRIVATE tide_C)
+    set_target_properties(tide_optim_cpp_benchmark PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/benchmarks
+    )
+    if(NOT WIN32)
+        set_target_properties(tide_optim_cpp_benchmark PROPERTIES
+            BUILD_RPATH "$<TARGET_FILE_DIR:tide_C>"
+        )
+    endif()
+endif()
+
 # --- Print Configuration Summary ---
 message(STATUS "")
 message(STATUS "TIDE Backend Configuration:")
 message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  OpenMP: ${OPENMP_CONFIGURED}")
 message(STATUS "  AVX2: ${HAVE_AVX2}")
+message(STATUS "  Optim benchmarks: ${TIDE_BUILD_OPTIM_BENCHMARKS}")
 if(CUDAToolkit_FOUND)
     message(STATUS "  CUDA: ON")
     message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
@@ -394,6 +425,10 @@ install(TARGETS tide_C
     LIBRARY DESTINATION tide
     ARCHIVE DESTINATION tide
     RUNTIME DESTINATION tide
+)
+
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/optim/optim.h
+    DESTINATION tide/include/optim
 )
 
 # Bundle OpenMP runtime on Windows (Clang's libomp.dll)

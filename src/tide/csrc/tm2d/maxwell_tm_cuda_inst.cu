@@ -54,11 +54,6 @@ __device__ __forceinline__ TIDE_DTYPE ldg_coeff(
   return __ldg(coeff + (coeff_batched ? shot_index : grid_index));
 }
 
-template <typename T>
-__host__ __device__ __forceinline__ T tide_min(T a, T b) {
-  return a < b ? a : b;
-}
-
 static inline bool read_env_flag(char const *name) {
   char const *value = std::getenv(name);
   return value != nullptr && value[0] != '\0' && value[0] != '0';
@@ -673,84 +668,6 @@ __global__ __launch_bounds__(256) void born_background_prepare_direct_kernel(
       shot_idx);
 }
 
-__global__ __launch_bounds__(256) void born_backward_prepare_e_kernel(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cb, TIDE_DTYPE *__restrict const lambda_ey,
-    TIDE_DTYPE *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE *__restrict const m_lambda_hz_x,
-    TIDE_DTYPE const *__restrict const ey_store,
-    TIDE_DTYPE const *__restrict const curl_h_store,
-    TIDE_DTYPE *__restrict const grad_ca_shot,
-    TIDE_DTYPE *__restrict const grad_cb_shot,
-    TIDE_DTYPE *__restrict const work_x, TIDE_DTYPE *__restrict const work_z,
-    TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bx,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const ky,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kx,
-    TIDE_DTYPE const *__restrict const kxh, bool const ca_requires_grad,
-    bool const cb_requires_grad, int64_t const step_ratio_val) {
-  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
-  int64_t shot_idx =
-      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
-  ::tide::GridParams<TIDE_DTYPE> params = {
-      ay,      ayh,        ax,         axh,        by,     byh,    bx,
-      bxh,     ky,         kyh,        kx,         kxh,
-      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
-      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
-      pml_x1,  ca_batched, cb_batched, false};
-  ::tide::born_backward_prepare_e_core<TIDE_DTYPE, TIDE_DTYPE, TIDE_STENCIL>(
-      params, ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x, ey_store,
-      curl_h_store, grad_ca_shot, grad_cb_shot, work_x, work_z,
-      ca_requires_grad, cb_requires_grad, step_ratio_val, y, x, shot_idx);
-}
-
-__global__ __launch_bounds__(256) void born_backward_prepare_e_kernel_bf16(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cb, TIDE_DTYPE *__restrict const lambda_ey,
-    TIDE_DTYPE *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE *__restrict const m_lambda_hz_x,
-    __nv_bfloat16 const *__restrict const ey_store,
-    __nv_bfloat16 const *__restrict const curl_h_store,
-    TIDE_DTYPE *__restrict const grad_ca_shot,
-    TIDE_DTYPE *__restrict const grad_cb_shot,
-    TIDE_DTYPE *__restrict const work_x, TIDE_DTYPE *__restrict const work_z,
-    TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bx,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const ky,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kx,
-    TIDE_DTYPE const *__restrict const kxh, bool const ca_requires_grad,
-    bool const cb_requires_grad, int64_t const step_ratio_val) {
-  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
-  int64_t shot_idx =
-      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
-  ::tide::GridParams<TIDE_DTYPE> params = {
-      ay,      ayh,        ax,         axh,        by,     byh,    bx,
-      bxh,     ky,         kyh,        kx,         kxh,
-      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
-      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
-      pml_x1,  ca_batched, cb_batched, false};
-  ::tide::born_backward_prepare_e_core<TIDE_DTYPE, __nv_bfloat16, TIDE_STENCIL>(
-      params, ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x, ey_store,
-      curl_h_store, grad_ca_shot, grad_cb_shot, work_x, work_z,
-      ca_requires_grad, cb_requires_grad, step_ratio_val, y, x, shot_idx);
-}
-
 __global__ __launch_bounds__(256) void born_backward_apply_e_to_h_kernel(
     TIDE_DTYPE const *__restrict const work_x,
     TIDE_DTYPE const *__restrict const work_z,
@@ -780,1074 +697,6 @@ __global__ __launch_bounds__(256) void born_backward_apply_e_to_h_kernel(
       pml_x1,  false,      false,      false};
   ::tide::born_backward_apply_e_to_h_core<TIDE_DTYPE, TIDE_STENCIL>(
       params, work_x, work_z, lambda_hx, lambda_hz, y, x, shot_idx);
-}
-
-__global__ __launch_bounds__(256) void born_backward_prepare_h_kernel(
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const m_lambda_ey_x,
-    TIDE_DTYPE *__restrict const m_lambda_ey_z,
-    TIDE_DTYPE *__restrict const work_x, TIDE_DTYPE *__restrict const work_z,
-    TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bx,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const ky,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kx,
-    TIDE_DTYPE const *__restrict const kxh) {
-  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
-  int64_t shot_idx =
-      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
-  ::tide::GridParams<TIDE_DTYPE> params = {
-      ay,      ayh,        ax,         axh,        by,     byh,    bx,
-      bxh,     ky,         kyh,        kx,         kxh,
-      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
-      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
-      pml_x1,  false,      false,      cq_batched};
-  ::tide::born_backward_prepare_h_core<TIDE_DTYPE, TIDE_STENCIL>(
-      params, cq, lambda_hx, lambda_hz, m_lambda_ey_x, m_lambda_ey_z, work_x,
-      work_z, y, x, shot_idx);
-}
-
-__global__ __launch_bounds__(256) void born_backward_apply_h_to_e_kernel(
-    TIDE_DTYPE const *__restrict const work_x,
-    TIDE_DTYPE const *__restrict const work_z,
-    TIDE_DTYPE *__restrict const lambda_ey,
-    TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bx,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const ky,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kx,
-    TIDE_DTYPE const *__restrict const kxh) {
-  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
-  int64_t shot_idx =
-      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
-  ::tide::GridParams<TIDE_DTYPE> params = {
-      ay,      ayh,        ax,         axh,        by,     byh,    bx,
-      bxh,     ky,         kyh,        kx,         kxh,
-      static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
-      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
-      pml_x1,  false,      false,      false};
-  ::tide::born_backward_apply_h_to_e_core<TIDE_DTYPE, TIDE_STENCIL>(
-      params, work_x, work_z, lambda_ey, y, x, shot_idx);
-}
-
-// Exact CPML adjoint helpers: update memory terms first, then apply transposed
-// operators while reconstructing transformed fluxes directly from m_new + field.
-__device__ __forceinline__ TIDE_DTYPE cpml_tmp_from_m_new(
-    TIDE_DTYPE const m_new, TIDE_DTYPE const b_val) {
-  return b_val != (TIDE_DTYPE)0 ? (m_new / b_val) : (TIDE_DTYPE)0;
-}
-
-__device__ __forceinline__ TIDE_DTYPE transformed_lambda_h_work_x_exact(
-    TIDE_DTYPE const *__restrict const cb,
-    TIDE_DTYPE const *__restrict const lambda_ey,
-    TIDE_DTYPE const *__restrict const m_lambda_ey_x,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const bx,
-    TIDE_DTYPE const *__restrict const kx, int64_t const shot_offset,
-    int64_t const y, int64_t const x, int64_t const pml_x0h,
-    int64_t const pml_x1h) {
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_offset + j;
-  TIDE_DTYPE const cb_val = ldg_coeff(cb, cb_batched, i, j);
-  TIDE_DTYPE const g = cb_val * lambda_ey[i];
-  if (x < pml_x0h || x >= pml_x1h) {
-    TIDE_DTYPE const bx_val = __ldg(&bx[x]);
-    TIDE_DTYPE const tmp_x = cpml_tmp_from_m_new(m_lambda_ey_x[i], bx_val);
-    return g / __ldg(&kx[x]) + __ldg(&ax[x]) * tmp_x;
-  }
-  return g;
-}
-
-__device__ __forceinline__ TIDE_DTYPE transformed_lambda_h_work_z_exact(
-    TIDE_DTYPE const *__restrict const cb,
-    TIDE_DTYPE const *__restrict const lambda_ey,
-    TIDE_DTYPE const *__restrict const m_lambda_ey_z,
-    TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const ky, int64_t const shot_offset,
-    int64_t const y, int64_t const x, int64_t const pml_y0h,
-    int64_t const pml_y1h) {
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_offset + j;
-  TIDE_DTYPE const cb_val = ldg_coeff(cb, cb_batched, i, j);
-  TIDE_DTYPE const g = cb_val * lambda_ey[i];
-  if (y < pml_y0h || y >= pml_y1h) {
-    TIDE_DTYPE const by_val = __ldg(&by[y]);
-    TIDE_DTYPE const tmp_z = cpml_tmp_from_m_new(m_lambda_ey_z[i], by_val);
-    return g / __ldg(&ky[y]) + __ldg(&ay[y]) * tmp_z;
-  }
-  return g;
-}
-
-__device__ __forceinline__ TIDE_DTYPE transformed_lambda_e_work_x_exact(
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE const *__restrict const m_lambda_hz_x,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const kxh, int64_t const shot_offset,
-    int64_t const y, int64_t const x, int64_t const pml_x0h,
-    int64_t const pml_x1h) {
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_offset + j;
-  TIDE_DTYPE const cq_val = ldg_coeff(cq, cq_batched, i, j);
-  TIDE_DTYPE const g = cq_val * lambda_hz[i];
-  if (x < pml_x0h || x >= pml_x1h) {
-    TIDE_DTYPE const bx_val = __ldg(&bxh[x]);
-    TIDE_DTYPE const tmp_x = cpml_tmp_from_m_new(m_lambda_hz_x[i], bx_val);
-    return g / __ldg(&kxh[x]) + __ldg(&axh[x]) * tmp_x;
-  }
-  return g;
-}
-
-__device__ __forceinline__ TIDE_DTYPE transformed_lambda_e_work_z_exact(
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const kyh, int64_t const shot_offset,
-    int64_t const y, int64_t const x, int64_t const pml_y0h,
-    int64_t const pml_y1h) {
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_offset + j;
-  TIDE_DTYPE const cq_val = ldg_coeff(cq, cq_batched, i, j);
-  TIDE_DTYPE const g = -cq_val * lambda_hx[i];
-  if (y < pml_y0h || y >= pml_y1h) {
-    TIDE_DTYPE const by_val = __ldg(&byh[y]);
-    TIDE_DTYPE const tmp_z = cpml_tmp_from_m_new(m_lambda_hx_z[i], by_val);
-    return g / __ldg(&kyh[y]) + __ldg(&ayh[y]) * tmp_z;
-  }
-  return g;
-}
-
-template <typename T> struct ConstantOneAccessor2D {
-  TIDE_HOST_DEVICE T operator()(int64_t, int64_t) const {
-    return static_cast<T>(1);
-  }
-};
-
-template <typename T> struct CbLambdaEyAccessor2D {
-  T const *cb;
-  T const *lambda_ey;
-  bool cb_batched;
-  int64_t i;
-  int64_t j;
-  int64_t nx;
-
-  TIDE_HOST_DEVICE T operator()(int64_t dy, int64_t dx) const {
-    int64_t const shot_index = tide_nd_index(i, dy, dx, nx);
-    int64_t const grid_index = tide_nd_index_j(j, dy, dx, nx);
-    return ldg_coeff(cb, cb_batched, shot_index, grid_index) *
-           lambda_ey[shot_index];
-  }
-};
-
-template <typename T> struct CqLambdaHzAccessor2D {
-  T const *cq;
-  T const *lambda_hz;
-  bool cq_batched;
-  int64_t i;
-  int64_t j;
-  int64_t nx;
-
-  TIDE_HOST_DEVICE T operator()(int64_t dy, int64_t dx) const {
-    int64_t const shot_index = tide_nd_index(i, dy, dx, nx);
-    int64_t const grid_index = tide_nd_index_j(j, dy, dx, nx);
-    return ldg_coeff(cq, cq_batched, shot_index, grid_index) *
-           lambda_hz[shot_index];
-  }
-};
-
-template <typename T> struct CqLambdaHxAccessor2D {
-  T const *cq;
-  T const *lambda_hx;
-  bool cq_batched;
-  int64_t i;
-  int64_t j;
-  int64_t nx;
-
-  TIDE_HOST_DEVICE T operator()(int64_t dy, int64_t dx) const {
-    int64_t const shot_index = tide_nd_index(i, dy, dx, nx);
-    int64_t const grid_index = tide_nd_index_j(j, dy, dx, nx);
-    return -ldg_coeff(cq, cq_batched, shot_index, grid_index) *
-           lambda_hx[shot_index];
-  }
-};
-
-template <typename T> struct LambdaHWorkXExactAccessor2D {
-  T const *cb;
-  T const *lambda_ey;
-  T const *m_lambda_ey_x;
-  T const *ax;
-  T const *bx;
-  T const *kx;
-  int64_t shot_offset;
-  int64_t y;
-  int64_t x;
-  int64_t pml_x0h;
-  int64_t pml_x1h;
-
-  TIDE_HOST_DEVICE T operator()(int64_t dy, int64_t dx) const {
-    return transformed_lambda_h_work_x_exact(cb, lambda_ey, m_lambda_ey_x, ax,
-                                             bx, kx, shot_offset, y + dy,
-                                             x + dx, pml_x0h, pml_x1h);
-  }
-};
-
-template <typename T> struct LambdaHWorkZExactAccessor2D {
-  T const *cb;
-  T const *lambda_ey;
-  T const *m_lambda_ey_z;
-  T const *ay;
-  T const *by;
-  T const *ky;
-  int64_t shot_offset;
-  int64_t y;
-  int64_t x;
-  int64_t pml_y0h;
-  int64_t pml_y1h;
-
-  TIDE_HOST_DEVICE T operator()(int64_t dy, int64_t dx) const {
-    return transformed_lambda_h_work_z_exact(cb, lambda_ey, m_lambda_ey_z, ay,
-                                             by, ky, shot_offset, y + dy,
-                                             x + dx, pml_y0h, pml_y1h);
-  }
-};
-
-template <typename T> struct LambdaEWorkXExactAccessor2D {
-  T const *cq;
-  T const *lambda_hz;
-  T const *m_lambda_hz_x;
-  T const *axh;
-  T const *bxh;
-  T const *kxh;
-  int64_t shot_offset;
-  int64_t y;
-  int64_t x;
-  int64_t pml_x0h;
-  int64_t pml_x1h;
-
-  TIDE_HOST_DEVICE T operator()(int64_t dy, int64_t dx) const {
-    return transformed_lambda_e_work_x_exact(cq, lambda_hz, m_lambda_hz_x, axh,
-                                             bxh, kxh, shot_offset, y + dy,
-                                             x + dx, pml_x0h, pml_x1h);
-  }
-};
-
-template <typename T> struct LambdaEWorkZExactAccessor2D {
-  T const *cq;
-  T const *lambda_hx;
-  T const *m_lambda_hx_z;
-  T const *ayh;
-  T const *byh;
-  T const *kyh;
-  int64_t shot_offset;
-  int64_t y;
-  int64_t x;
-  int64_t pml_y0h;
-  int64_t pml_y1h;
-
-  TIDE_HOST_DEVICE T operator()(int64_t dy, int64_t dx) const {
-    return transformed_lambda_e_work_z_exact(cq, lambda_hx, m_lambda_hx_z, ayh,
-                                             byh, kyh, shot_offset, y + dy,
-                                             x + dx, pml_y0h, pml_y1h);
-  }
-};
-
-__global__ void backward_kernel_lambda_h_update_m_exact(
-    TIDE_DTYPE const *__restrict const cb,
-    TIDE_DTYPE const *__restrict const lambda_ey,
-    TIDE_DTYPE *__restrict const m_lambda_ey_x,
-    TIDE_DTYPE *__restrict const m_lambda_ey_z,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const bx,
-    BoundaryLaunchLayout const layout) {
-  int64_t const boundary_index =
-      (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t const shot_idx = (int64_t)blockIdx.y;
-  if (shot_idx >= n_shots) {
-    return;
-  }
-
-  int64_t x = 0;
-  int64_t y = 0;
-  if (!decode_boundary_point(layout, boundary_index, y, x)) {
-    return;
-  }
-
-  int64_t const pml_y0h = pml_y0;
-  int64_t const pml_y1h = tide_max(pml_y0, pml_y1 - 1);
-  int64_t const pml_x0h = pml_x0;
-  int64_t const pml_x1h = tide_max(pml_x0, pml_x1 - 1);
-  bool const pml_y = y < pml_y0h || y >= pml_y1h;
-  bool const pml_x = x < pml_x0h || x >= pml_x1h;
-
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_idx * shot_numel + j;
-  TIDE_DTYPE const cb_val = ldg_coeff(cb, cb_batched, i, j);
-  TIDE_DTYPE const g = cb_val * lambda_ey[i];
-  if (pml_x) {
-    TIDE_DTYPE const tmp_x = m_lambda_ey_x[i] + g;
-    m_lambda_ey_x[i] = __ldg(&bx[x]) * tmp_x;
-  }
-  if (pml_y) {
-    TIDE_DTYPE const tmp_z = m_lambda_ey_z[i] + g;
-    m_lambda_ey_z[i] = __ldg(&by[y]) * tmp_z;
-  }
-}
-
-__global__ void backward_kernel_lambda_h_apply_exact_interior(
-    TIDE_DTYPE const *__restrict const cb,
-    TIDE_DTYPE const *__restrict const lambda_ey,
-    TIDE_DTYPE *__restrict const lambda_hx, TIDE_DTYPE *__restrict const lambda_hz,
-    int64_t const y_begin, int64_t const y_end, int64_t const x_begin,
-    int64_t const x_end) {
-  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
-              (int64_t)threadIdx.x + x_begin;
-  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
-              (int64_t)threadIdx.y + y_begin;
-  int64_t shot_idx =
-      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
-  if (shot_idx >= n_shots || y >= y_end || x >= x_end)
-    return;
-  if (y >= ny - kFdPad + 1 || x >= nx - kFdPad + 1)
-    return;
-
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_idx * shot_numel + j;
-  ConstantOneAccessor2D<TIDE_DTYPE> constant_one{};
-  CbLambdaEyAccessor2D<TIDE_DTYPE> g_cb_l{cb, lambda_ey, cb_batched, i, j, nx};
-  if (y < ny - kFdPad) {
-    lambda_hx[i] -= DIFFY1_ADJ(constant_one, g_cb_l);
-  }
-  if (x < nx - kFdPad) {
-    lambda_hz[i] += DIFFX1_ADJ(constant_one, g_cb_l);
-  }
-}
-
-__global__ void backward_kernel_lambda_h_apply_exact_boundary(
-    TIDE_DTYPE const *__restrict const cb,
-    TIDE_DTYPE const *__restrict const lambda_ey,
-    TIDE_DTYPE const *__restrict const m_lambda_ey_x,
-    TIDE_DTYPE const *__restrict const m_lambda_ey_z,
-    TIDE_DTYPE *__restrict const lambda_hx, TIDE_DTYPE *__restrict const lambda_hz,
-    TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const bx,
-    TIDE_DTYPE const *__restrict const ky,
-    TIDE_DTYPE const *__restrict const kx,
-    BoundaryLaunchLayout const layout) {
-  int64_t const boundary_index =
-      (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t const shot_idx = (int64_t)blockIdx.y;
-  if (shot_idx >= n_shots) {
-    return;
-  }
-
-  int64_t x = 0;
-  int64_t y = 0;
-  if (!decode_boundary_point(layout, boundary_index, y, x)) {
-    return;
-  }
-
-  int64_t const pml_y0h = pml_y0;
-  int64_t const pml_y1h = tide_max(pml_y0, pml_y1 - 1);
-  int64_t const pml_x0h = pml_x0;
-  int64_t const pml_x1h = tide_max(pml_x0, pml_x1 - 1);
-  int64_t const shot_offset = shot_idx * shot_numel;
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_offset + j;
-  ConstantOneAccessor2D<TIDE_DTYPE> constant_one{};
-  LambdaHWorkXExactAccessor2D<TIDE_DTYPE> work_x_l{
-      cb, lambda_ey, m_lambda_ey_x, ax, bx, kx, shot_offset,
-      y,  x,         pml_x0h,       pml_x1h};
-  LambdaHWorkZExactAccessor2D<TIDE_DTYPE> work_z_l{
-      cb, lambda_ey, m_lambda_ey_z, ay, by, ky, shot_offset,
-      y,  x,         pml_y0h,       pml_y1h};
-  if (y < ny - kFdPad) {
-    lambda_hx[i] -= DIFFY1_ADJ(constant_one, work_z_l);
-  }
-  if (x < nx - kFdPad) {
-    lambda_hz[i] += DIFFX1_ADJ(constant_one, work_x_l);
-  }
-}
-
-__global__ void backward_kernel_lambda_e_update_m_exact(
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE *__restrict const m_lambda_hz_x,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bxh,
-    BoundaryLaunchLayout const layout) {
-  int64_t const boundary_index =
-      (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t const shot_idx = (int64_t)blockIdx.y;
-  if (shot_idx >= n_shots) {
-    return;
-  }
-
-  int64_t x = 0;
-  int64_t y = 0;
-  if (!decode_boundary_point(layout, boundary_index, y, x)) {
-    return;
-  }
-
-  bool const pml_y = y < pml_y0 || y >= pml_y1;
-  bool const pml_x = x < pml_x0 || x >= pml_x1;
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_idx * shot_numel + j;
-  TIDE_DTYPE const cq_val = ldg_coeff(cq, cq_batched, i, j);
-  if (pml_x) {
-    TIDE_DTYPE const g_x = cq_val * lambda_hz[i];
-    TIDE_DTYPE const tmp_x = m_lambda_hz_x[i] + g_x;
-    m_lambda_hz_x[i] = __ldg(&bxh[x]) * tmp_x;
-  }
-  if (pml_y) {
-    TIDE_DTYPE const g_z = -cq_val * lambda_hx[i];
-    TIDE_DTYPE const tmp_z = m_lambda_hx_z[i] + g_z;
-    m_lambda_hx_z[i] = __ldg(&byh[y]) * tmp_z;
-  }
-}
-
-__global__ void backward_kernel_lambda_e_apply_exact_interior(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const lambda_ey,
-    TIDE_DTYPE const *__restrict const ey_store,
-    TIDE_DTYPE const *__restrict const curl_h_store,
-    TIDE_DTYPE *__restrict const grad_ca_shot,
-    TIDE_DTYPE *__restrict const grad_cb_shot, bool const ca_requires_grad,
-    bool const cb_requires_grad, int64_t const step_ratio_val,
-    int64_t const y_begin, int64_t const y_end, int64_t const x_begin,
-    int64_t const x_end) {
-  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
-              (int64_t)threadIdx.x + x_begin;
-  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
-              (int64_t)threadIdx.y + y_begin;
-  int64_t shot_idx =
-      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
-  if (shot_idx >= n_shots || y >= y_end || x >= x_end)
-    return;
-  if (y >= ny - kFdPad + 1 || x >= nx - kFdPad + 1)
-    return;
-
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_idx * shot_numel + j;
-  TIDE_DTYPE const ca_val = ldg_coeff(ca, ca_batched, i, j);
-  ConstantOneAccessor2D<TIDE_DTYPE> constant_one{};
-  CqLambdaHzAccessor2D<TIDE_DTYPE> g_x_l{cq, lambda_hz, cq_batched, i, j, nx};
-  CqLambdaHxAccessor2D<TIDE_DTYPE> g_z_l{cq, lambda_hx, cq_batched, i, j, nx};
-  TIDE_DTYPE const curl_lambda_h =
-      DIFFXH1_ADJ(constant_one, g_x_l) + DIFFYH1_ADJ(constant_one, g_z_l);
-  TIDE_DTYPE const lambda_ey_curr = lambda_ey[i];
-  lambda_ey[i] = ca_val * lambda_ey_curr + curl_lambda_h;
-  if (ca_requires_grad && ey_store != nullptr) {
-    grad_ca_shot[i] +=
-        lambda_ey_curr * ey_store[i] * step_ratio_to_field(step_ratio_val);
-  }
-  if (cb_requires_grad && curl_h_store != nullptr) {
-    grad_cb_shot[i] +=
-        lambda_ey_curr * curl_h_store[i] * step_ratio_to_field(step_ratio_val);
-  }
-}
-
-__global__ void backward_kernel_lambda_e_apply_exact_interior_nograd(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const lambda_ey, int64_t const y_begin,
-    int64_t const y_end, int64_t const x_begin, int64_t const x_end) {
-  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
-              (int64_t)threadIdx.x + x_begin;
-  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
-              (int64_t)threadIdx.y + y_begin;
-  int64_t shot_idx =
-      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
-  if (shot_idx >= n_shots || y >= y_end || x >= x_end)
-    return;
-  if (y >= ny - kFdPad + 1 || x >= nx - kFdPad + 1)
-    return;
-
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_idx * shot_numel + j;
-  TIDE_DTYPE const ca_val = ldg_coeff(ca, ca_batched, i, j);
-  ConstantOneAccessor2D<TIDE_DTYPE> constant_one{};
-  CqLambdaHzAccessor2D<TIDE_DTYPE> g_x_l{cq, lambda_hz, cq_batched, i, j, nx};
-  CqLambdaHxAccessor2D<TIDE_DTYPE> g_z_l{cq, lambda_hx, cq_batched, i, j, nx};
-  TIDE_DTYPE const curl_lambda_h =
-      DIFFXH1_ADJ(constant_one, g_x_l) + DIFFYH1_ADJ(constant_one, g_z_l);
-  TIDE_DTYPE const lambda_ey_curr = lambda_ey[i];
-  lambda_ey[i] = ca_val * lambda_ey_curr + curl_lambda_h;
-}
-
-__global__ void backward_kernel_lambda_e_apply_exact_boundary(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE const *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE const *__restrict const m_lambda_hz_x,
-    TIDE_DTYPE *__restrict const lambda_ey,
-    TIDE_DTYPE const *__restrict const ey_store,
-    TIDE_DTYPE const *__restrict const curl_h_store,
-    TIDE_DTYPE *__restrict const grad_ca_shot,
-    TIDE_DTYPE *__restrict const grad_cb_shot, bool const ca_requires_grad,
-    bool const cb_requires_grad, int64_t const step_ratio_val,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kxh,
-    BoundaryLaunchLayout const layout) {
-  int64_t const boundary_index =
-      (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t const shot_idx = (int64_t)blockIdx.y;
-  if (shot_idx >= n_shots) {
-    return;
-  }
-
-  int64_t x = 0;
-  int64_t y = 0;
-  if (!decode_boundary_point(layout, boundary_index, y, x)) {
-    return;
-  }
-
-  int64_t const shot_offset = shot_idx * shot_numel;
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_offset + j;
-  TIDE_DTYPE const ca_val = ldg_coeff(ca, ca_batched, i, j);
-  ConstantOneAccessor2D<TIDE_DTYPE> constant_one{};
-  LambdaEWorkXExactAccessor2D<TIDE_DTYPE> work_x_l{
-      cq, lambda_hz, m_lambda_hz_x, axh, bxh, kxh, shot_offset,
-      y,  x,         pml_x0,        pml_x1};
-  LambdaEWorkZExactAccessor2D<TIDE_DTYPE> work_z_l{
-      cq, lambda_hx, m_lambda_hx_z, ayh, byh, kyh, shot_offset,
-      y,  x,         pml_y0,        pml_y1};
-  TIDE_DTYPE const curl_lambda_h =
-      DIFFXH1_ADJ(constant_one, work_x_l) +
-      DIFFYH1_ADJ(constant_one, work_z_l);
-  TIDE_DTYPE const lambda_ey_curr = lambda_ey[i];
-  lambda_ey[i] = ca_val * lambda_ey_curr + curl_lambda_h;
-  if (ca_requires_grad && ey_store != nullptr) {
-    grad_ca_shot[i] +=
-        lambda_ey_curr * ey_store[i] * step_ratio_to_field(step_ratio_val);
-  }
-  if (cb_requires_grad && curl_h_store != nullptr) {
-    grad_cb_shot[i] +=
-        lambda_ey_curr * curl_h_store[i] * step_ratio_to_field(step_ratio_val);
-  }
-}
-
-__global__ void backward_kernel_lambda_e_apply_exact_boundary_nograd(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE const *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE const *__restrict const m_lambda_hz_x,
-    TIDE_DTYPE *__restrict const lambda_ey,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kxh,
-    BoundaryLaunchLayout const layout) {
-  int64_t const boundary_index =
-      (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t const shot_idx = (int64_t)blockIdx.y;
-  if (shot_idx >= n_shots) {
-    return;
-  }
-
-  int64_t x = 0;
-  int64_t y = 0;
-  if (!decode_boundary_point(layout, boundary_index, y, x)) {
-    return;
-  }
-
-  int64_t const shot_offset = shot_idx * shot_numel;
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_offset + j;
-  TIDE_DTYPE const ca_val = ldg_coeff(ca, ca_batched, i, j);
-  ConstantOneAccessor2D<TIDE_DTYPE> constant_one{};
-  LambdaEWorkXExactAccessor2D<TIDE_DTYPE> work_x_l{
-      cq, lambda_hz, m_lambda_hz_x, axh, bxh, kxh, shot_offset,
-      y,  x,         pml_x0,        pml_x1};
-  LambdaEWorkZExactAccessor2D<TIDE_DTYPE> work_z_l{
-      cq, lambda_hx, m_lambda_hx_z, ayh, byh, kyh, shot_offset,
-      y,  x,         pml_y0,        pml_y1};
-  TIDE_DTYPE const curl_lambda_h =
-      DIFFXH1_ADJ(constant_one, work_x_l) +
-      DIFFYH1_ADJ(constant_one, work_z_l);
-  TIDE_DTYPE const lambda_ey_curr = lambda_ey[i];
-  lambda_ey[i] = ca_val * lambda_ey_curr + curl_lambda_h;
-}
-
-__global__ void backward_kernel_lambda_e_apply_exact_bf16_interior(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const lambda_ey,
-    __nv_bfloat16 const *__restrict const ey_store,
-    __nv_bfloat16 const *__restrict const curl_h_store,
-    TIDE_DTYPE *__restrict const grad_ca_shot,
-    TIDE_DTYPE *__restrict const grad_cb_shot, bool const ca_requires_grad,
-    bool const cb_requires_grad, int64_t const step_ratio_val,
-    int64_t const y_begin, int64_t const y_end, int64_t const x_begin,
-    int64_t const x_end) {
-  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
-              (int64_t)threadIdx.x + x_begin;
-  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
-              (int64_t)threadIdx.y + y_begin;
-  int64_t shot_idx =
-      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
-  if (shot_idx >= n_shots || y >= y_end || x >= x_end)
-    return;
-  if (y >= ny - kFdPad + 1 || x >= nx - kFdPad + 1)
-    return;
-
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_idx * shot_numel + j;
-  TIDE_DTYPE const ca_val = ldg_coeff(ca, ca_batched, i, j);
-  ConstantOneAccessor2D<TIDE_DTYPE> constant_one{};
-  CqLambdaHzAccessor2D<TIDE_DTYPE> g_x_l{cq, lambda_hz, cq_batched, i, j, nx};
-  CqLambdaHxAccessor2D<TIDE_DTYPE> g_z_l{cq, lambda_hx, cq_batched, i, j, nx};
-  TIDE_DTYPE const curl_lambda_h =
-      DIFFXH1_ADJ(constant_one, g_x_l) + DIFFYH1_ADJ(constant_one, g_z_l);
-  TIDE_DTYPE const lambda_ey_curr = lambda_ey[i];
-  lambda_ey[i] = ca_val * lambda_ey_curr + curl_lambda_h;
-  if (ca_requires_grad && ey_store != nullptr) {
-    TIDE_DTYPE const ey_n = (TIDE_DTYPE)__bfloat162float(ey_store[i]);
-    grad_ca_shot[i] +=
-        lambda_ey_curr * ey_n * step_ratio_to_field(step_ratio_val);
-  }
-  if (cb_requires_grad && curl_h_store != nullptr) {
-    TIDE_DTYPE const curl_h_n = (TIDE_DTYPE)__bfloat162float(curl_h_store[i]);
-    grad_cb_shot[i] +=
-        lambda_ey_curr * curl_h_n * step_ratio_to_field(step_ratio_val);
-  }
-}
-
-__global__ void backward_kernel_lambda_e_apply_exact_bf16_boundary(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE const *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE const *__restrict const m_lambda_hz_x,
-    TIDE_DTYPE *__restrict const lambda_ey,
-    __nv_bfloat16 const *__restrict const ey_store,
-    __nv_bfloat16 const *__restrict const curl_h_store,
-    TIDE_DTYPE *__restrict const grad_ca_shot,
-    TIDE_DTYPE *__restrict const grad_cb_shot, bool const ca_requires_grad,
-    bool const cb_requires_grad, int64_t const step_ratio_val,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kxh,
-    BoundaryLaunchLayout const layout) {
-  int64_t const boundary_index =
-      (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t const shot_idx = (int64_t)blockIdx.y;
-  if (shot_idx >= n_shots) {
-    return;
-  }
-
-  int64_t x = 0;
-  int64_t y = 0;
-  if (!decode_boundary_point(layout, boundary_index, y, x)) {
-    return;
-  }
-
-  int64_t const shot_offset = shot_idx * shot_numel;
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_offset + j;
-  TIDE_DTYPE const ca_val = ldg_coeff(ca, ca_batched, i, j);
-  ConstantOneAccessor2D<TIDE_DTYPE> constant_one{};
-  LambdaEWorkXExactAccessor2D<TIDE_DTYPE> work_x_l{
-      cq, lambda_hz, m_lambda_hz_x, axh, bxh, kxh, shot_offset,
-      y,  x,         pml_x0,        pml_x1};
-  LambdaEWorkZExactAccessor2D<TIDE_DTYPE> work_z_l{
-      cq, lambda_hx, m_lambda_hx_z, ayh, byh, kyh, shot_offset,
-      y,  x,         pml_y0,        pml_y1};
-  TIDE_DTYPE const curl_lambda_h =
-      DIFFXH1_ADJ(constant_one, work_x_l) +
-      DIFFYH1_ADJ(constant_one, work_z_l);
-  TIDE_DTYPE const lambda_ey_curr = lambda_ey[i];
-  lambda_ey[i] = ca_val * lambda_ey_curr + curl_lambda_h;
-  if (ca_requires_grad && ey_store != nullptr) {
-    TIDE_DTYPE const ey_n = (TIDE_DTYPE)__bfloat162float(ey_store[i]);
-    grad_ca_shot[i] +=
-        lambda_ey_curr * ey_n * step_ratio_to_field(step_ratio_val);
-  }
-  if (cb_requires_grad && curl_h_store != nullptr) {
-    TIDE_DTYPE const curl_h_n = (TIDE_DTYPE)__bfloat162float(curl_h_store[i]);
-    grad_cb_shot[i] +=
-        lambda_ey_curr * curl_h_n * step_ratio_to_field(step_ratio_val);
-  }
-}
-
-__global__ void backward_kernel_lambda_h_update_m_pair_exact(
-    TIDE_DTYPE const *__restrict const cb,
-    TIDE_DTYPE const *__restrict const eta_ey,
-    TIDE_DTYPE const *__restrict const lambda_ey,
-    TIDE_DTYPE *__restrict const m_eta_ey_x,
-    TIDE_DTYPE *__restrict const m_eta_ey_z,
-    TIDE_DTYPE *__restrict const m_lambda_ey_x,
-    TIDE_DTYPE *__restrict const m_lambda_ey_z,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const bx,
-    BoundaryLaunchLayout const layout) {
-  int64_t const boundary_index =
-      (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t const shot_idx = (int64_t)blockIdx.y;
-  if (shot_idx >= n_shots) {
-    return;
-  }
-
-  int64_t x = 0;
-  int64_t y = 0;
-  if (!decode_boundary_point(layout, boundary_index, y, x)) {
-    return;
-  }
-
-  int64_t const pml_y0h = pml_y0;
-  int64_t const pml_y1h = tide_max(pml_y0, pml_y1 - 1);
-  int64_t const pml_x0h = pml_x0;
-  int64_t const pml_x1h = tide_max(pml_x0, pml_x1 - 1);
-  bool const pml_y = y < pml_y0h || y >= pml_y1h;
-  bool const pml_x = x < pml_x0h || x >= pml_x1h;
-
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_idx * shot_numel + j;
-  TIDE_DTYPE const cb_val = ldg_coeff(cb, cb_batched, i, j);
-  if (pml_x) {
-    TIDE_DTYPE const eta_g = cb_val * eta_ey[i];
-    TIDE_DTYPE const lambda_g = cb_val * lambda_ey[i];
-    TIDE_DTYPE const eta_tmp_x = m_eta_ey_x[i] + eta_g;
-    TIDE_DTYPE const lambda_tmp_x = m_lambda_ey_x[i] + lambda_g;
-    TIDE_DTYPE const bx_val = __ldg(&bx[x]);
-    m_eta_ey_x[i] = bx_val * eta_tmp_x;
-    m_lambda_ey_x[i] = bx_val * lambda_tmp_x;
-  }
-  if (pml_y) {
-    TIDE_DTYPE const eta_g = cb_val * eta_ey[i];
-    TIDE_DTYPE const lambda_g = cb_val * lambda_ey[i];
-    TIDE_DTYPE const eta_tmp_z = m_eta_ey_z[i] + eta_g;
-    TIDE_DTYPE const lambda_tmp_z = m_lambda_ey_z[i] + lambda_g;
-    TIDE_DTYPE const by_val = __ldg(&by[y]);
-    m_eta_ey_z[i] = by_val * eta_tmp_z;
-    m_lambda_ey_z[i] = by_val * lambda_tmp_z;
-  }
-}
-
-__global__ void backward_kernel_lambda_h_apply_pair_exact_interior(
-    TIDE_DTYPE const *__restrict const cb,
-    TIDE_DTYPE const *__restrict const eta_ey,
-    TIDE_DTYPE const *__restrict const lambda_ey,
-    TIDE_DTYPE *__restrict const eta_hx, TIDE_DTYPE *__restrict const eta_hz,
-    TIDE_DTYPE *__restrict const lambda_hx,
-    TIDE_DTYPE *__restrict const lambda_hz, int64_t const y_begin,
-    int64_t const y_end, int64_t const x_begin, int64_t const x_end) {
-  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
-              (int64_t)threadIdx.x + x_begin;
-  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
-              (int64_t)threadIdx.y + y_begin;
-  int64_t shot_idx =
-      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
-  if (shot_idx >= n_shots || y >= y_end || x >= x_end) {
-    return;
-  }
-  if (y >= ny - kFdPad + 1 || x >= nx - kFdPad + 1) {
-    return;
-  }
-
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_idx * shot_numel + j;
-  ConstantOneAccessor2D<TIDE_DTYPE> constant_one{};
-  CbLambdaEyAccessor2D<TIDE_DTYPE> eta_g{cb, eta_ey, cb_batched, i, j, nx};
-  CbLambdaEyAccessor2D<TIDE_DTYPE> lambda_g{
-      cb, lambda_ey, cb_batched, i, j, nx};
-  if (y < ny - kFdPad) {
-    eta_hx[i] -= DIFFY1_ADJ(constant_one, eta_g);
-    lambda_hx[i] -= DIFFY1_ADJ(constant_one, lambda_g);
-  }
-  if (x < nx - kFdPad) {
-    eta_hz[i] += DIFFX1_ADJ(constant_one, eta_g);
-    lambda_hz[i] += DIFFX1_ADJ(constant_one, lambda_g);
-  }
-}
-
-__global__ void backward_kernel_lambda_h_apply_pair_exact_boundary(
-    TIDE_DTYPE const *__restrict const cb,
-    TIDE_DTYPE const *__restrict const eta_ey,
-    TIDE_DTYPE const *__restrict const lambda_ey,
-    TIDE_DTYPE const *__restrict const m_eta_ey_x,
-    TIDE_DTYPE const *__restrict const m_eta_ey_z,
-    TIDE_DTYPE const *__restrict const m_lambda_ey_x,
-    TIDE_DTYPE const *__restrict const m_lambda_ey_z,
-    TIDE_DTYPE *__restrict const eta_hx, TIDE_DTYPE *__restrict const eta_hz,
-    TIDE_DTYPE *__restrict const lambda_hx,
-    TIDE_DTYPE *__restrict const lambda_hz,
-    TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const bx,
-    TIDE_DTYPE const *__restrict const ky,
-    TIDE_DTYPE const *__restrict const kx,
-    BoundaryLaunchLayout const layout) {
-  int64_t const boundary_index =
-      (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t const shot_idx = (int64_t)blockIdx.y;
-  if (shot_idx >= n_shots) {
-    return;
-  }
-
-  int64_t x = 0;
-  int64_t y = 0;
-  if (!decode_boundary_point(layout, boundary_index, y, x)) {
-    return;
-  }
-
-  int64_t const pml_y0h = pml_y0;
-  int64_t const pml_y1h = tide_max(pml_y0, pml_y1 - 1);
-  int64_t const pml_x0h = pml_x0;
-  int64_t const pml_x1h = tide_max(pml_x0, pml_x1 - 1);
-  int64_t const shot_offset = shot_idx * shot_numel;
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_offset + j;
-  ConstantOneAccessor2D<TIDE_DTYPE> constant_one{};
-  LambdaHWorkXExactAccessor2D<TIDE_DTYPE> eta_work_x{
-      cb, eta_ey, m_eta_ey_x, ax, bx, kx, shot_offset, y, x, pml_x0h, pml_x1h};
-  LambdaHWorkZExactAccessor2D<TIDE_DTYPE> eta_work_z{
-      cb, eta_ey, m_eta_ey_z, ay, by, ky, shot_offset, y, x, pml_y0h, pml_y1h};
-  LambdaHWorkXExactAccessor2D<TIDE_DTYPE> lambda_work_x{
-      cb, lambda_ey, m_lambda_ey_x, ax, bx, kx, shot_offset,
-      y,  x,         pml_x0h,       pml_x1h};
-  LambdaHWorkZExactAccessor2D<TIDE_DTYPE> lambda_work_z{
-      cb, lambda_ey, m_lambda_ey_z, ay, by, ky, shot_offset,
-      y,  x,         pml_y0h,       pml_y1h};
-  if (y < ny - kFdPad) {
-    eta_hx[i] -= DIFFY1_ADJ(constant_one, eta_work_z);
-    lambda_hx[i] -= DIFFY1_ADJ(constant_one, lambda_work_z);
-  }
-  if (x < nx - kFdPad) {
-    eta_hz[i] += DIFFX1_ADJ(constant_one, eta_work_x);
-    lambda_hz[i] += DIFFX1_ADJ(constant_one, lambda_work_x);
-  }
-}
-
-__global__ void backward_kernel_lambda_e_update_m_pair_exact(
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const eta_hx,
-    TIDE_DTYPE const *__restrict const eta_hz,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const m_eta_hx_z,
-    TIDE_DTYPE *__restrict const m_eta_hz_x,
-    TIDE_DTYPE *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE *__restrict const m_lambda_hz_x,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bxh,
-    BoundaryLaunchLayout const layout) {
-  int64_t const boundary_index =
-      (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t const shot_idx = (int64_t)blockIdx.y;
-  if (shot_idx >= n_shots) {
-    return;
-  }
-
-  int64_t x = 0;
-  int64_t y = 0;
-  if (!decode_boundary_point(layout, boundary_index, y, x)) {
-    return;
-  }
-
-  bool const pml_y = y < pml_y0 || y >= pml_y1;
-  bool const pml_x = x < pml_x0 || x >= pml_x1;
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_idx * shot_numel + j;
-  TIDE_DTYPE const cq_val = ldg_coeff(cq, cq_batched, i, j);
-  if (pml_x) {
-    TIDE_DTYPE const eta_g_x = cq_val * eta_hz[i];
-    TIDE_DTYPE const lambda_g_x = cq_val * lambda_hz[i];
-    TIDE_DTYPE const eta_tmp_x = m_eta_hz_x[i] + eta_g_x;
-    TIDE_DTYPE const lambda_tmp_x = m_lambda_hz_x[i] + lambda_g_x;
-    TIDE_DTYPE const bxh_val = __ldg(&bxh[x]);
-    m_eta_hz_x[i] = bxh_val * eta_tmp_x;
-    m_lambda_hz_x[i] = bxh_val * lambda_tmp_x;
-  }
-  if (pml_y) {
-    TIDE_DTYPE const eta_g_z = -cq_val * eta_hx[i];
-    TIDE_DTYPE const lambda_g_z = -cq_val * lambda_hx[i];
-    TIDE_DTYPE const eta_tmp_z = m_eta_hx_z[i] + eta_g_z;
-    TIDE_DTYPE const lambda_tmp_z = m_lambda_hx_z[i] + lambda_g_z;
-    TIDE_DTYPE const byh_val = __ldg(&byh[y]);
-    m_eta_hx_z[i] = byh_val * eta_tmp_z;
-    m_lambda_hx_z[i] = byh_val * lambda_tmp_z;
-  }
-}
-
-template <typename StoreT>
-__global__ void backward_kernel_lambda_e_apply_pair_exact_interior(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const eta_hx,
-    TIDE_DTYPE const *__restrict const eta_hz,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const eta_ey, TIDE_DTYPE *__restrict const lambda_ey,
-    StoreT const *__restrict const ey_store,
-    StoreT const *__restrict const curl_h_store,
-    TIDE_DTYPE *__restrict const grad_ca_shot,
-    TIDE_DTYPE *__restrict const grad_cb_shot,
-    TIDE_DTYPE *__restrict const grad_dca_shot,
-    TIDE_DTYPE *__restrict const grad_dcb_shot, int64_t const step_ratio_val,
-    int64_t const y_begin, int64_t const y_end, int64_t const x_begin,
-    int64_t const x_end) {
-  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x +
-              (int64_t)threadIdx.x + x_begin;
-  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y +
-              (int64_t)threadIdx.y + y_begin;
-  int64_t shot_idx =
-      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
-  if (shot_idx >= n_shots || y >= y_end || x >= x_end) {
-    return;
-  }
-  if (y >= ny - kFdPad + 1 || x >= nx - kFdPad + 1) {
-    return;
-  }
-
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_idx * shot_numel + j;
-  TIDE_DTYPE const ca_val = ldg_coeff(ca, ca_batched, i, j);
-  ConstantOneAccessor2D<TIDE_DTYPE> constant_one{};
-  CqLambdaHzAccessor2D<TIDE_DTYPE> eta_x{cq, eta_hz, cq_batched, i, j, nx};
-  CqLambdaHxAccessor2D<TIDE_DTYPE> eta_z{cq, eta_hx, cq_batched, i, j, nx};
-  CqLambdaHzAccessor2D<TIDE_DTYPE> lambda_x{
-      cq, lambda_hz, cq_batched, i, j, nx};
-  CqLambdaHxAccessor2D<TIDE_DTYPE> lambda_z{
-      cq, lambda_hx, cq_batched, i, j, nx};
-  TIDE_DTYPE const curl_eta_h =
-      DIFFXH1_ADJ(constant_one, eta_x) + DIFFYH1_ADJ(constant_one, eta_z);
-  TIDE_DTYPE const curl_lambda_h =
-      DIFFXH1_ADJ(constant_one, lambda_x) + DIFFYH1_ADJ(constant_one, lambda_z);
-  TIDE_DTYPE const eta_ey_curr = eta_ey[i];
-  TIDE_DTYPE const lambda_ey_curr = lambda_ey[i];
-  eta_ey[i] = ca_val * eta_ey_curr + curl_eta_h;
-  lambda_ey[i] = ca_val * lambda_ey_curr + curl_lambda_h;
-  TIDE_DTYPE const step_scale = step_ratio_to_field(step_ratio_val);
-  TIDE_DTYPE const ey_n =
-      tide::decode_snapshot<StoreT, TIDE_DTYPE>(ey_store[i]);
-  TIDE_DTYPE const curl_h_n =
-      tide::decode_snapshot<StoreT, TIDE_DTYPE>(curl_h_store[i]);
-  grad_ca_shot[i] += eta_ey_curr * ey_n * step_scale;
-  grad_cb_shot[i] += eta_ey_curr * curl_h_n * step_scale;
-  grad_dca_shot[i] += lambda_ey_curr * ey_n * step_scale;
-  grad_dcb_shot[i] += lambda_ey_curr * curl_h_n * step_scale;
-}
-
-template <typename StoreT>
-__global__ void backward_kernel_lambda_e_apply_pair_exact_boundary(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const eta_hx,
-    TIDE_DTYPE const *__restrict const eta_hz,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE const *__restrict const m_eta_hx_z,
-    TIDE_DTYPE const *__restrict const m_eta_hz_x,
-    TIDE_DTYPE const *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE const *__restrict const m_lambda_hz_x,
-    TIDE_DTYPE *__restrict const eta_ey, TIDE_DTYPE *__restrict const lambda_ey,
-    StoreT const *__restrict const ey_store,
-    StoreT const *__restrict const curl_h_store,
-    TIDE_DTYPE *__restrict const grad_ca_shot,
-    TIDE_DTYPE *__restrict const grad_cb_shot,
-    TIDE_DTYPE *__restrict const grad_dca_shot,
-    TIDE_DTYPE *__restrict const grad_dcb_shot, int64_t const step_ratio_val,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kxh,
-    BoundaryLaunchLayout const layout) {
-  int64_t const boundary_index =
-      (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t const shot_idx = (int64_t)blockIdx.y;
-  if (shot_idx >= n_shots) {
-    return;
-  }
-
-  int64_t x = 0;
-  int64_t y = 0;
-  if (!decode_boundary_point(layout, boundary_index, y, x)) {
-    return;
-  }
-
-  int64_t const shot_offset = shot_idx * shot_numel;
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_offset + j;
-  TIDE_DTYPE const ca_val = ldg_coeff(ca, ca_batched, i, j);
-  ConstantOneAccessor2D<TIDE_DTYPE> constant_one{};
-  LambdaEWorkXExactAccessor2D<TIDE_DTYPE> eta_work_x{
-      cq, eta_hz, m_eta_hz_x, axh, bxh, kxh, shot_offset, y, x, pml_x0, pml_x1};
-  LambdaEWorkZExactAccessor2D<TIDE_DTYPE> eta_work_z{
-      cq, eta_hx, m_eta_hx_z, ayh, byh, kyh, shot_offset, y, x, pml_y0, pml_y1};
-  LambdaEWorkXExactAccessor2D<TIDE_DTYPE> lambda_work_x{
-      cq, lambda_hz, m_lambda_hz_x, axh, bxh, kxh, shot_offset,
-      y,  x,          pml_x0,        pml_x1};
-  LambdaEWorkZExactAccessor2D<TIDE_DTYPE> lambda_work_z{
-      cq, lambda_hx, m_lambda_hx_z, ayh, byh, kyh, shot_offset,
-      y,  x,          pml_y0,        pml_y1};
-  TIDE_DTYPE const curl_eta_h =
-      DIFFXH1_ADJ(constant_one, eta_work_x) +
-      DIFFYH1_ADJ(constant_one, eta_work_z);
-  TIDE_DTYPE const curl_lambda_h =
-      DIFFXH1_ADJ(constant_one, lambda_work_x) +
-      DIFFYH1_ADJ(constant_one, lambda_work_z);
-  TIDE_DTYPE const eta_ey_curr = eta_ey[i];
-  TIDE_DTYPE const lambda_ey_curr = lambda_ey[i];
-  eta_ey[i] = ca_val * eta_ey_curr + curl_eta_h;
-  lambda_ey[i] = ca_val * lambda_ey_curr + curl_lambda_h;
-  TIDE_DTYPE const step_scale = step_ratio_to_field(step_ratio_val);
-  TIDE_DTYPE const ey_n =
-      tide::decode_snapshot<StoreT, TIDE_DTYPE>(ey_store[i]);
-  TIDE_DTYPE const curl_h_n =
-      tide::decode_snapshot<StoreT, TIDE_DTYPE>(curl_h_store[i]);
-  grad_ca_shot[i] += eta_ey_curr * ey_n * step_scale;
-  grad_cb_shot[i] += eta_ey_curr * curl_h_n * step_scale;
-  grad_dca_shot[i] += lambda_ey_curr * ey_n * step_scale;
-  grad_dcb_shot[i] += lambda_ey_curr * curl_h_n * step_scale;
 }
 
 // Combine per-shot gradients into final gradient (sum across shots)
@@ -1880,6 +729,67 @@ __global__ void add_inplace(TIDE_DTYPE *__restrict const dest,
   if (shot_idx < n_shots && y < ny && x < nx) {
     int64_t const i = shot_idx * shot_numel + y * nx + x;
     dest[i] += src[i];
+  }
+}
+
+template <typename StoreT, bool GradCa, bool GradCb>
+__global__ void coeff_grad_kernel(
+    TIDE_DTYPE const *__restrict const lambda_ey,
+    StoreT const *__restrict const ey_store,
+    StoreT const *__restrict const curl_h_store,
+    TIDE_DTYPE *__restrict const grad_ca_shot,
+    TIDE_DTYPE *__restrict const grad_cb_shot, int64_t const step_ratio_val) {
+  int64_t x =
+      (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t y =
+      (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
+  int64_t shot_idx =
+      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
+  if (shot_idx >= n_shots || y < kFdPad || x < kFdPad ||
+      y >= ny - kFdPad + 1 || x >= nx - kFdPad + 1) {
+    return;
+  }
+
+  int64_t const j = y * nx + x;
+  int64_t const i = shot_idx * shot_numel + j;
+  TIDE_DTYPE const lambda_val = lambda_ey[i];
+  TIDE_DTYPE const step_scale = step_ratio_to_field(step_ratio_val);
+  if constexpr (GradCa) {
+    TIDE_DTYPE const ey_n =
+        tide::decode_snapshot<StoreT, TIDE_DTYPE>(ey_store[i]);
+    grad_ca_shot[i] += lambda_val * ey_n * step_scale;
+  }
+  if constexpr (GradCb) {
+    TIDE_DTYPE const curl_h_n =
+        tide::decode_snapshot<StoreT, TIDE_DTYPE>(curl_h_store[i]);
+    grad_cb_shot[i] += lambda_val * curl_h_n * step_scale;
+  }
+}
+
+template <typename StoreT>
+static inline void launch_coeff_grad_kernel(
+    TMForwardLaunchConfig const &launch_cfg, cudaStream_t const stream,
+    TIDE_DTYPE const *__restrict const lambda_ey,
+    StoreT const *__restrict const ey_store,
+    StoreT const *__restrict const curl_h_store,
+    TIDE_DTYPE *__restrict const grad_ca_shot,
+    TIDE_DTYPE *__restrict const grad_cb_shot, bool const ca_requires_grad,
+    bool const cb_requires_grad, int64_t const step_ratio_val) {
+  if (ca_requires_grad && cb_requires_grad) {
+    coeff_grad_kernel<StoreT, true, true>
+        <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream>>>(
+            lambda_ey, ey_store, curl_h_store, grad_ca_shot, grad_cb_shot,
+            step_ratio_val);
+  } else if (ca_requires_grad) {
+    coeff_grad_kernel<StoreT, true, false>
+        <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream>>>(
+            lambda_ey, ey_store, nullptr, grad_ca_shot, grad_cb_shot,
+            step_ratio_val);
+  } else if (cb_requires_grad) {
+    coeff_grad_kernel<StoreT, false, true>
+        <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream>>>(
+            lambda_ey, nullptr, curl_h_store, grad_ca_shot, grad_cb_shot,
+            step_ratio_val);
   }
 }
 
@@ -2617,6 +1527,8 @@ extern "C" void FUNC(born_backward)(
   cudaSetDevice(device);
   (void)dt_h;
   (void)n_threads;
+  (void)work_x;
+  (void)work_z;
   cudaStream_t const stream_compute =
       resolve_cuda_stream(compute_stream_handle);
   cudaStream_t const stream_storage =
@@ -2790,6 +1702,15 @@ extern "C" void FUNC(born_backward)(
       }
     }
 
+    forward_kernel_h<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                       stream_compute>>>(
+        cq, lambda_ey, lambda_hx, lambda_hz, m_lambda_ey_x, m_lambda_ey_z, ay,
+        ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
+    forward_kernel_e<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                       stream_compute>>>(
+        ca, cb, lambda_hx, lambda_hz, lambda_ey, m_lambda_hx_z,
+        m_lambda_hz_x, ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
+
     if (n_receivers_per_shot_h > 0) {
       add_adjoint_sources_ey<<<launch_cfg.dimGridReceivers,
                                launch_cfg.dimBlockReceivers, 0,
@@ -2810,36 +1731,21 @@ extern "C" void FUNC(born_backward)(
           __LINE__);
     }
 
-    if (storage_bf16_h) {
-      born_backward_prepare_e_kernel_bf16<<<launch_cfg.dimGrid,
-                                            launch_cfg.dimBlock, 0,
-                                            stream_compute>>>(
-          ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x,
-          grad_ey ? (__nv_bfloat16 const *)ey_store_1_t : nullptr,
-          grad_curl ? (__nv_bfloat16 const *)curl_store_1_t : nullptr,
-          grad_ca_shot, grad_cb_shot, work_x, work_z, ay, ayh, ax, axh, by,
-          byh, bx, bxh, ky, kyh, kx, kxh, grad_ey, grad_curl, step_ratio_h);
-    } else {
-      born_backward_prepare_e_kernel<<<launch_cfg.dimGrid, launch_cfg.dimBlock,
-                                       0, stream_compute>>>(
-          ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x,
-          grad_ey ? (TIDE_DTYPE const *)ey_store_1_t : nullptr,
-          grad_curl ? (TIDE_DTYPE const *)curl_store_1_t : nullptr,
-          grad_ca_shot, grad_cb_shot, work_x, work_z, ay, ayh, ax, axh, by,
-          byh, bx, bxh, ky, kyh, kx, kxh, grad_ey, grad_curl, step_ratio_h);
+    if (grad_ey || grad_curl) {
+      if (storage_bf16_h) {
+        launch_coeff_grad_kernel<__nv_bfloat16>(
+            launch_cfg, stream_compute, lambda_ey,
+            grad_ey ? (__nv_bfloat16 const *)ey_store_1_t : nullptr,
+            grad_curl ? (__nv_bfloat16 const *)curl_store_1_t : nullptr,
+            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h);
+      } else {
+        launch_coeff_grad_kernel<TIDE_DTYPE>(
+            launch_cfg, stream_compute, lambda_ey,
+            grad_ey ? (TIDE_DTYPE const *)ey_store_1_t : nullptr,
+            grad_curl ? (TIDE_DTYPE const *)curl_store_1_t : nullptr,
+            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h);
+      }
     }
-    born_backward_apply_e_to_h_kernel<<<launch_cfg.dimGrid, launch_cfg.dimBlock,
-                                        0, stream_compute>>>(
-        work_x, work_z, lambda_hx, lambda_hz, ay, ayh, ax, axh, by, byh, bx,
-        bxh, ky, kyh, kx, kxh);
-    born_backward_prepare_h_kernel<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                                     stream_compute>>>(
-        cq, lambda_hx, lambda_hz, m_lambda_ey_x, m_lambda_ey_z, work_x, work_z,
-        ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
-    born_backward_apply_h_to_e_kernel<<<launch_cfg.dimGrid, launch_cfg.dimBlock,
-                                        0, stream_compute>>>(
-        work_x, work_z, lambda_ey, ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh,
-        kx, kxh);
 
     if (want_load && use_storage_pipeline) {
       tide::cuda_check_or_abort(
@@ -2961,46 +1867,6 @@ extern "C" void FUNC(backward)(
 
   TMForwardLaunchConfig const launch_cfg = make_tm_forward_launch_config(
       n_shots_h, ny_h, nx_h, n_sources_per_shot_h, n_receivers_per_shot_h);
-  dim3 const dimBlock = launch_cfg.dimBlock;
-  int64_t interior_x_begin = pml_x0_h + kFdPad;
-  int64_t interior_x_end = pml_x1_h - kFdPad;
-  int64_t interior_y_begin = pml_y0_h + kFdPad;
-  int64_t interior_y_end = pml_y1_h - kFdPad;
-  if (interior_x_begin < kFdPad)
-    interior_x_begin = kFdPad;
-  if (interior_y_begin < kFdPad)
-    interior_y_begin = kFdPad;
-  int64_t const domain_x_end = nx_h - kFdPad + 1;
-  int64_t const domain_y_end = ny_h - kFdPad + 1;
-  if (interior_x_end > domain_x_end)
-    interior_x_end = domain_x_end;
-  if (interior_y_end > domain_y_end)
-    interior_y_end = domain_y_end;
-  int64_t const domain_x_begin = kFdPad;
-  int64_t const domain_y_begin = kFdPad;
-  bool const has_interior =
-      interior_x_begin < interior_x_end && interior_y_begin < interior_y_end;
-  dim3 dimGridInterior(1, 1, to_dim_u32(n_shots_h));
-  if (has_interior) {
-    int64_t const interior_gridx =
-        (interior_x_end - interior_x_begin + dimBlock.x - 1) / dimBlock.x;
-    int64_t const interior_gridy =
-        (interior_y_end - interior_y_begin + dimBlock.y - 1) / dimBlock.y;
-    dimGridInterior =
-        dim3(to_dim_u32(interior_gridx), to_dim_u32(interior_gridy),
-             to_dim_u32(n_shots_h));
-  }
-  BoundaryLaunchLayout const boundary_layout = make_boundary_launch_layout(
-      domain_y_begin, domain_y_end, domain_x_begin, domain_x_end,
-      interior_y_begin, interior_y_end, interior_x_begin, interior_x_end,
-      has_interior);
-  dim3 dimBlockBoundary(256, 1, 1);
-  dim3 dimGridBoundary(1, to_dim_u32(n_shots_h), 1);
-  if (boundary_layout.total_count > 0) {
-    dimGridBoundary.x =
-        (boundary_layout.total_count + dimBlockBoundary.x - 1) /
-        dimBlockBoundary.x;
-  }
 
   void *async_disk_ey = nullptr;
   void *async_disk_curl = nullptr;
@@ -3137,8 +2003,15 @@ extern "C" void FUNC(backward)(
       }
     }
 
-    // Inject adjoint source (receiver residual) at receiver locations
-    // Use add_adjoint_sources_ey which checks n_receivers_per_shot
+    forward_kernel_h<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                       stream_compute>>>(
+        cq, lambda_ey, lambda_hx, lambda_hz, m_lambda_ey_x, m_lambda_ey_z, ay,
+        ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
+    forward_kernel_e<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                       stream_compute>>>(
+        ca, cb, lambda_hx, lambda_hz, lambda_ey, m_lambda_hx_z,
+        m_lambda_hz_x, ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
+
     if (n_receivers_per_shot_h > 0) {
       add_adjoint_sources_ey<<<launch_cfg.dimGridReceivers,
                                launch_cfg.dimBlockReceivers, 0,
@@ -3147,112 +2020,32 @@ extern "C" void FUNC(backward)(
           receivers_i);
     }
 
-    // Record adjoint field at source locations for source gradient
-    // Use record_adjoint_at_sources which checks n_sources_per_shot
     if (n_sources_per_shot_h > 0) {
       record_adjoint_at_sources<<<launch_cfg.dimGridSources,
                                   launch_cfg.dimBlockSources, 0,
                                   stream_compute>>>(
           grad_f + t * n_shots_h * n_sources_per_shot_h, lambda_ey, sources_i);
     }
+
     if (want_load && use_storage_pipeline) {
       tide::cuda_check_or_abort(
           cudaStreamWaitEvent(stream_compute, slot_storage_done, 0), __FILE__,
           __LINE__);
     }
 
-    if (boundary_layout.total_count > 0) {
-      backward_kernel_lambda_h_update_m_exact<<<dimGridBoundary,
-                                                dimBlockBoundary, 0,
-                                                stream_compute>>>(
-          cb, lambda_ey, m_lambda_ey_x, m_lambda_ey_z, by, bx,
-          boundary_layout);
-    }
-    if (has_interior) {
-      backward_kernel_lambda_h_apply_exact_interior<<<dimGridInterior,
-                                                      dimBlock, 0,
-                                                      stream_compute>>>(
-          cb, lambda_ey, lambda_hx, lambda_hz, interior_y_begin, interior_y_end,
-          interior_x_begin, interior_x_end);
-    }
-    if (boundary_layout.total_count > 0) {
-      backward_kernel_lambda_h_apply_exact_boundary<<<dimGridBoundary,
-                                                      dimBlockBoundary, 0,
-                                                      stream_compute>>>(
-          cb, lambda_ey, m_lambda_ey_x, m_lambda_ey_z, lambda_hx, lambda_hz,
-          ay, ax, by, bx, ky, kx, boundary_layout);
-    }
-
-    if (boundary_layout.total_count > 0) {
-      backward_kernel_lambda_e_update_m_exact<<<dimGridBoundary,
-                                                dimBlockBoundary, 0,
-                                                stream_compute>>>(
-          cq, lambda_hx, lambda_hz, m_lambda_hx_z, m_lambda_hz_x, byh, bxh,
-          boundary_layout);
-    }
-
     if (grad_ey || grad_curl) {
       if (storage_bf16_h) {
-        if (has_interior) {
-          backward_kernel_lambda_e_apply_exact_bf16_interior<<<dimGridInterior,
-                                                                dimBlock, 0,
-                                                                stream_compute>>>(
-              ca, cq, lambda_hx, lambda_hz, lambda_ey,
-              grad_ey ? (__nv_bfloat16 const *)ey_store_1_t : nullptr,
-              grad_curl ? (__nv_bfloat16 const *)curl_store_1_t : nullptr,
-              grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h,
-              interior_y_begin, interior_y_end, interior_x_begin,
-              interior_x_end);
-        }
-        if (boundary_layout.total_count > 0) {
-          backward_kernel_lambda_e_apply_exact_bf16_boundary
-              <<<dimGridBoundary, dimBlockBoundary, 0, stream_compute>>>(
-                  ca, cq, lambda_hx, lambda_hz, m_lambda_hx_z, m_lambda_hz_x,
-                  lambda_ey,
-                  grad_ey ? (__nv_bfloat16 const *)ey_store_1_t : nullptr,
-                  grad_curl ? (__nv_bfloat16 const *)curl_store_1_t : nullptr,
-                  grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h,
-                  ayh, axh, byh, bxh, kyh, kxh, boundary_layout);
-        }
+        launch_coeff_grad_kernel<__nv_bfloat16>(
+            launch_cfg, stream_compute, lambda_ey,
+            grad_ey ? (__nv_bfloat16 const *)ey_store_1_t : nullptr,
+            grad_curl ? (__nv_bfloat16 const *)curl_store_1_t : nullptr,
+            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h);
       } else {
-        if (has_interior) {
-          backward_kernel_lambda_e_apply_exact_interior<<<dimGridInterior,
-                                                           dimBlock, 0,
-                                                           stream_compute>>>(
-              ca, cq, lambda_hx, lambda_hz, lambda_ey,
-              grad_ey ? (TIDE_DTYPE const *)ey_store_1_t : nullptr,
-              grad_curl ? (TIDE_DTYPE const *)curl_store_1_t : nullptr,
-              grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h,
-              interior_y_begin, interior_y_end, interior_x_begin,
-              interior_x_end);
-        }
-        if (boundary_layout.total_count > 0) {
-          backward_kernel_lambda_e_apply_exact_boundary<<<dimGridBoundary,
-                                                          dimBlockBoundary, 0,
-                                                          stream_compute>>>(
-              ca, cq, lambda_hx, lambda_hz, m_lambda_hx_z, m_lambda_hz_x,
-              lambda_ey,
-              grad_ey ? (TIDE_DTYPE const *)ey_store_1_t : nullptr,
-              grad_curl ? (TIDE_DTYPE const *)curl_store_1_t : nullptr,
-              grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h, ayh,
-              axh, byh, bxh, kyh, kxh, boundary_layout);
-        }
-      }
-    } else {
-      if (has_interior) {
-        backward_kernel_lambda_e_apply_exact_interior_nograd<<<dimGridInterior,
-                                                                dimBlock, 0,
-                                                                stream_compute>>>(
-            ca, cq, lambda_hx, lambda_hz, lambda_ey, interior_y_begin,
-            interior_y_end, interior_x_begin, interior_x_end);
-      }
-      if (boundary_layout.total_count > 0) {
-        backward_kernel_lambda_e_apply_exact_boundary_nograd<<<dimGridBoundary,
-                                                                dimBlockBoundary,
-                                                                0,
-                                                                stream_compute>>>(
-            ca, cq, lambda_hx, lambda_hz, m_lambda_hx_z, m_lambda_hz_x,
-            lambda_ey, ayh, axh, byh, bxh, kyh, kxh, boundary_layout);
+        launch_coeff_grad_kernel<TIDE_DTYPE>(
+            launch_cfg, stream_compute, lambda_ey,
+            grad_ey ? (TIDE_DTYPE const *)ey_store_1_t : nullptr,
+            grad_curl ? (TIDE_DTYPE const *)curl_store_1_t : nullptr,
+            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h);
       }
     }
 
@@ -3482,16 +2275,23 @@ extern "C" void FUNC(born_backward_bggrad)(
   for (int64_t t = start_t - 1; t >= start_t - nt; --t) {
     int64_t const store_idx = t / step_ratio_h;
     bool const do_grad = (t % step_ratio_h) == 0;
-    if (!do_grad) {
-      continue;
-    }
 
-    size_t const direct_store_offset =
-        (size_t)store_idx * (size_t)shot_bytes_uncomp_h * (size_t)n_shots_h;
-    void const *const dey_store_t =
-        (uint8_t const *)dey_store + direct_store_offset;
-    void const *const dcurl_store_t =
-        (uint8_t const *)dcurl_store + direct_store_offset;
+    forward_kernel_h<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                       stream_compute>>>(
+        cq, lambda_ey, lambda_hx, lambda_hz, m_lambda_ey_x, m_lambda_ey_z, ay,
+        ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
+    forward_kernel_e<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                       stream_compute>>>(
+        ca, cb, lambda_hx, lambda_hz, lambda_ey, m_lambda_hx_z,
+        m_lambda_hz_x, ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
+    forward_kernel_h<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                       stream_compute>>>(
+        cq, eta_ey, eta_hx, eta_hz, m_eta_ey_x, m_eta_ey_z, ay, ayh, ax, axh,
+        by, byh, bx, bxh, ky, kyh, kx, kxh);
+    forward_kernel_e<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                       stream_compute>>>(
+        ca, cb, eta_hx, eta_hz, eta_ey, m_eta_hx_z, m_eta_hz_x, ay, ayh, ax,
+        axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
 
     if (n_receivers_per_shot_h > 0) {
       add_adjoint_sources_ey<<<launch_cfg.dimGridReceivers,
@@ -3500,6 +2300,55 @@ extern "C" void FUNC(born_backward_bggrad)(
           lambda_ey, grad_r + t * n_shots_h * n_receivers_per_shot_h,
           receivers_i);
     }
+    if (do_grad) {
+      size_t const direct_store_offset =
+          (size_t)store_idx * (size_t)shot_bytes_uncomp_h * (size_t)n_shots_h;
+      void const *const dey_store_t =
+          (uint8_t const *)dey_store + direct_store_offset;
+      void const *const dcurl_store_t =
+          (uint8_t const *)dcurl_store + direct_store_offset;
+
+      if (storage_bf16_h) {
+        born_background_prepare_direct_kernel<__nv_bfloat16>
+            <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
+                dca, dcb, lambda_ey, (__nv_bfloat16 const *)dey_store_t,
+                (__nv_bfloat16 const *)dcurl_store_t, grad_ca_shot,
+                grad_cb_shot, eta_source_old, work_eta_x, work_eta_z, ay, ayh,
+                ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh, step_ratio_h);
+      } else {
+        born_background_prepare_direct_kernel<TIDE_DTYPE>
+            <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
+                dca, dcb, lambda_ey, (TIDE_DTYPE const *)dey_store_t,
+                (TIDE_DTYPE const *)dcurl_store_t, grad_ca_shot, grad_cb_shot,
+                eta_source_old, work_eta_x, work_eta_z, ay, ayh, ax, axh, by,
+                byh, bx, bxh, ky, kyh, kx, kxh, step_ratio_h);
+      }
+      born_backward_apply_e_to_h_kernel<<<launch_cfg.dimGrid,
+                                          launch_cfg.dimBlock, 0,
+                                          stream_compute>>>(
+          work_eta_x, work_eta_z, eta_hx, eta_hz, ay, ayh, ax, axh, by, byh,
+          bx, bxh, ky, kyh, kx, kxh);
+      if (storage_bf16_h) {
+        __nv_bfloat16 const *const ey_store_t =
+            (__nv_bfloat16 const *)ey_store_1 + store_idx * store_size;
+        __nv_bfloat16 const *const curl_store_t =
+            (__nv_bfloat16 const *)curl_store_1 + store_idx * store_size;
+        launch_coeff_grad_kernel<__nv_bfloat16>(
+            launch_cfg, stream_compute, lambda_ey, ey_store_t, curl_store_t,
+            grad_dca_shot, grad_dcb_shot, true, true, step_ratio_h);
+      } else {
+        TIDE_DTYPE const *const ey_store_t =
+            (TIDE_DTYPE const *)ey_store_1 + store_idx * store_size;
+        TIDE_DTYPE const *const curl_store_t =
+            (TIDE_DTYPE const *)curl_store_1 + store_idx * store_size;
+        launch_coeff_grad_kernel<TIDE_DTYPE>(
+            launch_cfg, stream_compute, lambda_ey, ey_store_t, curl_store_t,
+            grad_dca_shot, grad_dcb_shot, true, true, step_ratio_h);
+      }
+      add_inplace<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                    stream_compute>>>(eta_ey, eta_source_old);
+    }
+
     if (n_sources_per_shot_h > 0) {
       record_adjoint_at_sources<<<launch_cfg.dimGridSources,
                                   launch_cfg.dimBlockSources, 0,
@@ -3510,105 +2359,6 @@ extern "C" void FUNC(born_backward_bggrad)(
                                   stream_compute>>>(
           grad_f0 + t * n_shots_h * n_sources_per_shot_h, eta_ey, sources_i);
     }
-
-    if (storage_bf16_h) {
-      born_background_prepare_direct_kernel<__nv_bfloat16>
-          <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
-              dca, dcb, lambda_ey, (__nv_bfloat16 const *)dey_store_t,
-              (__nv_bfloat16 const *)dcurl_store_t, grad_ca_shot,
-              grad_cb_shot, eta_source_old, work_eta_x, work_eta_z, ay, ayh,
-              ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh, step_ratio_h);
-    } else {
-      born_background_prepare_direct_kernel<TIDE_DTYPE>
-          <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
-              dca, dcb, lambda_ey, (TIDE_DTYPE const *)dey_store_t,
-              (TIDE_DTYPE const *)dcurl_store_t, grad_ca_shot, grad_cb_shot,
-              eta_source_old, work_eta_x, work_eta_z, ay, ayh, ax, axh, by,
-              byh, bx, bxh, ky, kyh, kx, kxh, step_ratio_h);
-    }
-    born_backward_apply_e_to_h_kernel<<<launch_cfg.dimGrid, launch_cfg.dimBlock,
-                                        0, stream_compute>>>(
-        work_eta_x, work_eta_z, eta_hx, eta_hz, ay, ayh, ax, axh, by, byh,
-        bx, bxh, ky, kyh, kx, kxh);
-    // The direct dcb * lambda term enters the eta H adjoint fields at the
-    // current time level; once injected, propagate eta with the validated
-    // exact reverse operators.
-    if (boundary_layout.total_count > 0) {
-      backward_kernel_lambda_h_update_m_pair_exact<<<dimGridBoundary,
-                                                     dimBlockBoundary, 0,
-                                                     stream_compute>>>(
-          cb, eta_ey, lambda_ey, m_eta_ey_x, m_eta_ey_z, m_lambda_ey_x,
-          m_lambda_ey_z, by, bx, boundary_layout);
-    }
-    if (has_interior) {
-      backward_kernel_lambda_h_apply_pair_exact_interior<<<dimGridInterior,
-                                                           dimBlock, 0,
-                                                           stream_compute>>>(
-          cb, eta_ey, lambda_ey, eta_hx, eta_hz, lambda_hx, lambda_hz,
-          interior_y_begin, interior_y_end, interior_x_begin, interior_x_end);
-    }
-    if (boundary_layout.total_count > 0) {
-      backward_kernel_lambda_h_apply_pair_exact_boundary<<<dimGridBoundary,
-                                                           dimBlockBoundary, 0,
-                                                           stream_compute>>>(
-          cb, eta_ey, lambda_ey, m_eta_ey_x, m_eta_ey_z, m_lambda_ey_x,
-          m_lambda_ey_z, eta_hx, eta_hz, lambda_hx, lambda_hz, ay, ax, by,
-          bx, ky, kx, boundary_layout);
-      backward_kernel_lambda_e_update_m_pair_exact<<<dimGridBoundary,
-                                                     dimBlockBoundary, 0,
-                                                     stream_compute>>>(
-          cq, eta_hx, eta_hz, lambda_hx, lambda_hz, m_eta_hx_z, m_eta_hz_x,
-          m_lambda_hx_z, m_lambda_hz_x, byh, bxh, boundary_layout);
-    }
-    if (storage_bf16_h) {
-      __nv_bfloat16 const *const ey_store_t =
-          (__nv_bfloat16 const *)ey_store_1 + store_idx * store_size;
-      __nv_bfloat16 const *const curl_store_t =
-          (__nv_bfloat16 const *)curl_store_1 + store_idx * store_size;
-      if (has_interior) {
-        backward_kernel_lambda_e_apply_pair_exact_interior<__nv_bfloat16>
-            <<<dimGridInterior, dimBlock, 0, stream_compute>>>(
-                ca, cq, eta_hx, eta_hz, lambda_hx, lambda_hz, eta_ey,
-                lambda_ey, ey_store_t, curl_store_t, grad_ca_shot,
-                grad_cb_shot, grad_dca_shot, grad_dcb_shot, step_ratio_h,
-                interior_y_begin, interior_y_end, interior_x_begin,
-                interior_x_end);
-      }
-      if (boundary_layout.total_count > 0) {
-        backward_kernel_lambda_e_apply_pair_exact_boundary<__nv_bfloat16>
-            <<<dimGridBoundary, dimBlockBoundary, 0, stream_compute>>>(
-                ca, cq, eta_hx, eta_hz, lambda_hx, lambda_hz, m_eta_hx_z,
-                m_eta_hz_x, m_lambda_hx_z, m_lambda_hz_x, eta_ey, lambda_ey,
-                ey_store_t, curl_store_t, grad_ca_shot, grad_cb_shot,
-                grad_dca_shot, grad_dcb_shot, step_ratio_h, ayh, axh, byh,
-                bxh, kyh, kxh, boundary_layout);
-      }
-    } else {
-      TIDE_DTYPE const *const ey_store_t =
-          (TIDE_DTYPE const *)ey_store_1 + store_idx * store_size;
-      TIDE_DTYPE const *const curl_store_t =
-          (TIDE_DTYPE const *)curl_store_1 + store_idx * store_size;
-      if (has_interior) {
-        backward_kernel_lambda_e_apply_pair_exact_interior<TIDE_DTYPE>
-            <<<dimGridInterior, dimBlock, 0, stream_compute>>>(
-                ca, cq, eta_hx, eta_hz, lambda_hx, lambda_hz, eta_ey,
-                lambda_ey, ey_store_t, curl_store_t, grad_ca_shot,
-                grad_cb_shot, grad_dca_shot, grad_dcb_shot, step_ratio_h,
-                interior_y_begin, interior_y_end, interior_x_begin,
-                interior_x_end);
-      }
-      if (boundary_layout.total_count > 0) {
-        backward_kernel_lambda_e_apply_pair_exact_boundary<TIDE_DTYPE>
-            <<<dimGridBoundary, dimBlockBoundary, 0, stream_compute>>>(
-                ca, cq, eta_hx, eta_hz, lambda_hx, lambda_hz, m_eta_hx_z,
-                m_eta_hz_x, m_lambda_hx_z, m_lambda_hz_x, eta_ey, lambda_ey,
-                ey_store_t, curl_store_t, grad_ca_shot, grad_cb_shot,
-                grad_dca_shot, grad_dcb_shot, step_ratio_h, ayh, axh, byh,
-                bxh, kyh, kxh, boundary_layout);
-      }
-    }
-    add_inplace<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
-        eta_ey, eta_source_old);
   }
 
   if (!ca_batched_h) {

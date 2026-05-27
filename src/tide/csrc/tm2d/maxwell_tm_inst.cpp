@@ -651,49 +651,35 @@ static inline void born_step_with_storage(
 }
 
 template <typename StoreT>
-static inline void born_backward_prepare_e(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cb, TIDE_DTYPE *__restrict const lambda_ey,
-    TIDE_DTYPE *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE *__restrict const m_lambda_hz_x,
+static inline void coeff_grad(
+    TIDE_DTYPE const *__restrict const lambda_ey,
     StoreT const *__restrict const ey_store,
-    StoreT const *__restrict const curl_store, TIDE_DTYPE *__restrict const grad_ca,
-    TIDE_DTYPE *__restrict const grad_cb, TIDE_DTYPE *__restrict const work_x,
-    TIDE_DTYPE *__restrict const work_z, TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bx,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const ky,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kx,
-    TIDE_DTYPE const *__restrict const kxh, TIDE_DTYPE const rdy,
-    TIDE_DTYPE const rdx, int64_t const n_shots, int64_t const ny,
-    int64_t const nx, int64_t const shot_numel, int64_t const pml_y0,
-    int64_t const pml_y1, int64_t const pml_x0, int64_t const pml_x1,
-    bool const ca_batched, bool const cb_batched, bool const ca_requires_grad,
-    bool const cb_requires_grad, int64_t const step_ratio) {
-
-  ::tide::GridParams<TIDE_DTYPE> params = {
-      ay,      ayh,        ax,         axh,        by,     byh,    bx,
-      bxh,     ky,         kyh,        kx,         kxh,    rdy,    rdx,
-      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
-      pml_x1,  ca_batched, cb_batched, false};
-
+    StoreT const *__restrict const curl_store,
+    TIDE_DTYPE *__restrict const grad_ca,
+    TIDE_DTYPE *__restrict const grad_cb, int64_t const n_shots,
+    int64_t const ny, int64_t const nx, int64_t const shot_numel,
+    bool const ca_requires_grad, bool const cb_requires_grad,
+    int64_t const step_ratio) {
   TIDE_OMP_INDEX shot_idx;
   TIDE_OMP_INDEX y;
   TIDE_OMP_INDEX x;
   TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
   for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    for (y = 0; y < ny; ++y) {
-      for (x = 0; x < nx; ++x) {
-        ::tide::born_backward_prepare_e_core<TIDE_DTYPE, StoreT, TIDE_STENCIL>(
-            params, ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x, ey_store,
-            curl_store, grad_ca, grad_cb, work_x, work_z, ca_requires_grad,
-            cb_requires_grad, step_ratio, y, x, shot_idx);
+    for (y = kFdPad; y < ny - kFdPad + 1; ++y) {
+      for (x = kFdPad; x < nx - kFdPad + 1; ++x) {
+        int64_t const j = y * nx + x;
+        int64_t const i = shot_idx * shot_numel + j;
+        TIDE_DTYPE const lambda_val = lambda_ey[i];
+        if (ca_requires_grad && ey_store != NULL) {
+          TIDE_DTYPE const ey_n =
+              ::tide::decode_snapshot<StoreT, TIDE_DTYPE>(ey_store[i]);
+          grad_ca[i] += lambda_val * ey_n * (TIDE_DTYPE)step_ratio;
+        }
+        if (cb_requires_grad && curl_store != NULL) {
+          TIDE_DTYPE const curl_h_n =
+              ::tide::decode_snapshot<StoreT, TIDE_DTYPE>(curl_store[i]);
+          grad_cb[i] += lambda_val * curl_h_n * (TIDE_DTYPE)step_ratio;
+        }
       }
     }
   }
@@ -733,85 +719,6 @@ static inline void born_backward_apply_e_to_h(
       for (x = 0; x < nx; ++x) {
         ::tide::born_backward_apply_e_to_h_core<TIDE_DTYPE, TIDE_STENCIL>(
             params, work_x, work_z, lambda_hx, lambda_hz, y, x, shot_idx);
-      }
-    }
-  }
-}
-
-static inline void born_backward_prepare_h(
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const m_lambda_ey_x,
-    TIDE_DTYPE *__restrict const m_lambda_ey_z,
-    TIDE_DTYPE *__restrict const work_x, TIDE_DTYPE *__restrict const work_z,
-    TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bx,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const ky,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kx,
-    TIDE_DTYPE const *__restrict const kxh, TIDE_DTYPE const rdy,
-    TIDE_DTYPE const rdx, int64_t const n_shots, int64_t const ny,
-    int64_t const nx, int64_t const shot_numel, int64_t const pml_y0,
-    int64_t const pml_y1, int64_t const pml_x0, int64_t const pml_x1,
-    bool const cq_batched) {
-
-  ::tide::GridParams<TIDE_DTYPE> params = {
-      ay,      ayh,        ax,         axh,        by,     byh,    bx,
-      bxh,     ky,         kyh,        kx,         kxh,    rdy,    rdx,
-      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
-      pml_x1,  false,      false,      cq_batched};
-
-  TIDE_OMP_INDEX shot_idx;
-  TIDE_OMP_INDEX y;
-  TIDE_OMP_INDEX x;
-  TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
-  for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    for (y = 0; y < ny; ++y) {
-      for (x = 0; x < nx; ++x) {
-        ::tide::born_backward_prepare_h_core<TIDE_DTYPE, TIDE_STENCIL>(
-            params, cq, lambda_hx, lambda_hz, m_lambda_ey_x, m_lambda_ey_z,
-            work_x, work_z, y, x, shot_idx);
-      }
-    }
-  }
-}
-
-static inline void born_backward_apply_h_to_e(
-    TIDE_DTYPE const *__restrict const work_x,
-    TIDE_DTYPE const *__restrict const work_z, TIDE_DTYPE *__restrict const lambda_ey,
-    TIDE_DTYPE const *__restrict const ay, TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const ax, TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const by, TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bx, TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const ky, TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kx, TIDE_DTYPE const *__restrict const kxh,
-    TIDE_DTYPE const rdy, TIDE_DTYPE const rdx, int64_t const n_shots,
-    int64_t const ny, int64_t const nx, int64_t const shot_numel,
-    int64_t const pml_y0, int64_t const pml_y1, int64_t const pml_x0,
-    int64_t const pml_x1) {
-
-  ::tide::GridParams<TIDE_DTYPE> params = {
-      ay,      ayh,        ax,         axh,        by,     byh,    bx,
-      bxh,     ky,         kyh,        kx,         kxh,    rdy,    rdx,
-      n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
-      pml_x1,  false,      false,      false};
-
-  TIDE_OMP_INDEX shot_idx;
-  TIDE_OMP_INDEX y;
-  TIDE_OMP_INDEX x;
-  TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
-  for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    for (y = 0; y < ny; ++y) {
-      for (x = 0; x < nx; ++x) {
-        ::tide::born_backward_apply_h_to_e_core<TIDE_DTYPE, TIDE_STENCIL>(
-            params, work_x, work_z, lambda_ey, y, x, shot_idx);
       }
     }
   }
@@ -1283,200 +1190,6 @@ extern "C"
 #endif
 }
 
-/*
- * Backward kernel for adjoint λ_H fields update
- *
- * Adjoint equations for H fields (time reversed, swap Cb and Cq roles):
- *   λ_Hx^{n-1/2} = λ_Hx^{n+1/2} - C_b * ∂λ_Ey/∂z
- *   λ_Hz^{n-1/2} = λ_Hz^{n+1/2} + C_b * ∂λ_Ey/∂x
- */
-static void backward_kernel_lambda_h(
-    TIDE_DTYPE const *__restrict const cb,
-    TIDE_DTYPE const *__restrict const lambda_ey,
-    TIDE_DTYPE *__restrict const lambda_hx,
-    TIDE_DTYPE *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const m_lambda_ey_x,
-    TIDE_DTYPE *__restrict const m_lambda_ey_z,
-    TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bx,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const ky,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kx,
-    TIDE_DTYPE const *__restrict const kxh, TIDE_DTYPE const rdy,
-    TIDE_DTYPE const rdx, int64_t const n_shots, int64_t const ny,
-    int64_t const nx, int64_t const shot_numel, int64_t const pml_y0,
-    int64_t const pml_y1, int64_t const pml_x0, int64_t const pml_x1,
-    bool const cb_batched, TIDE_DTYPE *__restrict const work_x,
-    TIDE_DTYPE *__restrict const work_z) {
-
-  (void)work_x;
-  (void)work_z; // No longer needed with new formulation
-
-  ::tide::GridParams<TIDE_DTYPE> params = {
-      ay,     ayh,    ax,     axh,    by,    byh,        bx,   bxh, ky,
-      kyh,    kx,     kxh,    rdy,    rdx,   n_shots,    ny,   nx,  shot_numel,
-      pml_y0, pml_y1, pml_x0, pml_x1, false, cb_batched, false};
-
-  TIDE_OMP_INDEX shot_idx;
-  TIDE_OMP_INDEX y;
-  TIDE_OMP_INDEX x;
-
-  
-
-  TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
-  for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    for (y = 0; y < ny - kFdPad + 1; ++y) {
-      for (x = 0; x < nx - kFdPad + 1; ++x) {
-        backward_kernel_lambda_h_core<TIDE_DTYPE, TIDE_STENCIL>(
-            params, cb, lambda_ey, lambda_hx, lambda_hz, m_lambda_ey_x,
-            m_lambda_ey_z, y, x, shot_idx);
-      }
-    }
-  }
-}
-
-/*
- * Backward kernel for adjoint λ_Ey field update with gradient accumulation
- *
- * Adjoint equation for E field (time reversed, swap Cb and Cq roles):
- *   λ_Ey^n = C_a * λ_Ey^{n+1} + C_q * (∂λ_Hz/∂x - ∂λ_Hx/∂z)
- *
- * Gradient accumulation:
- *   grad_ca += λ_Ey^{n+1} * E_y^n
- *   grad_cb += λ_Ey^{n+1} * curl_H^n
- *
- * Uses pml_bounds arrays to divide domain into 9 regions (3x3 grid):
- *   pml_y/pml_x == 0: Left/Top PML region
- *   pml_y/pml_x == 1: Interior region
- *   pml_y/pml_x == 2: Right/Bottom PML region
- *
- * Gradient accumulation covers the full padded model domain so replicate-padded
- * PML cells fold back into the physical boundary cells during autograd.
- */
-static void backward_kernel_lambda_e_with_grad(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const lambda_ey,
-    TIDE_DTYPE *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE *__restrict const m_lambda_hz_x,
-    TIDE_DTYPE const *__restrict const ey_store,
-    TIDE_DTYPE const *__restrict const curl_h_store,
-    TIDE_DTYPE *__restrict const grad_ca, TIDE_DTYPE *__restrict const grad_cb,
-    TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bx,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const ky,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kx,
-    TIDE_DTYPE const *__restrict const kxh, TIDE_DTYPE const rdy,
-    TIDE_DTYPE const rdx, int64_t const n_shots, int64_t const ny,
-    int64_t const nx, int64_t const shot_numel, int64_t const pml_y0,
-    int64_t const pml_y1, int64_t const pml_x0, int64_t const pml_x1,
-    bool const ca_batched, bool const cq_batched, bool const ca_requires_grad,
-    bool const cb_requires_grad, int64_t const step_ratio,
-    TIDE_DTYPE *__restrict const work_x, TIDE_DTYPE *__restrict const work_z) {
-
-  (void)work_x;
-  (void)work_z; // No longer needed with new formulation
-
-  ::tide::GridParams<TIDE_DTYPE> params = {
-      ay,      ayh,        ax,    axh,        by,     byh,    bx,
-      bxh,     ky,         kyh,   kx,         kxh,    rdy,    rdx,
-      n_shots, ny,         nx,    shot_numel, pml_y0, pml_y1, pml_x0,
-      pml_x1,  ca_batched, false, cq_batched};
-
-  TIDE_OMP_INDEX shot_idx;
-  TIDE_OMP_INDEX y;
-  TIDE_OMP_INDEX x;
-
-  
-
-  TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
-  for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    for (y = 0; y < ny - kFdPad + 1; ++y) {
-      for (x = 0; x < nx - kFdPad + 1; ++x) {
-        backward_kernel_lambda_e_with_grad_core<TIDE_DTYPE, TIDE_DTYPE,
-                                                TIDE_STENCIL>(
-            params, ca, cq, lambda_hx, lambda_hz, lambda_ey, m_lambda_hx_z,
-            m_lambda_hz_x, ey_store, curl_h_store, grad_ca, grad_cb,
-            ca_requires_grad, cb_requires_grad, step_ratio, y, x, shot_idx);
-      }
-    }
-  }
-}
-
-static void backward_kernel_lambda_e_with_grad_bf16(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const lambda_ey,
-    TIDE_DTYPE *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE *__restrict const m_lambda_hz_x,
-    tide_bfloat16 const *__restrict const ey_store,
-    tide_bfloat16 const *__restrict const curl_h_store,
-    TIDE_DTYPE *__restrict const grad_ca, TIDE_DTYPE *__restrict const grad_cb,
-    TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bx,
-    TIDE_DTYPE const *__restrict const bxh,
-    TIDE_DTYPE const *__restrict const ky,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kx,
-    TIDE_DTYPE const *__restrict const kxh, TIDE_DTYPE const rdy,
-    TIDE_DTYPE const rdx, int64_t const n_shots, int64_t const ny,
-    int64_t const nx, int64_t const shot_numel, int64_t const pml_y0,
-    int64_t const pml_y1, int64_t const pml_x0, int64_t const pml_x1,
-    bool const ca_batched, bool const cq_batched, bool const ca_requires_grad,
-    bool const cb_requires_grad, int64_t const step_ratio,
-    TIDE_DTYPE *__restrict const work_x, TIDE_DTYPE *__restrict const work_z) {
-
-  (void)work_x;
-  (void)work_z; // No longer needed with new formulation
-
-  ::tide::GridParams<TIDE_DTYPE> params = {
-      ay,      ayh,        ax,    axh,        by,     byh,    bx,
-      bxh,     ky,         kyh,   kx,         kxh,    rdy,    rdx,
-      n_shots, ny,         nx,    shot_numel, pml_y0, pml_y1, pml_x0,
-      pml_x1,  ca_batched, false, cq_batched};
-
-  TIDE_OMP_INDEX shot_idx;
-  TIDE_OMP_INDEX y;
-  TIDE_OMP_INDEX x;
-
-  
-
-  TIDE_OMP_PARALLEL_FOR_COLLAPSE3_IF(n_shots >= TIDE_OMP_MIN_PARALLEL_SHOTS)
-  for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-    for (y = 0; y < ny - kFdPad + 1; ++y) {
-      for (x = 0; x < nx - kFdPad + 1; ++x) {
-        backward_kernel_lambda_e_with_grad_core<TIDE_DTYPE, tide_bfloat16,
-                                                TIDE_STENCIL>(
-            params, ca, cq, lambda_hx, lambda_hz, lambda_ey, m_lambda_hx_z,
-            m_lambda_hz_x, ey_store, curl_h_store, grad_ca, grad_cb,
-            ca_requires_grad, cb_requires_grad, step_ratio, y, x, shot_idx);
-      }
-    }
-  }
-}
-
 static void inverse_kernel_e_and_curl(
     TIDE_DTYPE const *__restrict const ca,
     TIDE_DTYPE const *__restrict const cb,
@@ -1846,37 +1559,32 @@ extern "C"
     void const *const dcurl_store_t =
         (uint8_t const *)dcurl_store + direct_store_offset;
 
+    forward_kernel_h(cq, lambda_ey, lambda_hx, lambda_hz, m_lambda_ey_x,
+                     m_lambda_ey_z, ay, ayh, ax, axh, by, byh, bx, bxh, ky,
+                     kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel,
+                     pml_y0, pml_y1, pml_x0, pml_x1, cq_batched);
+    forward_kernel_e_with_storage_dispatch(
+        ca, cb, lambda_hx, lambda_hz, lambda_ey, m_lambda_hx_z, m_lambda_hz_x,
+        ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx,
+        n_shots, ny, nx, shot_numel, pml_y0, pml_y1, pml_x0, pml_x1,
+        ca_batched, cb_batched, false, false, (TIDE_DTYPE *)NULL,
+        (TIDE_DTYPE *)NULL);
+    forward_kernel_h(cq, eta_ey, eta_hx, eta_hz, m_eta_ey_x, m_eta_ey_z, ay,
+                     ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy,
+                     rdx, n_shots, ny, nx, shot_numel, pml_y0, pml_y1, pml_x0,
+                     pml_x1, cq_batched);
+    forward_kernel_e_with_storage_dispatch(
+        ca, cb, eta_hx, eta_hz, eta_ey, m_eta_hx_z, m_eta_hz_x, ay, ayh, ax,
+        axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx,
+        shot_numel, pml_y0, pml_y1, pml_x0, pml_x1, ca_batched, cb_batched,
+        false, false, (TIDE_DTYPE *)NULL, (TIDE_DTYPE *)NULL);
+
     if (n_receivers_per_shot > 0) {
       add_sources_ey(lambda_ey, grad_r + t * n_shots * n_receivers_per_shot,
                      receivers_i, n_shots, shot_numel, n_receivers_per_shot);
     }
-    if (n_sources_per_shot > 0) {
-      record_receivers_ey(grad_df + t * n_shots * n_sources_per_shot, lambda_ey,
-                          sources_i, n_shots, shot_numel, n_sources_per_shot);
-      record_receivers_ey(grad_f0 + t * n_shots * n_sources_per_shot, eta_ey,
-                          sources_i, n_shots, shot_numel, n_sources_per_shot);
-    }
 
-    if (storage_bf16) {
-      born_background_prepare_direct<tide_bfloat16>(
-          dca, dcb, lambda_ey, (tide_bfloat16 const *)dey_store_t,
-          (tide_bfloat16 const *)dcurl_store_t, grad_ca_shot, grad_cb_shot,
-          eta_source_old, work_x, work_z, ay, ayh, ax, axh, by, byh, bx, bxh,
-          ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0,
-          pml_y1, pml_x0, pml_x1, ca_batched, cb_batched, step_ratio);
-    } else {
-      born_background_prepare_direct<TIDE_DTYPE>(
-          dca, dcb, lambda_ey, (TIDE_DTYPE const *)dey_store_t,
-          (TIDE_DTYPE const *)dcurl_store_t, grad_ca_shot, grad_cb_shot,
-          eta_source_old, work_x, work_z, ay, ayh, ax, axh, by, byh, bx, bxh,
-          ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0,
-          pml_y1, pml_x0, pml_x1, ca_batched, cb_batched, step_ratio);
-    }
-    born_backward_apply_e_to_h(work_x, work_z, eta_hx, eta_hz, ay, ayh, ax,
-                               axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy,
-                               rdx, n_shots, ny, nx, shot_numel, pml_y0,
-                               pml_y1, pml_x0, pml_x1);
-    if (storage_bf16) {
+    if (do_grad && storage_bf16) {
       tide_bfloat16 *const ey_store_1_t =
           (tide_bfloat16 *)ey_store_1 + store_offset;
       tide_bfloat16 *const curl_store_1_t =
@@ -1897,28 +1605,20 @@ extern "C"
           }
         }
       }
-      born_backward_prepare_e<tide_bfloat16>(
-          ca, cb, eta_ey, m_eta_hx_z, m_eta_hz_x, ey_store_1_t, curl_store_1_t,
-          grad_ca_shot, grad_cb_shot, work_x, work_z, ay, ayh, ax, axh, by,
-          byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx,
-          shot_numel, pml_y0, pml_y1, pml_x0, pml_x1, ca_batched, cb_batched,
-          true, true, step_ratio);
+      born_background_prepare_direct<tide_bfloat16>(
+          dca, dcb, lambda_ey, (tide_bfloat16 const *)dey_store_t,
+          (tide_bfloat16 const *)dcurl_store_t, grad_ca_shot, grad_cb_shot,
+          eta_source_old, work_x, work_z, ay, ayh, ax, axh, by, byh, bx, bxh,
+          ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0,
+          pml_y1, pml_x0, pml_x1, ca_batched, cb_batched, step_ratio);
       born_backward_apply_e_to_h(work_x, work_z, eta_hx, eta_hz, ay, ayh, ax,
                                  axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy,
                                  rdx, n_shots, ny, nx, shot_numel, pml_y0,
                                  pml_y1, pml_x0, pml_x1);
-
-      born_backward_prepare_e<tide_bfloat16>(
-          ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x, ey_store_1_t,
-          curl_store_1_t, grad_dca_shot, grad_dcb_shot, work_x, work_z, ay,
-          ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx, n_shots,
-          ny, nx, shot_numel, pml_y0, pml_y1, pml_x0, pml_x1, ca_batched,
-          cb_batched, true, true, step_ratio);
-      born_backward_apply_e_to_h(work_x, work_z, lambda_hx, lambda_hz, ay, ayh,
-                                 ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh,
-                                 rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0,
-                                 pml_y1, pml_x0, pml_x1);
-    } else {
+      coeff_grad<tide_bfloat16>(
+          lambda_ey, ey_store_1_t, curl_store_1_t, grad_dca_shot,
+          grad_dcb_shot, n_shots, ny, nx, shot_numel, true, true, step_ratio);
+    } else if (do_grad) {
       TIDE_DTYPE *const ey_store_1_t = ey_store_1 + store_offset;
       TIDE_DTYPE *const curl_store_1_t = curl_store_1 + store_offset;
       if (storage_mode == STORAGE_DISK) {
@@ -1937,52 +1637,34 @@ extern "C"
           }
         }
       }
-      born_backward_prepare_e(
-          ca, cb, eta_ey, m_eta_hx_z, m_eta_hz_x, ey_store_1_t, curl_store_1_t,
-          grad_ca_shot, grad_cb_shot, work_x, work_z, ay, ayh, ax, axh, by,
-          byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx,
-          shot_numel, pml_y0, pml_y1, pml_x0, pml_x1, ca_batched, cb_batched,
-          true, true, step_ratio);
+      born_background_prepare_direct<TIDE_DTYPE>(
+          dca, dcb, lambda_ey, (TIDE_DTYPE const *)dey_store_t,
+          (TIDE_DTYPE const *)dcurl_store_t, grad_ca_shot, grad_cb_shot,
+          eta_source_old, work_x, work_z, ay, ayh, ax, axh, by, byh, bx, bxh,
+          ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0,
+          pml_y1, pml_x0, pml_x1, ca_batched, cb_batched, step_ratio);
       born_backward_apply_e_to_h(work_x, work_z, eta_hx, eta_hz, ay, ayh, ax,
                                  axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy,
                                  rdx, n_shots, ny, nx, shot_numel, pml_y0,
                                  pml_y1, pml_x0, pml_x1);
-
-      born_backward_prepare_e(
-          ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x, ey_store_1_t,
-          curl_store_1_t, grad_dca_shot, grad_dcb_shot, work_x, work_z, ay,
-          ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx, n_shots,
-          ny, nx, shot_numel, pml_y0, pml_y1, pml_x0, pml_x1, ca_batched,
-          cb_batched, true, true, step_ratio);
-      born_backward_apply_e_to_h(work_x, work_z, lambda_hx, lambda_hz, ay, ayh,
-                                 ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh,
-                                 rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0,
-                                 pml_y1, pml_x0, pml_x1);
+      coeff_grad<TIDE_DTYPE>(
+          lambda_ey, ey_store_1_t, curl_store_1_t, grad_dca_shot,
+          grad_dcb_shot, n_shots, ny, nx, shot_numel, true, true, step_ratio);
     }
-    born_backward_prepare_h(cq, lambda_hx, lambda_hz, m_lambda_ey_x,
-                            m_lambda_ey_z, work_x, work_z, ay, ayh, ax, axh,
-                            by, byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx,
-                            n_shots, ny, nx, shot_numel, pml_y0, pml_y1,
-                            pml_x0, pml_x1, cq_batched);
-    born_backward_apply_h_to_e(work_x, work_z, lambda_ey, ay, ayh, ax, axh, by,
-                               byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx,
-                               n_shots, ny, nx, shot_numel, pml_y0, pml_y1,
-                               pml_x0, pml_x1);
 
-    born_backward_prepare_h(cq, eta_hx, eta_hz, m_eta_ey_x, m_eta_ey_z,
-                            work_x, work_z, ay, ayh, ax, axh, by, byh, bx,
-                            bxh, ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx,
-                            shot_numel, pml_y0, pml_y1, pml_x0, pml_x1,
-                            cq_batched);
-    born_backward_apply_h_to_e(work_x, work_z, eta_ey, ay, ayh, ax, axh, by,
-                               byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx,
-                               n_shots, ny, nx, shot_numel, pml_y0, pml_y1,
-                               pml_x0, pml_x1);
+    if (do_grad) {
+      TIDE_OMP_INDEX i;
+      TIDE_OMP_PARALLEL_FOR_IF(store_size >= TIDE_OMP_MIN_PARALLEL_SHOTS)
+      for (i = 0; i < store_size; ++i) {
+        eta_ey[i] += eta_source_old[i];
+      }
+    }
 
-    TIDE_OMP_INDEX i;
-    TIDE_OMP_PARALLEL_FOR_IF(store_size >= TIDE_OMP_MIN_PARALLEL_SHOTS)
-    for (i = 0; i < store_size; ++i) {
-      eta_ey[i] += eta_source_old[i];
+    if (n_sources_per_shot > 0) {
+      record_receivers_ey(grad_df + t * n_shots * n_sources_per_shot, lambda_ey,
+                          sources_i, n_shots, shot_numel, n_sources_per_shot);
+      record_receivers_ey(grad_f0 + t * n_shots * n_sources_per_shot, eta_ey,
+                          sources_i, n_shots, shot_numel, n_sources_per_shot);
     }
   }
 
@@ -2087,6 +1769,8 @@ extern "C"
   (void)dt;
   (void)ey_store_3;
   (void)curl_store_3;
+  (void)work_x;
+  (void)work_z;
 #ifdef _OPENMP
   int const prev_threads = omp_get_max_threads();
   if (n_threads > 0) {
@@ -2179,6 +1863,17 @@ extern "C"
       }
     }
 
+    forward_kernel_h(cq, lambda_ey, lambda_hx, lambda_hz, m_lambda_ey_x,
+                     m_lambda_ey_z, ay, ayh, ax, axh, by, byh, bx, bxh, ky,
+                     kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel,
+                     pml_y0, pml_y1, pml_x0, pml_x1, cq_batched);
+    forward_kernel_e_with_storage_dispatch(
+        ca, cb, lambda_hx, lambda_hz, lambda_ey, m_lambda_hx_z, m_lambda_hz_x,
+        ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx,
+        n_shots, ny, nx, shot_numel, pml_y0, pml_y1, pml_x0, pml_x1,
+        ca_batched, cb_batched, false, false, (TIDE_DTYPE *)NULL,
+        (TIDE_DTYPE *)NULL);
+
     if (n_receivers_per_shot > 0) {
       add_sources_ey(lambda_ey, grad_r + t * n_shots * n_receivers_per_shot,
                      receivers_i, n_shots, shot_numel, n_receivers_per_shot);
@@ -2188,43 +1883,23 @@ extern "C"
                           sources_i, n_shots, shot_numel, n_sources_per_shot);
     }
 
-    if (storage_bf16) {
+    if (storage_bf16 && (grad_ey || grad_curl)) {
       tide_bfloat16 *const ey_store_1_t =
           (tide_bfloat16 *)ey_store_1 + store_offset;
       tide_bfloat16 *const curl_store_1_t =
           (tide_bfloat16 *)curl_store_1 + store_offset;
-      born_backward_prepare_e<tide_bfloat16>(
-          ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x,
-          grad_ey ? ey_store_1_t : NULL, grad_curl ? curl_store_1_t : NULL,
-          grad_ca_accum, grad_cb_accum, work_x, work_z, ay, ayh, ax, axh, by,
-          byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel,
-          pml_y0, pml_y1, pml_x0, pml_x1, ca_batched, cb_batched, grad_ey,
-          grad_curl, step_ratio);
-    } else {
+      coeff_grad<tide_bfloat16>(
+          lambda_ey, grad_ey ? ey_store_1_t : NULL,
+          grad_curl ? curl_store_1_t : NULL, grad_ca_accum, grad_cb_accum,
+          n_shots, ny, nx, shot_numel, grad_ey, grad_curl, step_ratio);
+    } else if (grad_ey || grad_curl) {
       TIDE_DTYPE *const ey_store_1_t = ey_store_1 + store_offset;
       TIDE_DTYPE *const curl_store_1_t = curl_store_1 + store_offset;
-      born_backward_prepare_e<TIDE_DTYPE>(
-          ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x,
-          grad_ey ? ey_store_1_t : NULL, grad_curl ? curl_store_1_t : NULL,
-          grad_ca_accum, grad_cb_accum, work_x, work_z, ay, ayh, ax, axh, by,
-          byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel,
-          pml_y0, pml_y1, pml_x0, pml_x1, ca_batched, cb_batched, grad_ey,
-          grad_curl, step_ratio);
+      coeff_grad<TIDE_DTYPE>(
+          lambda_ey, grad_ey ? ey_store_1_t : NULL,
+          grad_curl ? curl_store_1_t : NULL, grad_ca_accum, grad_cb_accum,
+          n_shots, ny, nx, shot_numel, grad_ey, grad_curl, step_ratio);
     }
-
-    born_backward_apply_e_to_h(work_x, work_z, lambda_hx, lambda_hz, ay, ayh,
-                               ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh,
-                               rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0,
-                               pml_y1, pml_x0, pml_x1);
-    born_backward_prepare_h(cq, lambda_hx, lambda_hz, m_lambda_ey_x,
-                            m_lambda_ey_z, work_x, work_z, ay, ayh, ax, axh,
-                            by, byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx,
-                            n_shots, ny, nx, shot_numel, pml_y0, pml_y1,
-                            pml_x0, pml_x1, cq_batched);
-    born_backward_apply_h_to_e(work_x, work_z, lambda_ey, ay, ayh, ax, axh, by,
-                               byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx,
-                               n_shots, ny, nx, shot_numel, pml_y0, pml_y1,
-                               pml_x0, pml_x1);
   }
 
   if (reduce_grad_ca) {
@@ -2342,16 +2017,6 @@ extern "C"
     grad_cb_accum = grad_cb_shot;
     memset(grad_cb_accum, 0, (size_t)store_size * sizeof(TIDE_DTYPE));
   }
-  TIDE_DTYPE *work_x =
-      (TIDE_DTYPE *)calloc((size_t)store_size, sizeof(TIDE_DTYPE));
-  TIDE_DTYPE *work_z =
-      (TIDE_DTYPE *)calloc((size_t)store_size, sizeof(TIDE_DTYPE));
-
-  if (work_x == NULL || work_z == NULL) {
-    fprintf(stderr, "maxwell_tm backward allocation failure.\n");
-    abort();
-  }
-
   FILE **fp_ey = NULL;
   FILE **fp_curl = NULL;
   if (storage_mode == STORAGE_DISK) {
@@ -2368,13 +2033,6 @@ extern "C"
       }
     }
   }
-
-  // Time reversed loop: from t = start_t - 1 down to start_t - nt
-  //
-  // Forward order was: H_update -> E_update(store) -> source_inject -> record
-  // Backward order is: record(adjoint) -> source_inject(adjoint) ->
-  // E_update(adjoint) -> H_update(adjoint) Which translates to: grad_r_inject
-  // -> grad_f_record -> λ_E_update(grad_accum) -> λ_H_update
 
   for (int64_t t = start_t - 1; t >= start_t - nt; --t) {
     // Determine storage index for this time step
@@ -2430,61 +2088,46 @@ extern "C"
       }
     }
 
-    // Inject adjoint residuals into λ_Ey^{t+1} (adjoint of receiver recording)
+    forward_kernel_h(cq, lambda_ey, lambda_hx, lambda_hz, m_lambda_ey_x,
+                     m_lambda_ey_z, ay, ayh, ax, axh, by, byh, bx, bxh, ky,
+                     kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel,
+                     pml_y0, pml_y1, pml_x0, pml_x1, cq_batched);
+    forward_kernel_e_with_storage_dispatch(
+        ca, cb, lambda_hx, lambda_hz, lambda_ey, m_lambda_hx_z, m_lambda_hz_x,
+        ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx,
+        n_shots, ny, nx, shot_numel, pml_y0, pml_y1, pml_x0, pml_x1,
+        ca_batched, cb_batched, false, false, (TIDE_DTYPE *)NULL,
+        (TIDE_DTYPE *)NULL);
+
     if (n_receivers_per_shot > 0) {
       add_sources_ey(lambda_ey, grad_r + t * n_shots * n_receivers_per_shot,
                      receivers_i, n_shots, shot_numel, n_receivers_per_shot);
     }
 
-    // Record adjoint source gradient using λ_Ey^{t+1} (adjoint of source
-    // injection)
     if (n_sources_per_shot > 0) {
       record_receivers_ey(grad_f + t * n_shots * n_sources_per_shot, lambda_ey,
                           sources_i, n_shots, shot_numel, n_sources_per_shot);
     }
 
-    // Reverse the E update first, then reverse the H update. Reusing the Born
-    // split operators keeps the Maxwell adjoint algebra identical to the
-    // validated Born reverse sweep, including the source-present no-PML path
-    // used by the TM2D native HVP prototype.
     if (storage_bf16 && (grad_ey || grad_curl)) {
       tide_bfloat16 *const ey_store_1_t =
           (tide_bfloat16 *)ey_store_1 + store_offset;
       tide_bfloat16 *const curl_store_1_t =
           (tide_bfloat16 *)curl_store_1 + store_offset;
-      born_backward_prepare_e<tide_bfloat16>(
-          ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x,
-          grad_ey ? ey_store_1_t : NULL, grad_curl ? curl_store_1_t : NULL,
-          grad_ca_accum, grad_cb_accum, work_x, work_z, ay, ayh, ax, axh, by,
-          byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx,
-          shot_numel, pml_y0, pml_y1, pml_x0, pml_x1, ca_batched, cb_batched,
-          grad_ey, grad_curl, step_ratio);
-    } else {
+      coeff_grad<tide_bfloat16>(
+          lambda_ey, grad_ey ? ey_store_1_t : NULL,
+          grad_curl ? curl_store_1_t : NULL, grad_ca_accum, grad_cb_accum,
+          n_shots, ny, nx, shot_numel, grad_ey, grad_curl, step_ratio);
+    } else if (grad_ey || grad_curl) {
       TIDE_DTYPE *const ey_store_1_t =
-          storage_bf16 ? NULL : (ey_store_1 + store_offset);
+          ey_store_1 + store_offset;
       TIDE_DTYPE *const curl_store_1_t =
-          storage_bf16 ? NULL : (curl_store_1 + store_offset);
-      born_backward_prepare_e<TIDE_DTYPE>(
-          ca, cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x,
-          grad_ey ? ey_store_1_t : NULL, grad_curl ? curl_store_1_t : NULL,
-          grad_ca_accum, grad_cb_accum, work_x, work_z, ay, ayh, ax, axh, by,
-          byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx,
-          shot_numel, pml_y0, pml_y1, pml_x0, pml_x1, ca_batched, cb_batched,
-          grad_ey, grad_curl, step_ratio);
+          curl_store_1 + store_offset;
+      coeff_grad<TIDE_DTYPE>(
+          lambda_ey, grad_ey ? ey_store_1_t : NULL,
+          grad_curl ? curl_store_1_t : NULL, grad_ca_accum, grad_cb_accum,
+          n_shots, ny, nx, shot_numel, grad_ey, grad_curl, step_ratio);
     }
-    born_backward_apply_e_to_h(work_x, work_z, lambda_hx, lambda_hz, ay, ayh,
-                               ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh,
-                               rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0,
-                               pml_y1, pml_x0, pml_x1);
-    born_backward_prepare_h(cq, lambda_hx, lambda_hz, m_lambda_ey_x,
-                            m_lambda_ey_z, work_x, work_z, ay, ayh, ax, axh,
-                            by, byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx,
-                            n_shots, ny, nx, shot_numel, pml_y0, pml_y1,
-                            pml_x0, pml_x1, cq_batched);
-    born_backward_apply_h_to_e(work_x, work_z, lambda_ey, ay, ayh, ax, axh, by,
-                               byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx,
-                               n_shots, ny, nx, shot_numel, pml_y0, pml_y1,
-                               pml_x0, pml_x1);
   }
 
   if (reduce_grad_ca) {
@@ -2521,8 +2164,6 @@ extern "C"
       fclose(fp_curl[shot]);
     free(fp_curl);
   }
-  free(work_x);
-  free(work_z);
 #ifdef _OPENMP
   if (n_threads > 0) {
     omp_set_num_threads(prev_threads);

@@ -7,17 +7,15 @@
  *
  * TM mode fields: Ey (electric), Hx, Hz (magnetic)
  *
- * Adjoint State Method for Maxwell TM equations:
- * ================================================
+ * Coefficient-gradient imaging for Maxwell TM equations:
+ * ======================================================
  * Forward equations (discrete):
  *   E_y^{n+1} = C_a * E_y^n + C_b * (∂H_z/∂x - ∂H_x/∂z)
  *   H_x^{n+1/2} = H_x^{n-1/2} - C_q * ∂E_y/∂z
  *   H_z^{n+1/2} = H_z^{n-1/2} + C_q * ∂E_y/∂x
  *
- * Adjoint equations (time-reversed):
- *   λ_Ey^n = C_a * λ_Ey^{n+1} + C_q * (∂λ_Hz/∂x - ∂λ_Hx/∂z) +
- * residual_injection λ_Hx^{n-1/2} = λ_Hx^{n+1/2} - C_b * ∂λ_Ey/∂z λ_Hz^{n-1/2}
- * = λ_Hz^{n+1/2} + C_b * ∂λ_Ey/∂x
+ * Backward propagation uses the same time-stepping kernels as forward
+ * propagation and images the stored forward fields against lambda fields.
  *
  * Model gradients:
  *   ∂J/∂C_a = Σ_n E_y^n * λ_Ey^{n+1}
@@ -50,11 +48,6 @@
 
 static inline int64_t tide_idx_2d(int64_t y, int64_t x, int64_t nx) {
   return y * nx + x;
-}
-
-static inline int64_t tide_idx_2d_shot(int64_t shot, int64_t y, int64_t x,
-                                       int64_t shot_numel, int64_t nx) {
-  return shot * shot_numel + tide_idx_2d(y, x, nx);
 }
 
 template <typename T> static inline T tide_max(T a, T b) {

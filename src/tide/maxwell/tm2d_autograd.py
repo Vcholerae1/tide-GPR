@@ -614,7 +614,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         device = ca.device
         coeff_dtype = ca.dtype
         scale_ctx = ctx.scale_ctx
-        variant = ""
 
         rdy = ctx.rdy
         rdx = ctx.rdx
@@ -724,7 +723,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             accuracy,
             coeff_dtype,
             ctx.backend_device,
-            variant=variant,
         )
         effective_callback_freq = (
             nt // step_ratio if backward_callback is None else callback_frequency

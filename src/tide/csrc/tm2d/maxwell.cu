@@ -7,17 +7,15 @@
  *
  * TM mode fields: Ey (electric), Hx, Hz (magnetic)
  *
- * EXACT DISCRETE Adjoint State Method for Maxwell TM equations:
- * =============================================================
+ * Coefficient-gradient imaging for Maxwell TM equations:
+ * ======================================================
  * Forward equations (discrete):
  *   E_y^{n+1} = C_a * E_y^n + C_b * (D_x[H_z] - D_z[H_x])
  *   H_x^{n+1/2} = H_x^{n-1/2} - C_q * D_z^h[E_y]
  *   H_z^{n+1/2} = H_z^{n-1/2} + C_q * D_x^h[E_y]
  *
- * Exact discrete adjoint equations (time-reversed with transposed operators):
- *   λ_Ey^n = C_a * λ_Ey^{n+1} + C_q * (D_x^{hT}[λ_Hz] - D_z^{hT}[λ_Hx])
- *   λ_Hx^{n-1/2} = λ_Hx^{n+1/2} - C_b * D_z^T[λ_Ey]
- *   λ_Hz^{n-1/2} = λ_Hz^{n+1/2} + C_b * D_x^T[λ_Ey]
+ * Backward propagation uses the same time-stepping kernels as forward
+ * propagation and images the stored forward fields against lambda fields.
  *
  * Model gradients:
  *   ∂J/∂C_a = Σ_n E_y^n * λ_Ey^{n+1}
@@ -58,19 +56,14 @@
 
 namespace {
 
-TIDE_HOST_DEVICE int64_t tide_nd_index(int64_t base, int64_t dy, int64_t dx,
-                                       int64_t nx) {
-  return base + dy * nx + dx;
-}
-
-TIDE_HOST_DEVICE int64_t tide_nd_index_j(int64_t base, int64_t dy, int64_t dx,
-                                         int64_t nx) {
-  return base + dy * nx + dx;
-}
-
 template <typename T>
 TIDE_HOST_DEVICE T tide_max(T a, T b) {
   return a > b ? a : b;
+}
+
+template <typename T>
+TIDE_HOST_DEVICE T tide_min(T a, T b) {
+  return a < b ? a : b;
 }
 
 // Device constants

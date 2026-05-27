@@ -263,7 +263,7 @@ def maxwell3d_hvp(
         Hv = grad_m <dPhi/dd, Jv>
 
     The native path (`python_backend=False`) uses the native 3D Maxwell and
-    Born forward/backward paths on CPU.
+    Born forward/backward paths.
     """
     _validate_optional_bool("python_backend", python_backend)
     _validate_tensor_arg("epsilon", epsilon)
@@ -285,16 +285,16 @@ def maxwell3d_hvp(
     model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
         model_gradient_sampling_interval
     )
-    if model_gradient_sampling_interval > 1:
-        raise NotImplementedError(
-            "3D HVP currently requires model_gradient_sampling_interval in {0, 1}."
-        )
-
     misfit_fn = _default_receiver_misfit if misfit is None else misfit
     if not callable(misfit_fn):
         raise TypeError("misfit must be callable when provided.")
 
     if python_backend:
+        if model_gradient_sampling_interval > 1:
+            raise NotImplementedError(
+                "Python 3D HVP currently requires "
+                "model_gradient_sampling_interval in {0, 1}."
+            )
         from .maxwell3d_born_autograd import maxwell3d_receiver_hvp_naive
 
         return maxwell3d_receiver_hvp_naive(

@@ -563,3 +563,82 @@ def test_maxwell3d_hvp_native_module_matches_functional_cpu():
 
     for module_out, func_out in zip(module_hvp, func_hvp):
         torch.testing.assert_close(module_out, func_out)
+
+
+@pytest.mark.skipif(
+    not backend_utils.is_backend_available() or not torch.cuda.is_available(),
+    reason="native cuda backend not available",
+)
+def test_maxwell3d_hvp_native_cuda_supports_gradient_sampling_interval():
+    device = torch.device("cuda")
+    case = _build_3d_case(device)
+
+    model = tide.Maxwell3D(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        grid_spacing=case["grid_spacing"],
+    )
+
+    module_hvp = model.hvp(
+        dt=case["dt"],
+        source_amplitude=case["source_amplitude"],
+        source_location=case["source_location"],
+        receiver_location=case["receiver_location"],
+        observed_data=case["observed_data"],
+        vepsilon=case["depsilon"],
+        vsigma=case["dsigma"],
+        stencil=2,
+        pml_width=1,
+        model_gradient_sampling_interval=2,
+        source_component=case["source_component"],
+        receiver_component=case["receiver_component"],
+        python_backend=False,
+    )
+    func_hvp = tide.maxwell3d_hvp(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        grid_spacing=case["grid_spacing"],
+        dt=case["dt"],
+        source_amplitude=case["source_amplitude"],
+        source_location=case["source_location"],
+        receiver_location=case["receiver_location"],
+        observed_data=case["observed_data"],
+        vepsilon=case["depsilon"],
+        vsigma=case["dsigma"],
+        stencil=2,
+        pml_width=1,
+        model_gradient_sampling_interval=2,
+        source_component=case["source_component"],
+        receiver_component=case["receiver_component"],
+        python_backend=False,
+    )
+    baseline_hvp = tide.maxwell3d_hvp(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        grid_spacing=case["grid_spacing"],
+        dt=case["dt"],
+        source_amplitude=case["source_amplitude"],
+        source_location=case["source_location"],
+        receiver_location=case["receiver_location"],
+        observed_data=case["observed_data"],
+        vepsilon=case["depsilon"],
+        vsigma=case["dsigma"],
+        stencil=2,
+        pml_width=1,
+        model_gradient_sampling_interval=1,
+        source_component=case["source_component"],
+        receiver_component=case["receiver_component"],
+        python_backend=False,
+    )
+
+    for module_out, func_out in zip(module_hvp, func_hvp):
+        torch.testing.assert_close(module_out, func_out)
+        assert torch.isfinite(module_out).all()
+
+    assert any(
+        not torch.allclose(sampled_out, baseline_out)
+        for sampled_out, baseline_out in zip(func_hvp, baseline_hvp)
+    )

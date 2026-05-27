@@ -38,6 +38,7 @@ classifiers = [
     "Operating System :: MacOS",
 ]
 dependencies = [
+    "matplotlib>=3.10.9",
     "numpy>=2.3.5",
     "scipy>=1.16.3",
     "torch>=2.9.1",

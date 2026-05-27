@@ -137,6 +137,15 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         if device.type == "cpu" and storage_mode_str in {"cpu", "disk"}:
             storage_mode_str = "device"
         storage_mode = storage_mode_to_int(storage_mode_str)
+        eonly_snapshots = (
+            bool(meta.get("experimental_eonly_snapshots", False))
+            and storage_mode == STORAGE_DEVICE
+            and step_ratio == 1
+            and ca_requires_grad
+            and cb_requires_grad
+        )
+        if not eonly_snapshots and execution_backend_id == 1:
+            execution_backend_id = 0
         compute_stream_handle, storage_stream_handle, stream_keepalive = (
             _make_storage_streams(device, storage_mode)
         )
@@ -226,18 +235,48 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             )
             return store_1, store_3, filenames_ptr
 
+        def alloc_final_e_storage(requires_grad_cond: bool):
+            filenames_arr = (char_ptr_type * 0)()
+            backward_storage_filename_arrays.append(filenames_arr)
+            if not requires_grad_cond:
+                return empty_store, empty_store, 0
+            if storage_mode != STORAGE_DEVICE:
+                raise RuntimeError(
+                    "E-only 3D snapshot storage is only supported on device storage."
+                )
+            store_1 = torch.empty(
+                n_shots,
+                nz,
+                ny,
+                nx,
+                device=device,
+                dtype=store_dtype,
+            )
+            return store_1, empty_store, 0
+
         store_ex, store_ex_host, store_ex_filenames_ptr = alloc_storage(ca_requires_grad)
         store_ey, store_ey_host, store_ey_filenames_ptr = alloc_storage(ca_requires_grad)
         store_ez, store_ez_host, store_ez_filenames_ptr = alloc_storage(ca_requires_grad)
-        store_curl_x, store_curl_x_host, store_curl_x_filenames_ptr = alloc_storage(
-            cb_requires_grad
-        )
-        store_curl_y, store_curl_y_host, store_curl_y_filenames_ptr = alloc_storage(
-            cb_requires_grad
-        )
-        store_curl_z, store_curl_z_host, store_curl_z_filenames_ptr = alloc_storage(
-            cb_requires_grad
-        )
+        if eonly_snapshots:
+            store_curl_x, store_curl_x_host, store_curl_x_filenames_ptr = (
+                alloc_final_e_storage(True)
+            )
+            store_curl_y, store_curl_y_host, store_curl_y_filenames_ptr = (
+                alloc_final_e_storage(True)
+            )
+            store_curl_z, store_curl_z_host, store_curl_z_filenames_ptr = (
+                alloc_final_e_storage(True)
+            )
+        else:
+            store_curl_x, store_curl_x_host, store_curl_x_filenames_ptr = alloc_storage(
+                cb_requires_grad
+            )
+            store_curl_y, store_curl_y_host, store_curl_y_filenames_ptr = alloc_storage(
+                cb_requires_grad
+            )
+            store_curl_z, store_curl_z_host, store_curl_z_filenames_ptr = alloc_storage(
+                cb_requires_grad
+            )
 
         forward_func = backend_utils.get_backend_function(
             "maxwell_3d", "forward_with_storage", accuracy, dtype, device
@@ -455,6 +494,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             store_curl_y_host,
             store_curl_z,
             store_curl_z_host,
+            source_amplitudes_scaled,
         )
         ctx.meta = {
             "dt": dt,
@@ -491,6 +531,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             "storage_mode": storage_mode,
             "storage_format": storage_format,
             "stream_keepalive": stream_keepalive,
+            "experimental_eonly_snapshots": eonly_snapshots,
             "ca_batched": ca_batched,
             "cb_batched": cb_batched,
             "cq_batched": cq_batched,
@@ -547,6 +588,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         store_curl_x, store_curl_x_host = saved[29], saved[30]
         store_curl_y, store_curl_y_host = saved[31], saved[32]
         store_curl_z, store_curl_z_host = saved[33], saved[34]
+        source_amplitudes_scaled = saved[35]
 
         meta = ctx.meta
         device = ca.device
@@ -585,6 +627,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         ca_batched = bool(meta.get("ca_batched", False))
         cb_batched = bool(meta.get("cb_batched", False))
         cq_batched = bool(meta.get("cq_batched", False))
+        eonly_snapshots = bool(meta.get("experimental_eonly_snapshots", False))
 
         grad_r = grad_outputs[-1]
         if grad_r is None or grad_r.numel() == 0:
@@ -837,6 +880,26 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                         pml_width=list(pml_width),
                         is_backward=True,
                     )
+                )
+
+        if eonly_snapshots and cb_requires_grad and n_sources > 0:
+            grad_f_view = grad_f.reshape(nt, n_shots, n_sources)
+            source_view = source_amplitudes_scaled.reshape(nt, n_shots, n_sources)
+            cb_flat = cb.reshape(n_shots if cb_batched else 1, nz * ny * nx)
+            if not cb_batched:
+                cb_flat = cb_flat.expand(n_shots, -1)
+            valid_sources = sources_i >= 0
+            source_idx = sources_i.clamp_min(0)
+            cb_at_src = cb_flat.gather(1, source_idx)
+            correction = -(grad_f_view * source_view / cb_at_src[None, :, :])
+            correction = correction.sum(dim=0).masked_fill(~valid_sources, 0)
+            if cb_batched:
+                grad_cb.reshape(n_shots, -1).scatter_add_(1, source_idx, correction)
+            else:
+                grad_cb.reshape(-1).scatter_add_(
+                    0,
+                    source_idx.reshape(-1),
+                    correction.reshape(-1),
                 )
 
         if n_sources > 0:

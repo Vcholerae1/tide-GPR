@@ -1215,10 +1215,6 @@ def maxwell3d_receiver_hvp_native(
     model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
         model_gradient_sampling_interval
     )
-    if model_gradient_sampling_interval not in {0, 1}:
-        raise NotImplementedError(
-            "Native 3D HVP currently requires model_gradient_sampling_interval in {0, 1}."
-        )
     if not backend_utils.is_backend_available():
         raise RuntimeError("Native 3D HVP requires the compiled backend.")
     if epsilon.device.type not in {"cpu", "cuda"}:
@@ -1274,6 +1270,7 @@ def maxwell3d_receiver_hvp_native(
         pml_width=pml_width,
         max_vel=max_vel,
         nt=nt,
+        model_gradient_sampling_interval=model_gradient_sampling_interval,
         linearize_source=linearize_source,
         source_component=source_component,
         receiver_component=receiver_component,

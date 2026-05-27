@@ -1,3 +1,4 @@
+import os
 import warnings
 from collections.abc import Sequence
 
@@ -111,6 +112,10 @@ def maxwell3d_c_cuda(
     functorch_active = torch._C._are_functorch_transforms_active()
     device = epsilon.device
     storage_bytes_per_elem = epsilon.element_size()
+    experimental_eonly_snapshots_requested = (
+        os.environ.get("TIDE_EM3D_EONLY_SNAPSHOT", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
     def _fallback_reason(reason: str):
         fallback_storage_mode = storage_mode
         if str(fallback_storage_mode).lower() in {"cpu", "disk", "auto"}:
@@ -255,7 +260,15 @@ def maxwell3d_c_cuda(
                 ) // gradient_sampling_interval
                 shot_numel_est = model_nz * model_ny * model_nx
                 shot_bytes_uncomp_est = shot_numel_est * storage_bytes_per_elem
-                total_bytes = n_stored * n_shots * shot_bytes_uncomp_est * 6
+                snapshot_components = 6
+                if (
+                    experimental_eonly_snapshots_requested
+                    and gradient_sampling_interval == 1
+                ):
+                    snapshot_components = 3 * n_stored + 3
+                else:
+                    snapshot_components *= n_stored
+                total_bytes = n_shots * shot_bytes_uncomp_est * snapshot_components
                 limit_device = (
                     storage_bytes_limit_device
                     if storage_bytes_limit_device is not None
@@ -503,6 +516,17 @@ def maxwell3d_c_cuda(
 
     source_component_idx = _COMPONENT_TO_INDEX_3D[source_component]
     receiver_component_idx = _COMPONENT_TO_INDEX_3D[receiver_component]
+    experimental_eonly_snapshots = (
+        experimental_eonly_snapshots_requested
+        and requires_grad
+        and device.type == "cuda"
+        and effective_storage_mode_str == "device"
+        and gradient_sampling_interval == 1
+        and forward_callback is None
+        and backward_callback is None
+    )
+    if experimental_eonly_snapshots:
+        execution_backend_id = 1
     if has_dispersion and requires_grad:
         return _fallback_reason(
             "3D Debye C/CUDA path currently supports forward inference only"
@@ -556,6 +580,7 @@ def maxwell3d_c_cuda(
             "storage_path": storage_path,
             "storage_compression": storage_compression,
             "execution_backend_id": execution_backend_id,
+            "experimental_eonly_snapshots": experimental_eonly_snapshots,
             "ca_batched": model_batched,
             "cb_batched": model_batched,
             "cq_batched": model_batched,

@@ -47,5 +47,6 @@ test.md
 !README.md
 !talks/*.html
 
-examples/
+
 .artifacts/
+references/
