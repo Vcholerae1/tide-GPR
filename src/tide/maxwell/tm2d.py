@@ -8,6 +8,16 @@ from ..cfl import cfl_condition
 from ..dispersion import DebyeDispersion
 from ..grid_utils import _normalize_grid_spacing_2d
 from ..resampling import downsample_and_movedim, upsample
+from ..typing import (
+    Field2DLike,
+    Model2D,
+    Model2DLike,
+    ReceiverData,
+    ReceiverLocation2D,
+    SourceLocation2D,
+    WaveletBatch,
+    runtime_typecheck,
+)
 from ..utils import C0, validate_material_inputs
 from ..validation import (
     validate_freq_taper_frac,
@@ -45,11 +55,12 @@ def _default_receiver_misfit(
 class MaxwellTM(torch.nn.Module):
     """2D TM mode Maxwell equations solver using FDTD method."""
 
+    @runtime_typecheck
     def __init__(
         self,
-        epsilon: torch.Tensor,
-        sigma: torch.Tensor,
-        mu: torch.Tensor,
+        epsilon: Model2DLike,
+        sigma: Model2DLike,
+        mu: Model2DLike,
         grid_spacing: float | Sequence[float],
         epsilon_requires_grad: bool | None = None,
         sigma_requires_grad: bool | None = None,
@@ -71,22 +82,23 @@ class MaxwellTM(torch.nn.Module):
         self.register_buffer("mu", mu)
         self.grid_spacing = grid_spacing
 
+    @runtime_typecheck
     def forward(
         self,
         dt: float,
-        source_amplitude: torch.Tensor | None,
-        source_location: torch.Tensor | None,
-        receiver_location: torch.Tensor | None,
+        source_amplitude: WaveletBatch | None,
+        source_location: SourceLocation2D | None,
+        receiver_location: ReceiverLocation2D | None,
         stencil: int = 2,
         pml_width: int | Sequence[int] = 20,
         max_vel: float | None = None,
-        Ey_0: torch.Tensor | None = None,
-        Hx_0: torch.Tensor | None = None,
-        Hz_0: torch.Tensor | None = None,
-        m_Ey_x: torch.Tensor | None = None,
-        m_Ey_z: torch.Tensor | None = None,
-        m_Hx_z: torch.Tensor | None = None,
-        m_Hz_x: torch.Tensor | None = None,
+        Ey_0: Field2DLike | None = None,
+        Hx_0: Field2DLike | None = None,
+        Hz_0: Field2DLike | None = None,
+        m_Ey_x: Field2DLike | None = None,
+        m_Ey_z: Field2DLike | None = None,
+        m_Hx_z: Field2DLike | None = None,
+        m_Hz_x: Field2DLike | None = None,
         nt: int | None = None,
         model_gradient_sampling_interval: int = 1,
         freq_taper_frac: float = 0.0,
@@ -147,16 +159,17 @@ class MaxwellTM(torch.nn.Module):
             dispersion=dispersion,
         )
 
+    @runtime_typecheck
     def hvp(
         self,
         dt: float,
-        source_amplitude: torch.Tensor | None,
-        source_location: torch.Tensor | None,
-        receiver_location: torch.Tensor | None,
-        observed_data: torch.Tensor,
+        source_amplitude: WaveletBatch | None,
+        source_location: SourceLocation2D | None,
+        receiver_location: ReceiverLocation2D | None,
+        observed_data: ReceiverData,
         *,
-        vepsilon: torch.Tensor | None = None,
-        vsigma: torch.Tensor | None = None,
+        vepsilon: Model2D | None = None,
+        vsigma: Model2D | None = None,
         misfit: ReceiverMisfit | None = None,
         stencil: int = 2,
         pml_width: int | Sequence[int] = 20,
@@ -193,19 +206,20 @@ class MaxwellTM(torch.nn.Module):
         )
 
 
+@runtime_typecheck
 def maxwelltm_hvp(
-    epsilon: torch.Tensor,
-    sigma: torch.Tensor,
-    mu: torch.Tensor,
+    epsilon: Model2D,
+    sigma: Model2D,
+    mu: Model2D,
     grid_spacing: float | Sequence[float],
     dt: float,
-    source_amplitude: torch.Tensor | None,
-    source_location: torch.Tensor | None,
-    receiver_location: torch.Tensor | None,
-    observed_data: torch.Tensor,
+    source_amplitude: WaveletBatch | None,
+    source_location: SourceLocation2D | None,
+    receiver_location: ReceiverLocation2D | None,
+    observed_data: ReceiverData,
     *,
-    vepsilon: torch.Tensor | None = None,
-    vsigma: torch.Tensor | None = None,
+    vepsilon: Model2D | None = None,
+    vsigma: Model2D | None = None,
     misfit: ReceiverMisfit | None = None,
     stencil: int = 2,
     pml_width: int | Sequence[int] = 20,
@@ -303,25 +317,26 @@ def maxwelltm_hvp(
     )
 
 
+@runtime_typecheck
 def maxwelltm(
-    epsilon: torch.Tensor,
-    sigma: torch.Tensor,
-    mu: torch.Tensor,
+    epsilon: Model2DLike,
+    sigma: Model2DLike,
+    mu: Model2DLike,
     grid_spacing: float | Sequence[float],
     dt: float,
-    source_amplitude: torch.Tensor | None,
-    source_location: torch.Tensor | None,
-    receiver_location: torch.Tensor | None,
+    source_amplitude: WaveletBatch | None,
+    source_location: SourceLocation2D | None,
+    receiver_location: ReceiverLocation2D | None,
     stencil: int = 2,
     pml_width: int | Sequence[int] = 20,
     max_vel: float | None = None,
-    Ey_0: torch.Tensor | None = None,
-    Hx_0: torch.Tensor | None = None,
-    Hz_0: torch.Tensor | None = None,
-    m_Ey_x: torch.Tensor | None = None,
-    m_Ey_z: torch.Tensor | None = None,
-    m_Hx_z: torch.Tensor | None = None,
-    m_Hz_x: torch.Tensor | None = None,
+    Ey_0: Field2DLike | None = None,
+    Hx_0: Field2DLike | None = None,
+    Hz_0: Field2DLike | None = None,
+    m_Ey_x: Field2DLike | None = None,
+    m_Ey_z: Field2DLike | None = None,
+    m_Hx_z: Field2DLike | None = None,
+    m_Hz_x: Field2DLike | None = None,
     nt: int | None = None,
     model_gradient_sampling_interval: int = 1,
     freq_taper_frac: float = 0.0,
