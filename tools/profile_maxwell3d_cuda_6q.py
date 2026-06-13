@@ -20,7 +20,6 @@ import torch
 
 import tide
 from tide import backend_utils
-from tide.maxwell.compact_pml import build_compact_pml_layout_3d
 
 
 @contextmanager
@@ -278,6 +277,20 @@ def build_case(args: argparse.Namespace, device: torch.device) -> dict[str, Any]
     )
     sigma = torch.full_like(epsilon, args.sigma)
     mu = torch.ones_like(epsilon) * args.mu
+    if args.heterogeneous_model:
+        z = torch.linspace(-1.0, 1.0, args.nz, device=device, dtype=dtype).view(
+            args.nz, 1, 1
+        )
+        y = torch.linspace(-1.0, 1.0, args.ny, device=device, dtype=dtype).view(
+            1, args.ny, 1
+        )
+        x = torch.linspace(-1.0, 1.0, args.nx, device=device, dtype=dtype).view(
+            1, 1, args.nx
+        )
+        epsilon = epsilon * (1.0 + 0.12 * z + 0.08 * y - 0.05 * x)
+        mu = mu * (1.0 + 0.03 * y)
+        if args.sigma != 0.0:
+            sigma = sigma * (1.0 + 0.10 * x)
     if args.model_batched:
         epsilon = epsilon.unsqueeze(0).expand(args.shots, -1, -1, -1).contiguous()
         sigma = sigma.unsqueeze(0).expand(args.shots, -1, -1, -1).contiguous()
@@ -370,7 +383,10 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
     torch.cuda.set_device(device)
     if args.spatial_launch:
         os.environ["TIDE_EM3D_SPATIAL_LAUNCH"] = "1"
+    if args.uniform_coeffs:
+        os.environ["TIDE_EM3D_UNIFORM_COEFFS"] = "1"
     spatial_launch_requested = env_flag_enabled("TIDE_EM3D_SPATIAL_LAUNCH")
+    uniform_coeffs_requested = env_flag_enabled("TIDE_EM3D_UNIFORM_COEFFS")
 
     with nvtx_range("tide_em3d_setup", not args.no_nvtx):
         case = build_case(args, device)
@@ -429,18 +445,6 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
         enable_spatial_3d=spatial_disable_reason is None,
         spatial_disable_reason=spatial_disable_reason,
     )
-    fd_pad = args.stencil // 2
-    fd_pad_list = (fd_pad, fd_pad - 1, fd_pad, fd_pad - 1, fd_pad, fd_pad - 1)
-    pml_width_list = (args.pml,) * 6
-    compact_pml_layout = build_compact_pml_layout_3d(
-        n_shots=args.shots,
-        nz=padded_nz,
-        ny=padded_ny,
-        nx=padded_nx,
-        fd_pad=fd_pad_list,
-        pml_width=pml_width_list,
-    )
-
     result = {
         "operator": "tide.maxwell3d native CUDA forward",
         "device": {
@@ -470,6 +474,7 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "epsilon": args.epsilon,
             "sigma": args.sigma,
             "mu": args.mu,
+            "heterogeneous_model": args.heterogeneous_model,
             "debye": {
                 "enabled": args.debye,
                 "delta_epsilon": args.debye_delta_epsilon if args.debye else None,
@@ -479,8 +484,8 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "receiver_component": args.receiver_component,
             "n_threads_arg": args.n_threads,
             "spatial_launch_requested": spatial_launch_requested,
+            "uniform_coeffs_requested": uniform_coeffs_requested,
             "launch_config_estimate": launch_config,
-            "compact_pml_layout_estimate": compact_pml_layout.as_dict(),
             "expected_forward_kernels_per_step": 4,
         },
         "measurement": {
@@ -537,6 +542,16 @@ def parse_args() -> argparse.Namespace:
         "--spatial-launch",
         action="store_true",
         help="Set TIDE_EM3D_SPATIAL_LAUNCH=1 for experimental 3D cell launch.",
+    )
+    parser.add_argument(
+        "--uniform-coeffs",
+        action="store_true",
+        help="Set TIDE_EM3D_UNIFORM_COEFFS=1 for experimental scalar material coefficient loads.",
+    )
+    parser.add_argument(
+        "--heterogeneous-model",
+        action="store_true",
+        help="Use a deterministic non-uniform epsilon/mu model for performance runs.",
     )
     parser.add_argument("--warmup", type=nonnegative_int, default=2)
     parser.add_argument("--iters", type=positive_int, default=5)

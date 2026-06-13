@@ -856,10 +856,13 @@ extern "C"
         bool const ca_batched, bool const cb_batched, bool const cq_batched,
         int64_t const start_t, int64_t const pml_y0, int64_t const pml_x0,
         int64_t const pml_y1, int64_t const pml_x1, int64_t const n_threads,
-        int64_t const device /* unused for CPU */, void *const compute_stream,
+        int64_t const device /* unused for CPU */,
+        int64_t const execution_backend /* unused for CPU */,
+        void *const compute_stream,
         void *const storage_stream) {
 
   (void)device;
+  (void)execution_backend;
   (void)compute_stream;
   (void)storage_stream;
   (void)dt;
@@ -1966,6 +1969,8 @@ extern "C"
         TIDE_DTYPE *const curl_store_1, void *const curl_store_3,
         char const *const *const curl_filenames, TIDE_DTYPE *const grad_f,
         TIDE_DTYPE *const grad_ca, TIDE_DTYPE *const grad_cb,
+        TIDE_DTYPE *const grad_eps,
+        TIDE_DTYPE *const grad_sigma,
         TIDE_DTYPE *const grad_ca_shot,
         TIDE_DTYPE *const grad_cb_shot,
         TIDE_DTYPE const *const ay, TIDE_DTYPE const *const by,
@@ -1985,12 +1990,17 @@ extern "C"
         bool const ca_batched, bool const cb_batched, bool const cq_batched,
         int64_t const start_t, int64_t const pml_y0, int64_t const pml_x0,
         int64_t const pml_y1, int64_t const pml_x1, int64_t const n_threads,
-        int64_t const device /* unused for CPU */, void *const compute_stream,
+        int64_t const device /* unused for CPU */,
+        int64_t const execution_backend /* unused for CPU */,
+        void *const compute_stream,
         void *const storage_stream) {
 
   (void)device;
+  (void)execution_backend;
   (void)compute_stream;
   (void)storage_stream;
+  (void)grad_eps;
+  (void)grad_sigma;
   (void)ey_store_3;
   (void)curl_store_3;
 #ifdef _OPENMP

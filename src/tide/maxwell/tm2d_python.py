@@ -145,6 +145,7 @@ def maxwell_python(
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
+    execution_backend: str = "standard",
     *,
     validate_material_inputs: bool = True,
 ):
@@ -157,6 +158,10 @@ def maxwell_python(
     del storage_chunk_steps
     del n_threads
     del model_gradient_sampling_interval
+    if str(execution_backend).lower() != "standard":
+        raise NotImplementedError(
+            "TM2D execution_backend variants require python_backend=False."
+        )
 
     assert _update_E_opt is not None, "_update_E_opt must be set by maxwell_func"
     assert _update_H_opt is not None, "_update_H_opt must be set by maxwell_func"

@@ -8,12 +8,17 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <iostream>
 #include <type_traits>
 
 #include <cuda_runtime.h>
 
 #include "common_gpu.h"
 #include "storage_utils.h"
+
+#ifdef TIDE_HAS_REFERENCE_REVOLVE
+#include "revolve.h"
+#endif
 
 #ifndef TIDE_DEVICE
 #define TIDE_DEVICE cuda

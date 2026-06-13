@@ -324,6 +324,48 @@ def test_tm2d_receiver_hvp_native_returns_coeff_hvp_with_pml_cpu():
     _assert_finite_nonzero_hvp(hvp_epsilon_native, hvp_sigma_native)
 
 
+@pytest.mark.skipif(
+    not backend_utils.is_backend_available(), reason="native backend not available"
+)
+def test_tm2d_receiver_hvp_native_uses_maxwell_vjp_not_born_adjoint(monkeypatch):
+    case = _tm2d_native_case_on(torch.device("cpu"))
+    original_get_backend_function = backend_utils.get_backend_function
+
+    def wrapped_get_backend_function(module_name, function_name, *args, **kwargs):
+        if module_name == "maxwell_tm" and function_name in {
+            "born_backward",
+            "born_backward_bggrad",
+        }:
+            def fail_if_called(*_args):
+                raise AssertionError(f"{function_name} should not be used")
+
+            return fail_if_called
+        return original_get_backend_function(module_name, function_name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        backend_utils, "get_backend_function", wrapped_get_backend_function
+    )
+
+    hvp_epsilon_native, hvp_sigma_native = tm2d_receiver_hvp_native(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        vepsilon=case["vepsilon"],
+        vsigma=case["vsigma"],
+        grid_spacing=case["grid_spacing"],
+        dt=case["dt"],
+        source_amplitude=case["source_amplitude"],
+        source_location=case["source_location"],
+        receiver_location=case["receiver_location"],
+        observed_data=case["observed_data"],
+        misfit_fn=_nonlinear_receiver_misfit,
+        pml_width=0,
+        stencil=2,
+    )
+
+    _assert_finite_nonzero_hvp(hvp_epsilon_native, hvp_sigma_native)
+
+
 def test_maxwell3d_receiver_hvp_naive_matches_exact_nested_autodiff():
     dtype = torch.float64
     nz, ny, nx = 5, 6, 7

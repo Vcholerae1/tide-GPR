@@ -1,3 +1,4 @@
+import tempfile
 import warnings
 
 import pytest
@@ -493,7 +494,8 @@ def test_born3d_autograd_samples_saved_gradient_intermediates(monkeypatch):
         },
     )
 
-    store_ex = ctx.saved_tensors[-12]
+    stores_start = 7 + len(profiles) + len(indices)
+    store_ex = ctx.saved_tensors[stores_start]
     assert store_ex.shape == (3, n_shots, nz, ny, nx)
     assert ctx.meta["step_ratio"] == 3
 
@@ -770,6 +772,131 @@ def test_native_born3d_cuda_supports_background_gradients_without_fallback(
         assert torch.isfinite(grad_n).all()
         assert grad_n.norm() > 0
     assert _cosine(grad_native[2], grad_reference[2]) > 0.98
+
+
+@pytest.mark.parametrize("storage_mode", ["cpu", "disk"])
+def test_native_born3d_cuda_host_storage_matches_device_for_perturbation_grad(
+    monkeypatch, storage_mode: str
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for native 3D Born storage tests.")
+    if not backend_utils.is_backend_available():
+        pytest.skip("Native backend is required for native 3D Born storage tests.")
+
+    torch.manual_seed(29)
+    setup = _make_born_3d_setup(torch.device("cuda"), torch.float32)
+    epsilon = setup["epsilon"]
+    mu = setup["mu"]
+    assert isinstance(epsilon, torch.Tensor)
+    assert isinstance(mu, torch.Tensor)
+
+    depsilon_seed = 0.05 * torch.randn_like(epsilon)
+    residual = torch.randn(14, 1, 2, device=epsilon.device, dtype=epsilon.dtype)
+
+    def fail_python_fallback(*_args, **_kwargs):
+        raise AssertionError("native CUDA 3D Born storage used Python fallback")
+
+    def run(mode: str, storage_path: str) -> tuple[torch.Tensor, torch.Tensor]:
+        depsilon = depsilon_seed.clone().detach().requires_grad_(True)
+        pred = tide.born3d(
+            setup["epsilon"],
+            setup["sigma"],
+            mu,
+            grid_spacing=setup["grid_spacing"],
+            dt=setup["dt"],
+            source_amplitude=setup["source_amplitude"],
+            source_location=setup["source_location"],
+            receiver_location=setup["receiver_location"],
+            depsilon=depsilon,
+            pml_width=setup["pml_width"],
+            stencil=setup["stencil"],
+            linearize_source=True,
+            source_component=setup["source_component"],
+            receiver_component=setup["receiver_component"],
+            python_backend=False,
+            storage_mode=mode,
+            storage_path=storage_path,
+        )[-1]
+        grad = torch.autograd.grad(torch.sum(pred * residual), depsilon)[0]
+        return pred.detach().cpu(), grad.detach().cpu()
+
+    with monkeypatch.context() as m, tempfile.TemporaryDirectory() as storage_path:
+        m.setattr(
+            "tide.maxwell.maxwell3d_born_cuda.born3d_python",
+            fail_python_fallback,
+        )
+        pred_device, grad_device = run("device", storage_path)
+        pred_host, grad_host = run(storage_mode, storage_path)
+
+    torch.testing.assert_close(pred_host, pred_device, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(grad_host, grad_device, rtol=2e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize("storage_mode", ["cpu", "disk"])
+def test_native_born3d_cuda_host_storage_matches_device_for_background_grad(
+    monkeypatch, storage_mode: str
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for native 3D Born storage tests.")
+    if not backend_utils.is_backend_available():
+        pytest.skip("Native backend is required for native 3D Born storage tests.")
+
+    torch.manual_seed(31)
+    setup = _make_born_3d_setup(torch.device("cuda"), torch.float32)
+    epsilon = setup["epsilon"]
+    sigma = setup["sigma"]
+    mu = setup["mu"]
+    assert isinstance(epsilon, torch.Tensor)
+    assert isinstance(sigma, torch.Tensor)
+    assert isinstance(mu, torch.Tensor)
+
+    depsilon_seed = 0.05 * torch.randn_like(epsilon)
+    residual = torch.randn(14, 1, 2, device=epsilon.device, dtype=epsilon.dtype)
+
+    def fail_python_fallback(*_args, **_kwargs):
+        raise AssertionError("native CUDA 3D Born bggrad storage used Python fallback")
+
+    def run(
+        mode: str, storage_path: str
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        epsilon_i = epsilon.clone().detach().requires_grad_(True)
+        sigma_i = sigma.clone().detach().requires_grad_(True)
+        depsilon_i = depsilon_seed.clone().detach().requires_grad_(True)
+        pred = tide.born3d(
+            epsilon_i,
+            sigma_i,
+            mu,
+            grid_spacing=setup["grid_spacing"],
+            dt=setup["dt"],
+            source_amplitude=setup["source_amplitude"],
+            source_location=setup["source_location"],
+            receiver_location=setup["receiver_location"],
+            depsilon=depsilon_i,
+            pml_width=setup["pml_width"],
+            stencil=setup["stencil"],
+            linearize_source=True,
+            source_component=setup["source_component"],
+            receiver_component=setup["receiver_component"],
+            python_backend=False,
+            storage_mode=mode,
+            storage_path=storage_path,
+        )[-1]
+        grads = torch.autograd.grad(
+            torch.sum(pred * residual), (epsilon_i, sigma_i, depsilon_i)
+        )
+        return pred.detach().cpu(), tuple(grad.detach().cpu() for grad in grads)
+
+    with monkeypatch.context() as m, tempfile.TemporaryDirectory() as storage_path:
+        m.setattr(
+            "tide.maxwell.maxwell3d_born_cuda.born3d_python",
+            fail_python_fallback,
+        )
+        pred_device, grads_device = run("device", storage_path)
+        pred_host, grads_host = run(storage_mode, storage_path)
+
+    torch.testing.assert_close(pred_host, pred_device, rtol=1e-5, atol=1e-6)
+    for grad_host, grad_device in zip(grads_host, grads_device):
+        torch.testing.assert_close(grad_host, grad_device, rtol=3e-4, atol=2e-5)
 
 
 def test_native_born3d_cuda_matches_python_reference():

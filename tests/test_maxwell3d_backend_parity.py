@@ -76,6 +76,7 @@ def test_maxwell3d_native_cuda_matches_python_without_callback(
         monkeypatch.setenv("TIDE_EM3D_SPATIAL_LAUNCH", "1")
     else:
         monkeypatch.delenv("TIDE_EM3D_SPATIAL_LAUNCH", raising=False)
+    monkeypatch.delenv("TIDE_EM3D_UNIFORM_COEFFS", raising=False)
 
     epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _case(
         device
@@ -112,3 +113,52 @@ def test_maxwell3d_native_cuda_matches_python_without_callback(
     )
 
     torch.testing.assert_close(out_backend[-1], out_py[-1], atol=1e-4, rtol=1e-4)
+
+
+def test_maxwell3d_uniform_coeffs_matches_default_native(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for native 3D CUDA parity test.")
+    if not backend_utils.is_backend_available():
+        pytest.skip("Native backend is required for native 3D CUDA parity test.")
+
+    device = torch.device("cuda")
+    epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _case(
+        device
+    )
+
+    monkeypatch.delenv("TIDE_EM3D_UNIFORM_COEFFS", raising=False)
+    out_default = tide.maxwell3d(
+        epsilon,
+        sigma,
+        mu,
+        grid_spacing=0.02,
+        dt=4e-11,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        pml_width=2,
+        source_component="ey",
+        receiver_component="ey",
+        python_backend=False,
+        n_threads=256,
+    )
+
+    monkeypatch.setenv("TIDE_EM3D_UNIFORM_COEFFS", "1")
+    out_uniform = tide.maxwell3d(
+        epsilon,
+        sigma,
+        mu,
+        grid_spacing=0.02,
+        dt=4e-11,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        pml_width=2,
+        source_component="ey",
+        receiver_component="ey",
+        python_backend=False,
+        n_threads=256,
+    )
+
+    for uniform, default in zip(out_uniform, out_default):
+        torch.testing.assert_close(uniform, default, atol=1e-4, rtol=1e-4)

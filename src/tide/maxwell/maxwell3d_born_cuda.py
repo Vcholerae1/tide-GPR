@@ -3,7 +3,7 @@ from collections.abc import Sequence
 
 import torch
 
-from ..storage import _normalize_storage_compression
+from ..storage import _normalize_storage_compression, _resolve_storage_compression
 from .. import staggered
 from ..grid_utils import _normalize_grid_spacing_3d, _normalize_pml_width_3d
 from ..padding import create_or_pad, zero_interior
@@ -1135,53 +1135,10 @@ def born3d_c_cuda(
     needs_autograd = needs_storage or df.requires_grad
 
     storage_mode_str = str(storage_mode).lower()
-    if storage_mode_str not in {"device", "none"}:
-        warnings.warn(
-            "Native born3d currently supports only storage_mode='device' or 'none'; "
-            "falling back to Python reference path.",
-            RuntimeWarning,
-        )
-        return _to_native_output_layout(
-            born3d_python(
-                epsilon,
-                sigma,
-                mu,
-                depsilon,
-                dsigma,
-                dca,
-                dcb,
-                grid_spacing,
-                dt,
-                source_amplitude,
-                source_location,
-                receiver_location,
-                stencil=stencil,
-                pml_width=pml_width,
-                max_vel=max_vel,
-                dEx_0=dEx_0,
-                dEy_0=dEy_0,
-                dEz_0=dEz_0,
-                dHx_0=dHx_0,
-                dHy_0=dHy_0,
-                dHz_0=dHz_0,
-                dm_hz_y_0=dm_hz_y_0,
-                dm_hy_z_0=dm_hy_z_0,
-                dm_hx_z_0=dm_hx_z_0,
-                dm_hz_x_0=dm_hz_x_0,
-                dm_hy_x_0=dm_hy_x_0,
-                dm_hx_y_0=dm_hx_y_0,
-                dm_ey_z_0=dm_ey_z_0,
-                dm_ez_y_0=dm_ez_y_0,
-                dm_ez_x_0=dm_ez_x_0,
-                dm_ex_z_0=dm_ex_z_0,
-                dm_ex_y_0=dm_ex_y_0,
-                dm_ey_x_0=dm_ey_x_0,
-                nt=nt,
-                parameterization=parameterization,
-                linearize_source=linearize_source,
-                source_component=source_component,
-                receiver_component=receiver_component,
-            )
+    if storage_mode_str not in {"device", "cpu", "disk", "none", "auto"}:
+        raise ValueError(
+            "storage_mode must be 'device', 'cpu', 'disk', 'none', or 'auto', "
+            f"but got {storage_mode!r}"
         )
     if needs_storage and storage_mode_str == "none":
         raise ValueError(
@@ -1193,6 +1150,70 @@ def born3d_c_cuda(
         raise NotImplementedError(
             "Native born3d BF16 snapshot storage is currently supported only on CUDA."
         )
+    _, _, storage_bytes_per_elem, _ = _resolve_storage_compression(
+        storage_compression,
+        dtype,
+        device,
+        context="storage_compression",
+    )
+    effective_storage_mode_str = storage_mode_str
+    if needs_storage:
+        if device.type == "cpu" and effective_storage_mode_str in {
+            "cpu",
+            "disk",
+            "auto",
+        }:
+            effective_storage_mode_str = "device"
+        elif effective_storage_mode_str == "auto":
+            num_steps_stored = (
+                nt_steps + gradient_sampling_interval - 1
+            ) // gradient_sampling_interval
+            snapshot_components = 0
+            if dca_native.requires_grad or background_coeff_requires_grad:
+                snapshot_components += 3
+            if dcb_native.requires_grad or background_coeff_requires_grad:
+                snapshot_components += 3
+            if ca.requires_grad:
+                snapshot_components += 3
+            if cb.requires_grad:
+                snapshot_components += 3
+            total_bytes = (
+                n_shots
+                * padded_nz
+                * padded_ny
+                * padded_nx
+                * storage_bytes_per_elem
+                * num_steps_stored
+                * snapshot_components
+            )
+            limit_device = (
+                storage_bytes_limit_device
+                if storage_bytes_limit_device is not None
+                else float("inf")
+            )
+            limit_host = (
+                storage_bytes_limit_host
+                if storage_bytes_limit_host is not None
+                else float("inf")
+            )
+            if total_bytes <= limit_device:
+                effective_storage_mode_str = "device"
+            elif total_bytes <= limit_host:
+                effective_storage_mode_str = "cpu"
+            else:
+                effective_storage_mode_str = "disk"
+            warnings.warn(
+                f"storage_mode='auto' selected storage_mode='{effective_storage_mode_str}' "
+                f"for estimated storage size {total_bytes / 1e9:.2f} GB.",
+                RuntimeWarning,
+            )
+        if storage_kind == "bf16" and effective_storage_mode_str != "device":
+            raise NotImplementedError(
+                "Native born3d BF16 snapshot storage currently requires "
+                "storage_mode='device'."
+            )
+    elif effective_storage_mode_str == "auto":
+        effective_storage_mode_str = "none"
 
     source_component_idx = _COMPONENT_TO_INDEX_3D[source_component]
     receiver_component_idx = _COMPONENT_TO_INDEX_3D[receiver_component]
@@ -1295,6 +1316,8 @@ def born3d_c_cuda(
             "rdx": 1.0 / dx,
             "backend_device": backend_device,
             "storage_compression": storage_compression,
+            "storage_mode_str": effective_storage_mode_str,
+            "storage_path": storage_path,
         }
         outputs = Born3DForwardFunc.apply(
             dca_native,

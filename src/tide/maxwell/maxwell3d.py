@@ -7,6 +7,16 @@ from ..cfl import cfl_condition
 from ..dispersion import DebyeDispersion
 from ..grid_utils import _normalize_grid_spacing_3d
 from ..resampling import downsample_and_movedim, upsample
+from ..typing import (
+    Field3DLike,
+    Model3D,
+    Model3DLike,
+    ReceiverData,
+    ReceiverLocation3D,
+    SourceLocation3D,
+    WaveletBatch,
+    runtime_typecheck,
+)
 from ..utils import C0, validate_material_inputs
 from ..validation import (
     validate_freq_taper_frac,
@@ -50,11 +60,12 @@ class Maxwell3D(torch.nn.Module):
     and inversion through PyTorch autograd on `(epsilon, sigma)`.
     """
 
+    @runtime_typecheck
     def __init__(
         self,
-        epsilon: torch.Tensor,
-        sigma: torch.Tensor,
-        mu: torch.Tensor,
+        epsilon: Model3DLike,
+        sigma: Model3DLike,
+        mu: Model3DLike,
         grid_spacing: float | Sequence[float],
         epsilon_requires_grad: bool | None = None,
         sigma_requires_grad: bool | None = None,
@@ -75,33 +86,34 @@ class Maxwell3D(torch.nn.Module):
         self.register_buffer("mu", mu)
         self.grid_spacing = grid_spacing
 
+    @runtime_typecheck
     def forward(
         self,
         dt: float,
-        source_amplitude: torch.Tensor | None,
-        source_location: torch.Tensor | None,
-        receiver_location: torch.Tensor | None,
+        source_amplitude: WaveletBatch | None,
+        source_location: SourceLocation3D | None,
+        receiver_location: ReceiverLocation3D | None,
         stencil: int = 2,
         pml_width: int | Sequence[int] = 20,
         max_vel: float | None = None,
-        Ex_0: torch.Tensor | None = None,
-        Ey_0: torch.Tensor | None = None,
-        Ez_0: torch.Tensor | None = None,
-        Hx_0: torch.Tensor | None = None,
-        Hy_0: torch.Tensor | None = None,
-        Hz_0: torch.Tensor | None = None,
-        m_hz_y: torch.Tensor | None = None,
-        m_hy_z: torch.Tensor | None = None,
-        m_hx_z: torch.Tensor | None = None,
-        m_hz_x: torch.Tensor | None = None,
-        m_hy_x: torch.Tensor | None = None,
-        m_hx_y: torch.Tensor | None = None,
-        m_ey_z: torch.Tensor | None = None,
-        m_ez_y: torch.Tensor | None = None,
-        m_ez_x: torch.Tensor | None = None,
-        m_ex_z: torch.Tensor | None = None,
-        m_ex_y: torch.Tensor | None = None,
-        m_ey_x: torch.Tensor | None = None,
+        Ex_0: Field3DLike | None = None,
+        Ey_0: Field3DLike | None = None,
+        Ez_0: Field3DLike | None = None,
+        Hx_0: Field3DLike | None = None,
+        Hy_0: Field3DLike | None = None,
+        Hz_0: Field3DLike | None = None,
+        m_hz_y: Field3DLike | None = None,
+        m_hy_z: Field3DLike | None = None,
+        m_hx_z: Field3DLike | None = None,
+        m_hz_x: Field3DLike | None = None,
+        m_hy_x: Field3DLike | None = None,
+        m_hx_y: Field3DLike | None = None,
+        m_ey_z: Field3DLike | None = None,
+        m_ez_y: Field3DLike | None = None,
+        m_ez_x: Field3DLike | None = None,
+        m_ex_z: Field3DLike | None = None,
+        m_ex_y: Field3DLike | None = None,
+        m_ey_x: Field3DLike | None = None,
         nt: int | None = None,
         model_gradient_sampling_interval: int = 1,
         freq_taper_frac: float = 0.0,
@@ -180,16 +192,17 @@ class Maxwell3D(torch.nn.Module):
             dispersion=dispersion,
         )
 
+    @runtime_typecheck
     def hvp(
         self,
         dt: float,
-        source_amplitude: torch.Tensor | None,
-        source_location: torch.Tensor | None,
-        receiver_location: torch.Tensor | None,
-        observed_data: torch.Tensor,
+        source_amplitude: WaveletBatch | None,
+        source_location: SourceLocation3D | None,
+        receiver_location: ReceiverLocation3D | None,
+        observed_data: ReceiverData,
         *,
-        vepsilon: torch.Tensor | None = None,
-        vsigma: torch.Tensor | None = None,
+        vepsilon: Model3D | None = None,
+        vsigma: Model3D | None = None,
         misfit: ReceiverMisfit | None = None,
         stencil: int = 2,
         pml_width: int | Sequence[int] = 20,
@@ -230,19 +243,20 @@ class Maxwell3D(torch.nn.Module):
         )
 
 
+@runtime_typecheck
 def maxwell3d_hvp(
-    epsilon: torch.Tensor,
-    sigma: torch.Tensor,
-    mu: torch.Tensor,
+    epsilon: Model3D,
+    sigma: Model3D,
+    mu: Model3D,
     grid_spacing: float | Sequence[float],
     dt: float,
-    source_amplitude: torch.Tensor | None,
-    source_location: torch.Tensor | None,
-    receiver_location: torch.Tensor | None,
-    observed_data: torch.Tensor,
+    source_amplitude: WaveletBatch | None,
+    source_location: SourceLocation3D | None,
+    receiver_location: ReceiverLocation3D | None,
+    observed_data: ReceiverData,
     *,
-    vepsilon: torch.Tensor | None = None,
-    vsigma: torch.Tensor | None = None,
+    vepsilon: Model3D | None = None,
+    vsigma: Model3D | None = None,
     misfit: ReceiverMisfit | None = None,
     stencil: int = 2,
     pml_width: int | Sequence[int] = 20,
@@ -346,36 +360,37 @@ def maxwell3d_hvp(
     )
 
 
+@runtime_typecheck
 def maxwell3d(
-    epsilon: torch.Tensor,
-    sigma: torch.Tensor,
-    mu: torch.Tensor,
+    epsilon: Model3DLike,
+    sigma: Model3DLike,
+    mu: Model3DLike,
     grid_spacing: float | Sequence[float],
     dt: float,
-    source_amplitude: torch.Tensor | None,
-    source_location: torch.Tensor | None,
-    receiver_location: torch.Tensor | None,
+    source_amplitude: WaveletBatch | None,
+    source_location: SourceLocation3D | None,
+    receiver_location: ReceiverLocation3D | None,
     stencil: int = 2,
     pml_width: int | Sequence[int] = 20,
     max_vel: float | None = None,
-    Ex_0: torch.Tensor | None = None,
-    Ey_0: torch.Tensor | None = None,
-    Ez_0: torch.Tensor | None = None,
-    Hx_0: torch.Tensor | None = None,
-    Hy_0: torch.Tensor | None = None,
-    Hz_0: torch.Tensor | None = None,
-    m_hz_y: torch.Tensor | None = None,
-    m_hy_z: torch.Tensor | None = None,
-    m_hx_z: torch.Tensor | None = None,
-    m_hz_x: torch.Tensor | None = None,
-    m_hy_x: torch.Tensor | None = None,
-    m_hx_y: torch.Tensor | None = None,
-    m_ey_z: torch.Tensor | None = None,
-    m_ez_y: torch.Tensor | None = None,
-    m_ez_x: torch.Tensor | None = None,
-    m_ex_z: torch.Tensor | None = None,
-    m_ex_y: torch.Tensor | None = None,
-    m_ey_x: torch.Tensor | None = None,
+    Ex_0: Field3DLike | None = None,
+    Ey_0: Field3DLike | None = None,
+    Ez_0: Field3DLike | None = None,
+    Hx_0: Field3DLike | None = None,
+    Hy_0: Field3DLike | None = None,
+    Hz_0: Field3DLike | None = None,
+    m_hz_y: Field3DLike | None = None,
+    m_hy_z: Field3DLike | None = None,
+    m_hx_z: Field3DLike | None = None,
+    m_hz_x: Field3DLike | None = None,
+    m_hy_x: Field3DLike | None = None,
+    m_hx_y: Field3DLike | None = None,
+    m_ey_z: Field3DLike | None = None,
+    m_ez_y: Field3DLike | None = None,
+    m_ez_x: Field3DLike | None = None,
+    m_ex_z: Field3DLike | None = None,
+    m_ex_y: Field3DLike | None = None,
+    m_ey_x: Field3DLike | None = None,
     nt: int | None = None,
     model_gradient_sampling_interval: int = 1,
     freq_taper_frac: float = 0.0,
@@ -496,9 +511,18 @@ def maxwell3d(
         receiver_component, name="receiver_component"
     )
     execution_backend = str(execution_backend).lower()
-    if execution_backend != "standard":
+    if execution_backend not in {
+        "standard",
+        "eonly_snapshot",
+        "direct_material_grad",
+        "checkpoint_recompute",
+        "checkpoint_revolve",
+    }:
         raise ValueError(
-            f"execution_backend must be 'standard', but got {execution_backend!r}"
+            "execution_backend must be 'standard', 'eonly_snapshot', or "
+            "'direct_material_grad', 'checkpoint_recompute', or "
+            "'checkpoint_revolve', "
+            f"but got {execution_backend!r}"
         )
 
     _validate_location_bounds(
@@ -549,6 +573,10 @@ def maxwell3d(
     else:
         raise TypeError(
             f"python_backend must be bool or str, but got {type(python_backend).__name__}"
+        )
+    if use_python and execution_backend != "standard":
+        raise ValueError(
+            f"execution_backend={execution_backend!r} requires python_backend=False."
         )
 
     if batch_meta["model_batched"] and use_python:

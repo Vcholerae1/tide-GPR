@@ -16,12 +16,6 @@
 #undef DIFFYH1
 #undef DIFFXH1
 #undef FD_PAD
-#undef DIFFZ1_ADJ
-#undef DIFFY1_ADJ
-#undef DIFFX1_ADJ
-#undef DIFFZH1_ADJ
-#undef DIFFYH1_ADJ
-#undef DIFFXH1_ADJ
 
 #ifdef STAGGERED_GRID_H
 #undef STAGGERED_GRID_H
@@ -497,6 +491,10 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(forward)(
     TIDE_DTYPE const *__restrict const kxh,
     int64_t const *__restrict const sources_i,
     int64_t const *__restrict const receivers_i,
+    bool const uniform_coeffs,
+    TIDE_DTYPE const ca_uniform,
+    TIDE_DTYPE const cb_uniform,
+    TIDE_DTYPE const cq_uniform,
     TIDE_DTYPE const rdz,
     TIDE_DTYPE const rdy,
     TIDE_DTYPE const rdx,
@@ -531,6 +529,10 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(forward)(
   (void)device;
   (void)execution_backend;
   (void)compute_stream_handle;
+  (void)uniform_coeffs;
+  (void)ca_uniform;
+  (void)cb_uniform;
+  (void)cq_uniform;
 
 #ifdef _OPENMP
   int const prev_threads = omp_get_max_threads();
@@ -2255,8 +2257,9 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(backward)(
         m_lambda_ez_y, m_lambda_ez_x, m_lambda_ex_z, m_lambda_ex_y,
         m_lambda_ey_x, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
         NULL, 0, az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh, kz,
-        kzh, ky, kyh, kx, kxh, NULL, NULL, rdz, rdy, rdx, dt, 1, n_shots, nz,
-        ny, nx, 0, 0, step_ratio_eff, false, ca_batched, cb_batched,
+        kzh, ky, kyh, kx, kxh, NULL, NULL, false, (TIDE_DTYPE)0, (TIDE_DTYPE)0, (TIDE_DTYPE)0, rdz, rdy, rdx,
+        dt, 1, n_shots, nz, ny, nx, 0, 0, step_ratio_eff, false, ca_batched,
+        cb_batched,
         cq_batched, t, pml_z0, pml_y0, pml_x0, pml_z1, pml_y1, pml_x1,
         source_component, receiver_component, n_threads, device,
         execution_backend, compute_stream_handle);
@@ -2591,14 +2594,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(born_backward_bggrad)(
     lambda_recv_field = lambda_ez;
   }
 
-  int64_t const pml_z0h = pml_z0;
-  int64_t const pml_z1h = tide_max(pml_z0, pml_z1 - 1);
-  int64_t const pml_y0h = pml_y0;
-  int64_t const pml_y1h = tide_max(pml_y0, pml_y1 - 1);
-  int64_t const pml_x0h = pml_x0;
-  int64_t const pml_x1h = tide_max(pml_x0, pml_x1 - 1);
-
-  for (int64_t t = start_t - 1; t >= start_t - nt; --t) {
+	  for (int64_t t = start_t - 1; t >= start_t - nt; --t) {
     bool const do_grad = (t % step_ratio_eff) == 0;
     bool const grad_ca_step =
         do_grad && ca_requires_grad && store_1 != NULL && store_3 != NULL &&
@@ -2654,8 +2650,9 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(born_backward_bggrad)(
         m_lambda_ez_y, m_lambda_ez_x, m_lambda_ex_z, m_lambda_ex_y,
         m_lambda_ey_x, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
         NULL, 0, az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh, kz,
-        kzh, ky, kyh, kx, kxh, NULL, NULL, rdz, rdy, rdx, dt, 1, n_shots, nz,
-        ny, nx, 0, 0, step_ratio_eff, false, ca_batched, cb_batched,
+        kzh, ky, kyh, kx, kxh, NULL, NULL, false, (TIDE_DTYPE)0, (TIDE_DTYPE)0, (TIDE_DTYPE)0, rdz, rdy, rdx,
+        dt, 1, n_shots, nz, ny, nx, 0, 0, step_ratio_eff, false, ca_batched,
+        cb_batched,
         cq_batched, t, pml_z0, pml_y0, pml_x0, pml_z1, pml_y1, pml_x1,
         source_component, receiver_component, n_threads, device,
         execution_backend, compute_stream_handle);
@@ -2665,8 +2662,10 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(born_backward_bggrad)(
         m_eta_hx_y, m_eta_ey_z, m_eta_ez_y, m_eta_ez_x, m_eta_ex_z,
         m_eta_ex_y, m_eta_ey_x, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
         NULL, NULL, NULL, 0, az, bz, azh, bzh, ay, by, ayh, byh, ax, bx,
-        axh, bxh, kz, kzh, ky, kyh, kx, kxh, NULL, NULL, rdz, rdy, rdx, dt,
-        1, n_shots, nz, ny, nx, 0, 0, step_ratio_eff, false, ca_batched,
+        axh, bxh, kz, kzh, ky, kyh, kx, kxh, NULL, NULL, false,
+        (TIDE_DTYPE)0, (TIDE_DTYPE)0, (TIDE_DTYPE)0,
+        rdz, rdy, rdx, dt, 1, n_shots, nz, ny, nx, 0, 0, step_ratio_eff,
+        false, ca_batched,
         cb_batched, cq_batched, t, pml_z0, pml_y0, pml_x0, pml_z1, pml_y1,
         pml_x1, source_component, receiver_component, n_threads, device,
         execution_backend, compute_stream_handle);
@@ -2690,10 +2689,40 @@ TIDE_OMP_PARALLEL_FOR
               TIDE_DTYPE const lex_curr = LAMBDA_EX(0, 0, 0);
               TIDE_DTYPE const ley_curr = LAMBDA_EY(0, 0, 0);
               TIDE_DTYPE const lez_curr = LAMBDA_EZ(0, 0, 0);
+              TIDE_DTYPE const dca_val = DCA_AT(0, 0, 0);
+              TIDE_DTYPE const dcb_val = DCB_AT(0, 0, 0);
 
-              eta_source_ex[idx_shot] = DCA_AT(0, 0, 0) * lex_curr;
-              eta_source_ey[idx_shot] = DCA_AT(0, 0, 0) * ley_curr;
-              eta_source_ez[idx_shot] = DCA_AT(0, 0, 0) * lez_curr;
+              bool const pml_z = (z < pml_z0) || (z >= pml_z1);
+              bool const pml_y = (y < pml_y0) || (y >= pml_y1);
+              bool const pml_x = (x < pml_x0) || (x >= pml_x1);
+
+              TIDE_DTYPE dHy_dz = DIFFZ1(LAMBDA_HY);
+              TIDE_DTYPE dHz_dy = DIFFY1(LAMBDA_HZ);
+              TIDE_DTYPE dHz_dx = DIFFX1(LAMBDA_HZ);
+              TIDE_DTYPE dHx_dz = DIFFZ1(LAMBDA_HX);
+              TIDE_DTYPE dHx_dy = DIFFY1(LAMBDA_HX);
+              TIDE_DTYPE dHy_dx = DIFFX1(LAMBDA_HY);
+
+              if (pml_z) {
+                dHy_dz = dHy_dz / kz[z] + M_LAMBDA_HY_Z(0, 0, 0);
+                dHx_dz = dHx_dz / kz[z] + M_LAMBDA_HX_Z(0, 0, 0);
+              }
+              if (pml_y) {
+                dHz_dy = dHz_dy / ky[y] + M_LAMBDA_HZ_Y(0, 0, 0);
+                dHx_dy = dHx_dy / ky[y] + M_LAMBDA_HX_Y(0, 0, 0);
+              }
+              if (pml_x) {
+                dHz_dx = dHz_dx / kx[x] + M_LAMBDA_HZ_X(0, 0, 0);
+                dHy_dx = dHy_dx / kx[x] + M_LAMBDA_HY_X(0, 0, 0);
+              }
+
+              TIDE_DTYPE const curl_x = dHy_dz - dHz_dy;
+              TIDE_DTYPE const curl_y = dHz_dx - dHx_dz;
+              TIDE_DTYPE const curl_z = dHx_dy - dHy_dx;
+
+              eta_source_ex[idx_shot] = dca_val * lex_curr + dcb_val * curl_x;
+              eta_source_ey[idx_shot] = dca_val * ley_curr + dcb_val * curl_y;
+              eta_source_ez[idx_shot] = dca_val * lez_curr + dcb_val * curl_z;
 
               if (direct_ca_step) {
                 TIDE_DTYPE const acc_ca =
@@ -2725,67 +2754,6 @@ TIDE_OMP_PARALLEL_FOR
                   grad_cb[idx] += acc_cb * (TIDE_DTYPE)step_ratio_eff;
                 }
               }
-            }
-          }
-        }
-      }
-
-TIDE_OMP_PARALLEL_FOR
-      for (shot_idx = 0; shot_idx < n_shots; ++shot_idx) {
-        for (int64_t z = FD_PAD; z < nz - FD_PAD + 1; ++z) {
-          for (int64_t y = FD_PAD; y < ny - FD_PAD + 1; ++y) {
-            for (int64_t x = FD_PAD; x < nx - FD_PAD + 1; ++x) {
-              bool const pml_z_h = (z < pml_z0h) || (z >= pml_z1h);
-              bool const pml_y_h = (y < pml_y0h) || (y >= pml_y1h);
-              bool const pml_x_h = (x < pml_x0h) || (x >= pml_x1h);
-
-              TIDE_DTYPE dLey_dz = 0;
-              TIDE_DTYPE dLez_dy = 0;
-              TIDE_DTYPE dLez_dx = 0;
-              TIDE_DTYPE dLex_dz = 0;
-              TIDE_DTYPE dLex_dy = 0;
-              TIDE_DTYPE dLey_dx = 0;
-
-              if (z < nz - FD_PAD) {
-                dLey_dz = -DIFFZ1_ADJ(DCB_AT, LAMBDA_EY);
-                if (pml_z_h) {
-                  dLey_dz = dLey_dz / kzh[z] + azh[z] * dLey_dz;
-                }
-              }
-              if (y < ny - FD_PAD) {
-                dLez_dy = -DIFFY1_ADJ(DCB_AT, LAMBDA_EZ);
-                if (pml_y_h) {
-                  dLez_dy = dLez_dy / kyh[y] + ayh[y] * dLez_dy;
-                }
-              }
-              if (x < nx - FD_PAD) {
-                dLez_dx = -DIFFX1_ADJ(DCB_AT, LAMBDA_EZ);
-                if (pml_x_h) {
-                  dLez_dx = dLez_dx / kxh[x] + axh[x] * dLez_dx;
-                }
-              }
-              if (z < nz - FD_PAD) {
-                dLex_dz = -DIFFZ1_ADJ(DCB_AT, LAMBDA_EX);
-                if (pml_z_h) {
-                  dLex_dz = dLex_dz / kzh[z] + azh[z] * dLex_dz;
-                }
-              }
-              if (y < ny - FD_PAD) {
-                dLex_dy = -DIFFY1_ADJ(DCB_AT, LAMBDA_EX);
-                if (pml_y_h) {
-                  dLex_dy = dLex_dy / kyh[y] + ayh[y] * dLex_dy;
-                }
-              }
-              if (x < nx - FD_PAD) {
-                dLey_dx = -DIFFX1_ADJ(DCB_AT, LAMBDA_EY);
-                if (pml_x_h) {
-                  dLey_dx = dLey_dx / kxh[x] + axh[x] * dLey_dx;
-                }
-              }
-
-              ETA_HX(0, 0, 0) += dLey_dz - dLez_dy;
-              ETA_HY(0, 0, 0) += dLez_dx - dLex_dz;
-              ETA_HZ(0, 0, 0) += dLex_dy - dLey_dx;
             }
           }
         }
@@ -3055,8 +3023,9 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(born_backward)(
         m_lambda_ez_y, m_lambda_ez_x, m_lambda_ex_z, m_lambda_ex_y,
         m_lambda_ey_x, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
         NULL, 0, az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh, kz,
-        kzh, ky, kyh, kx, kxh, NULL, NULL, rdz, rdy, rdx, dt, 1, n_shots, nz,
-        ny, nx, 0, 0, step_ratio_eff, false, ca_batched, cb_batched,
+        kzh, ky, kyh, kx, kxh, NULL, NULL, false, (TIDE_DTYPE)0, (TIDE_DTYPE)0, (TIDE_DTYPE)0, rdz, rdy, rdx,
+        dt, 1, n_shots, nz, ny, nx, 0, 0, step_ratio_eff, false, ca_batched,
+        cb_batched,
         cq_batched, t, pml_z0, pml_y0, pml_x0, pml_z1, pml_y1, pml_x1,
         source_component, receiver_component, n_threads, device,
         execution_backend, compute_stream_handle);

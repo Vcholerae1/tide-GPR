@@ -1,3 +1,4 @@
+import os
 import warnings
 from collections.abc import Sequence
 from typing import Any
@@ -58,6 +59,7 @@ def maxwell_c_cuda(
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
+    execution_backend: str = "standard",
 ):
     """Performs Maxwell propagation using the native C/CUDA backend."""
     from .. import backend_utils
@@ -75,6 +77,20 @@ def maxwell_c_cuda(
     original_device = device
     model_batched = epsilon.ndim == 3
     model_ny, model_nx = epsilon.shape[-2:]
+    execution_backend_str = str(execution_backend).lower()
+    if execution_backend_str not in {
+        "standard",
+        "direct_epsilon_grad",
+        "direct_material_grad",
+        "direct_material_endpoint_grad",
+        "direct_material_grad_ecurl",
+    }:
+        raise ValueError(
+            "execution_backend must be 'standard', 'direct_epsilon_grad', "
+            "'direct_material_grad', 'direct_material_endpoint_grad', or "
+            "'direct_material_grad_ecurl', "
+            f"but got {execution_backend!r}."
+        )
 
     backend_device = device
     if device.type not in {"cpu", "cuda"}:
@@ -89,6 +105,10 @@ def maxwell_c_cuda(
             raise ValueError("n_threads must be >= 0 when provided.")
 
     pml_width_list = _normalize_pml_width_2d(pml_width)
+    physical_snapshot_storage_requested = (
+        os.environ.get("TIDE_TM2D_PHYSICAL_SNAPSHOT_STORAGE", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
 
     if nt is None:
         if source_amplitude is None:
@@ -333,6 +353,76 @@ def maxwell_c_cuda(
     pml_x1 = padded_nx - fd_pad_list[3] - pml_width_list[3]
 
     requires_grad = epsilon.requires_grad or sigma.requires_grad
+    direct_epsilon_grad_requested = execution_backend_str == "direct_epsilon_grad"
+    direct_material_grad_requested = execution_backend_str == "direct_material_grad"
+    direct_material_endpoint_requested = (
+        execution_backend_str == "direct_material_endpoint_grad"
+    )
+    direct_material_ecurl_requested = (
+        execution_backend_str == "direct_material_grad_ecurl"
+    )
+    direct_epsilon_grad = direct_epsilon_grad_requested and requires_grad
+    direct_material_grad = direct_material_grad_requested and requires_grad
+    direct_material_endpoint = direct_material_endpoint_requested and requires_grad
+    direct_material_ecurl = direct_material_ecurl_requested and requires_grad
+    if direct_epsilon_grad:
+        if device.type != "cuda":
+            raise NotImplementedError(
+                "execution_backend='direct_epsilon_grad' is CUDA-only."
+            )
+        if model_batched:
+            raise NotImplementedError(
+                "execution_backend='direct_epsilon_grad' does not support batched models yet."
+            )
+        if dispersion is not None:
+            raise NotImplementedError(
+                "execution_backend='direct_epsilon_grad' does not support Debye dispersion."
+            )
+        if not epsilon.requires_grad or sigma.requires_grad:
+            raise NotImplementedError(
+                "execution_backend='direct_epsilon_grad' currently requires "
+                "epsilon.requires_grad=True and sigma.requires_grad=False."
+            )
+        if backward_callback is not None:
+            raise NotImplementedError(
+                "execution_backend='direct_epsilon_grad' does not support backward_callback yet."
+            )
+    if direct_material_grad or direct_material_endpoint or direct_material_ecurl:
+        if device.type != "cuda":
+            raise NotImplementedError(
+                f"execution_backend={execution_backend_str!r} is CUDA-only."
+            )
+        if model_batched:
+            raise NotImplementedError(
+                f"execution_backend={execution_backend_str!r} does not support "
+                "batched models yet."
+            )
+        if dispersion is not None:
+            raise NotImplementedError(
+                f"execution_backend={execution_backend_str!r} does not support "
+                "Debye dispersion."
+            )
+        if direct_material_grad and gradient_sampling_interval != 1:
+            raise NotImplementedError(
+                "execution_backend='direct_material_grad' currently requires "
+                "model_gradient_sampling_interval=1."
+            )
+        if forward_callback is not None or backward_callback is not None:
+            raise NotImplementedError(
+                f"execution_backend={execution_backend_str!r} does not support "
+                "callbacks yet."
+            )
+        if (
+            source_amplitude is not None
+            and isinstance(source_amplitude, torch.Tensor)
+            and source_amplitude.requires_grad
+        ):
+            raise NotImplementedError(
+                f"execution_backend={execution_backend_str!r} currently supports "
+                "model gradients only, not source-amplitude gradients."
+            )
+        if not direct_material_ecurl:
+            f = f.detach()
     if has_dispersion and (requires_grad or (save_snapshots is True)):
         warnings.warn(
             "Debye native backend currently supports forward inference only; "
@@ -375,6 +465,7 @@ def maxwell_c_cuda(
             storage_chunk_steps,
             n_threads,
             dispersion,
+            execution_backend,
             validate_material_inputs=False,
         )
 
@@ -448,6 +539,40 @@ def maxwell_c_cuda(
                 f"for estimated storage size {total_bytes / 1e9:.2f} GB.",
                 RuntimeWarning,
             )
+    if (
+        (
+            direct_epsilon_grad
+            or direct_material_grad
+            or direct_material_endpoint
+            or direct_material_ecurl
+        )
+        and effective_storage_mode_str != "device"
+    ):
+        raise NotImplementedError(
+            f"execution_backend={execution_backend_str!r} currently supports only "
+            "storage_mode='device'."
+        )
+    if (
+        physical_snapshot_storage_requested
+        and not (
+            requires_grad
+            and do_save_snapshots
+            and device.type == "cuda"
+            and effective_storage_mode_str == "device"
+            and not direct_epsilon_grad
+            and not direct_material_grad
+            and not direct_material_endpoint
+            and not direct_material_ecurl
+            and forward_callback is None
+            and backward_callback is None
+        )
+    ):
+        warnings.warn(
+            "TIDE_TM2D_PHYSICAL_SNAPSHOT_STORAGE=1 requires standard CUDA "
+            "gradients, storage_mode='device', and no callbacks; using full-domain "
+            "snapshot storage.",
+            RuntimeWarning,
+        )
 
     callback_models = {
         "epsilon": epsilon_padded,
@@ -461,10 +586,31 @@ def maxwell_c_cuda(
         callback_models["dispersion"] = dispersion
 
     if requires_grad and do_save_snapshots:
+        direct_model_grad = (
+            direct_epsilon_grad
+            or direct_material_grad
+            or direct_material_endpoint
+            or direct_material_ecurl
+        )
+        ca_arg = ca.detach() if direct_model_grad else ca
+        cb_arg = cb.detach() if direct_model_grad else cb
+        cq_arg = cq.detach() if direct_model_grad else cq
+        epsilon_direct = (
+            epsilon_padded
+            if direct_model_grad
+            else torch.empty(0, device=device, dtype=dtype)
+        )
+        sigma_direct = (
+            sigma_padded
+            if direct_material_grad
+            or direct_material_endpoint
+            or direct_material_ecurl
+            else torch.empty(0, device=device, dtype=dtype)
+        )
         result = MaxwellTMForwardFunc.apply(
-            ca,
-            cb,
-            cq,
+            ca_arg,
+            cb_arg,
+            cq_arg,
             f,
             ay_flat,
             by_flat,
@@ -518,6 +664,17 @@ def maxwell_c_cuda(
             m_Hz_x,
             n_threads_val,
             backend_device,
+            3
+            if direct_material_endpoint
+            else 4
+            if direct_material_ecurl
+            else 2
+            if direct_material_grad
+            else 1
+            if direct_epsilon_grad
+            else 0,
+            epsilon_direct,
+            sigma_direct,
         )
         if len(result) == 9:
             (

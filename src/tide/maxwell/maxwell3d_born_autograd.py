@@ -3,7 +3,16 @@ from typing import Any
 
 import torch
 
-from ..storage import STORAGE_DEVICE, STORAGE_NONE, _resolve_storage_compression
+from ..storage import (
+    _CPU_STORAGE_BUFFERS,
+    STORAGE_CPU,
+    STORAGE_DEVICE,
+    STORAGE_DISK,
+    STORAGE_NONE,
+    TemporaryStorage,
+    _resolve_storage_compression,
+    storage_mode_to_int,
+)
 from ..validation import validate_model_gradient_sampling_interval
 from .common import (
     ReceiverMisfit,
@@ -151,8 +160,20 @@ class Born3DForwardFunc(torch.autograd.Function):
             device.index if device.type == "cuda" and device.index is not None else 0
         )
 
+        backward_storage_objects: list[Any] = []
+        backward_storage_filename_arrays: list[Any] = []
+        backward_storage_filename_buffers: list[Any] = []
+        storage_mode = STORAGE_NONE
+        storage_format = 0
+        shot_bytes_uncomp = 0
+
         if needs_storage:
-            storage_mode = STORAGE_DEVICE
+            import ctypes
+
+            storage_mode_str = str(meta.get("storage_mode_str", "device")).lower()
+            if device.type == "cpu" and storage_mode_str in {"cpu", "disk"}:
+                storage_mode_str = "device"
+            storage_mode = storage_mode_to_int(storage_mode_str)
             _, store_dtype, _, storage_format = _resolve_storage_compression(
                 meta.get("storage_compression", False),
                 dtype,
@@ -163,27 +184,115 @@ class Born3DForwardFunc(torch.autograd.Function):
                 raise NotImplementedError(
                     "3D Born BF16 snapshot storage is currently supported only on CUDA."
                 )
+            if storage_format != 0 and storage_mode != STORAGE_DEVICE:
+                raise NotImplementedError(
+                    "3D Born BF16 snapshot storage is currently supported only with "
+                    "storage_mode='device'."
+                )
             shot_bytes_uncomp = nz * ny * nx * store_dtype.itemsize
             num_steps_stored = (nt + step_ratio - 1) // step_ratio
-            compute_stream_handle, storage_stream_handle, stream_keepalive = (
-                _make_storage_streams(device, storage_mode)
-            )
+            if storage_mode in {STORAGE_CPU, STORAGE_DISK}:
+                compute_stream_handle, _, stream_keepalive = _make_storage_streams(
+                    device, STORAGE_NONE
+                )
+                storage_stream_handle = compute_stream_handle
+            else:
+                compute_stream_handle, storage_stream_handle, stream_keepalive = (
+                    _make_storage_streams(device, storage_mode)
+                )
             store_shape = (num_steps_stored, n_shots, nz, ny, nx)
             empty_store = torch.empty(0, device=device, dtype=store_dtype)
-            store_ex = (
-                torch.empty(store_shape, device=device, dtype=store_dtype)
-                if store_e_needed
-                else empty_store
+            empty_host = torch.empty(0, device=device, dtype=store_dtype)
+            char_ptr_type = ctypes.c_char_p
+            is_cuda = device.type == "cuda"
+
+            def alloc_storage(
+                requires_grad_cond: bool,
+            ) -> tuple[torch.Tensor, torch.Tensor, Any]:
+                store_1 = empty_store
+                store_3 = empty_host
+                filenames_arr = (char_ptr_type * 0)()
+                if requires_grad_cond and storage_mode != STORAGE_NONE:
+                    if storage_mode == STORAGE_DEVICE:
+                        store_1 = torch.empty(
+                            store_shape, device=device, dtype=store_dtype
+                        )
+                    elif storage_mode == STORAGE_CPU:
+                        store_1 = torch.empty(
+                            _CPU_STORAGE_BUFFERS,
+                            n_shots,
+                            nz,
+                            ny,
+                            nx,
+                            device=device,
+                            dtype=store_dtype,
+                        )
+                        store_3 = torch.empty(
+                            store_shape,
+                            device="cpu",
+                            pin_memory=True,
+                            dtype=store_dtype,
+                        )
+                    elif storage_mode == STORAGE_DISK:
+                        storage_obj = TemporaryStorage(
+                            meta.get("storage_path", "."), 1 if is_cuda else n_shots
+                        )
+                        backward_storage_objects.append(storage_obj)
+                        filenames_list = [
+                            f.encode("utf-8") for f in storage_obj.get_filenames()
+                        ]
+                        filenames_arr = (char_ptr_type * len(filenames_list))()
+                        for i_file, f_name in enumerate(filenames_list):
+                            filename_buffer = ctypes.create_string_buffer(f_name)
+                            backward_storage_filename_buffers.append(filename_buffer)
+                            filenames_arr[i_file] = ctypes.cast(
+                                filename_buffer, char_ptr_type
+                            )
+                        if is_cuda:
+                            store_1 = torch.empty(
+                                _CPU_STORAGE_BUFFERS,
+                                n_shots,
+                                nz,
+                                ny,
+                                nx,
+                                device=device,
+                                dtype=store_dtype,
+                            )
+                            store_3 = torch.empty(
+                                _CPU_STORAGE_BUFFERS,
+                                n_shots,
+                                nz,
+                                ny,
+                                nx,
+                                device="cpu",
+                                pin_memory=True,
+                                dtype=store_dtype,
+                            )
+                        else:
+                            store_1 = torch.empty(
+                                n_shots, nz, ny, nx, device=device, dtype=store_dtype
+                            )
+
+                backward_storage_filename_arrays.append(filenames_arr)
+                filenames_ptr = (
+                    ctypes.cast(filenames_arr, ctypes.c_void_p)
+                    if storage_mode == STORAGE_DISK
+                    else 0
+                )
+                return store_1, store_3, filenames_ptr
+
+            store_ex, host_store_ex, filenames_ex = alloc_storage(store_e_needed)
+            store_ey, host_store_ey, filenames_ey = alloc_storage(store_e_needed)
+            store_ez, host_store_ez, filenames_ez = alloc_storage(store_e_needed)
+            store_curl_x, host_store_curl_x, filenames_curl_x = alloc_storage(
+                store_curl_needed
             )
-            store_ey = torch.empty_like(store_ex)
-            store_ez = torch.empty_like(store_ex)
-            store_curl_x = (
-                torch.empty(store_shape, device=device, dtype=store_dtype)
-                if store_curl_needed
-                else empty_store
+            store_curl_y, host_store_curl_y, filenames_curl_y = alloc_storage(
+                store_curl_needed
             )
-            store_curl_y = torch.empty_like(store_curl_x)
-            store_curl_z = torch.empty_like(store_curl_x)
+            store_curl_z, host_store_curl_z, filenames_curl_z = alloc_storage(
+                store_curl_needed
+            )
             store_dex = (
                 torch.empty(store_shape, device=device, dtype=store_dtype)
                 if ca_requires_grad
@@ -198,7 +307,6 @@ class Born3DForwardFunc(torch.autograd.Function):
             )
             store_dcurl_y = torch.empty_like(store_dcurl_x)
             store_dcurl_z = torch.empty_like(store_dcurl_x)
-            empty_host = torch.empty(0, device=device, dtype=store_dtype)
 
             forward_func = backend_utils.get_backend_function(
                 "maxwell_3d",
@@ -253,23 +361,23 @@ class Born3DForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(dm_ey_x),
                 backend_utils.tensor_to_ptr(receiver_amplitudes),
                 backend_utils.tensor_to_ptr(store_ex),
-                backend_utils.tensor_to_ptr(empty_host),
-                0,
+                backend_utils.tensor_to_ptr(host_store_ex),
+                filenames_ex,
                 backend_utils.tensor_to_ptr(store_ey),
-                backend_utils.tensor_to_ptr(empty_host),
-                0,
+                backend_utils.tensor_to_ptr(host_store_ey),
+                filenames_ey,
                 backend_utils.tensor_to_ptr(store_ez),
-                backend_utils.tensor_to_ptr(empty_host),
-                0,
+                backend_utils.tensor_to_ptr(host_store_ez),
+                filenames_ez,
                 backend_utils.tensor_to_ptr(store_curl_x),
-                backend_utils.tensor_to_ptr(empty_host),
-                0,
+                backend_utils.tensor_to_ptr(host_store_curl_x),
+                filenames_curl_x,
                 backend_utils.tensor_to_ptr(store_curl_y),
-                backend_utils.tensor_to_ptr(empty_host),
-                0,
+                backend_utils.tensor_to_ptr(host_store_curl_y),
+                filenames_curl_y,
                 backend_utils.tensor_to_ptr(store_curl_z),
-                backend_utils.tensor_to_ptr(empty_host),
-                0,
+                backend_utils.tensor_to_ptr(host_store_curl_z),
+                filenames_curl_z,
                 backend_utils.tensor_to_ptr(store_dex),
                 backend_utils.tensor_to_ptr(store_dey),
                 backend_utils.tensor_to_ptr(store_dez),
@@ -332,18 +440,21 @@ class Born3DForwardFunc(torch.autograd.Function):
                 storage_stream_handle,
             )
         else:
-            storage_mode = STORAGE_NONE
-            storage_format = 0
-            shot_bytes_uncomp = 0
             compute_stream_handle, _, stream_keepalive = _make_storage_streams(
                 device, storage_mode
             )
             store_ex = torch.empty(0, device=device, dtype=dtype)
+            host_store_ex = torch.empty(0, device=device, dtype=dtype)
             store_ey = torch.empty(0, device=device, dtype=dtype)
+            host_store_ey = torch.empty(0, device=device, dtype=dtype)
             store_ez = torch.empty(0, device=device, dtype=dtype)
+            host_store_ez = torch.empty(0, device=device, dtype=dtype)
             store_curl_x = torch.empty(0, device=device, dtype=dtype)
+            host_store_curl_x = torch.empty(0, device=device, dtype=dtype)
             store_curl_y = torch.empty(0, device=device, dtype=dtype)
+            host_store_curl_y = torch.empty(0, device=device, dtype=dtype)
             store_curl_z = torch.empty(0, device=device, dtype=dtype)
+            host_store_curl_z = torch.empty(0, device=device, dtype=dtype)
             store_dex = torch.empty(0, device=device, dtype=dtype)
             store_dey = torch.empty(0, device=device, dtype=dtype)
             store_dez = torch.empty(0, device=device, dtype=dtype)
@@ -482,11 +593,17 @@ class Born3DForwardFunc(torch.autograd.Function):
             sources_i,
             receivers_i,
             store_ex,
+            host_store_ex,
             store_ey,
+            host_store_ey,
             store_ez,
+            host_store_ez,
             store_curl_x,
+            host_store_curl_x,
             store_curl_y,
+            host_store_curl_y,
             store_curl_z,
+            host_store_curl_z,
             store_dex,
             store_dey,
             store_dez,
@@ -530,6 +647,9 @@ class Born3DForwardFunc(torch.autograd.Function):
             "backend_device": backend_device,
         }
         ctx.stream_keepalive = stream_keepalive
+        ctx.backward_storage_objects = backward_storage_objects
+        ctx.backward_storage_filename_arrays = backward_storage_filename_arrays
+        ctx.backward_storage_filename_buffers = backward_storage_filename_buffers
 
         return (
             dEx,
@@ -588,11 +708,17 @@ class Born3DForwardFunc(torch.autograd.Function):
             sources_i,
             receivers_i,
             store_ex,
+            host_store_ex,
             store_ey,
+            host_store_ey,
             store_ez,
+            host_store_ez,
             store_curl_x,
+            host_store_curl_x,
             store_curl_y,
+            host_store_curl_y,
             store_curl_z,
+            host_store_curl_z,
             store_dex,
             store_dey,
             store_dez,
@@ -690,10 +816,26 @@ class Born3DForwardFunc(torch.autograd.Function):
         device_idx = (
             device.index if device.type == "cuda" and device.index is not None else 0
         )
-        compute_stream_handle, storage_stream_handle, stream_keepalive = (
-            _make_storage_streams(device, meta["storage_mode"])
-        )
+        if meta["storage_mode"] in {STORAGE_CPU, STORAGE_DISK}:
+            compute_stream_handle, _, stream_keepalive = _make_storage_streams(
+                device, STORAGE_NONE
+            )
+            storage_stream_handle = compute_stream_handle
+        else:
+            compute_stream_handle, storage_stream_handle, stream_keepalive = (
+                _make_storage_streams(device, meta["storage_mode"])
+            )
         ctx.stream_keepalive = stream_keepalive
+        filenames_ptrs = [0, 0, 0, 0, 0, 0]
+        if meta["storage_mode"] == STORAGE_DISK:
+            import ctypes
+
+            filenames_ptrs = [
+                ctypes.cast(arr, ctypes.c_void_p)
+                for arr in getattr(ctx, "backward_storage_filename_arrays", [])
+            ]
+            if len(filenames_ptrs) < 6:
+                filenames_ptrs.extend([0] * (6 - len(filenames_ptrs)))
 
         if meta["background_grad_required"]:
             eta_ex = torch.zeros_like(lambda_ex)
@@ -838,23 +980,23 @@ class Born3DForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(m_eta_hy_x),
                 backend_utils.tensor_to_ptr(m_eta_hx_y),
                 backend_utils.tensor_to_ptr(store_ex),
-                0,
-                0,
+                backend_utils.tensor_to_ptr(host_store_ex),
+                filenames_ptrs[0],
                 backend_utils.tensor_to_ptr(store_ey),
-                0,
-                0,
+                backend_utils.tensor_to_ptr(host_store_ey),
+                filenames_ptrs[1],
                 backend_utils.tensor_to_ptr(store_ez),
-                0,
-                0,
+                backend_utils.tensor_to_ptr(host_store_ez),
+                filenames_ptrs[2],
                 backend_utils.tensor_to_ptr(store_curl_x),
-                0,
-                0,
+                backend_utils.tensor_to_ptr(host_store_curl_x),
+                filenames_ptrs[3],
                 backend_utils.tensor_to_ptr(store_curl_y),
-                0,
-                0,
+                backend_utils.tensor_to_ptr(host_store_curl_y),
+                filenames_ptrs[4],
                 backend_utils.tensor_to_ptr(store_curl_z),
-                0,
-                0,
+                backend_utils.tensor_to_ptr(host_store_curl_z),
+                filenames_ptrs[5],
                 backend_utils.tensor_to_ptr(store_dex),
                 backend_utils.tensor_to_ptr(store_dey),
                 backend_utils.tensor_to_ptr(store_dez),
@@ -988,23 +1130,23 @@ class Born3DForwardFunc(torch.autograd.Function):
             backend_utils.tensor_to_ptr(m_lambda_hy_x),
             backend_utils.tensor_to_ptr(m_lambda_hx_y),
             backend_utils.tensor_to_ptr(store_ex),
-            0,
-            0,
+            backend_utils.tensor_to_ptr(host_store_ex),
+            filenames_ptrs[0],
             backend_utils.tensor_to_ptr(store_ey),
-            0,
-            0,
+            backend_utils.tensor_to_ptr(host_store_ey),
+            filenames_ptrs[1],
             backend_utils.tensor_to_ptr(store_ez),
-            0,
-            0,
+            backend_utils.tensor_to_ptr(host_store_ez),
+            filenames_ptrs[2],
             backend_utils.tensor_to_ptr(store_curl_x),
-            0,
-            0,
+            backend_utils.tensor_to_ptr(host_store_curl_x),
+            filenames_ptrs[3],
             backend_utils.tensor_to_ptr(store_curl_y),
-            0,
-            0,
+            backend_utils.tensor_to_ptr(host_store_curl_y),
+            filenames_ptrs[4],
             backend_utils.tensor_to_ptr(store_curl_z),
-            0,
-            0,
+            backend_utils.tensor_to_ptr(host_store_curl_z),
+            filenames_ptrs[5],
             backend_utils.tensor_to_ptr(grad_f),
             backend_utils.tensor_to_ptr(grad_ca),
             backend_utils.tensor_to_ptr(grad_cb),

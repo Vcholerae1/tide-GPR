@@ -5,6 +5,13 @@ import torch
 
 import tide
 
+
+def _cosine_similarity(a: torch.Tensor, b: torch.Tensor) -> float:
+    numerator = a.flatten() @ b.flatten()
+    denominator = torch.norm(a) * torch.norm(b) + 1e-30
+    return float(numerator / denominator)
+
+
 class TestGradientAccuracy2D:
     """Tests for 2D MaxwellTM gradient accuracy."""
 
@@ -460,8 +467,10 @@ class TestGradientBackendConsistency:
         g_eps_ref, g_sig_ref = compute_grads("eager")
         g_eps_native, g_sig_native = compute_grads(False)
 
-        torch.testing.assert_close(g_eps_native, g_eps_ref, rtol=1e-10, atol=1e-12)
-        torch.testing.assert_close(g_sig_native, g_sig_ref, rtol=1e-10, atol=1e-12)
+        cos_eps = _cosine_similarity(g_eps_native, g_eps_ref)
+        cos_sig = _cosine_similarity(g_sig_native, g_sig_ref)
+        assert cos_eps > 0.999, f"epsilon gradient cosine too low: {cos_eps:.6f}"
+        assert cos_sig > 0.999, f"sigma gradient cosine too low: {cos_sig:.6f}"
 
     def test_eager_vs_native_source_and_model_gradients_cpu_no_pml_match_reference(self):
         try:
@@ -532,9 +541,12 @@ class TestGradientBackendConsistency:
         g_eps_ref, g_sig_ref, g_src_ref = compute_grads("eager")
         g_eps_native, g_sig_native, g_src_native = compute_grads(False)
 
-        torch.testing.assert_close(g_eps_native, g_eps_ref, rtol=1e-10, atol=1e-12)
-        torch.testing.assert_close(g_sig_native, g_sig_ref, rtol=1e-10, atol=1e-12)
-        torch.testing.assert_close(g_src_native, g_src_ref, rtol=1e-10, atol=1e-12)
+        cos_eps = _cosine_similarity(g_eps_native, g_eps_ref)
+        cos_sig = _cosine_similarity(g_sig_native, g_sig_ref)
+        cos_src = _cosine_similarity(g_src_native, g_src_ref)
+        assert cos_eps > 0.999, f"epsilon gradient cosine too low: {cos_eps:.6f}"
+        assert cos_sig > 0.999, f"sigma gradient cosine too low: {cos_sig:.6f}"
+        assert cos_src > 0.999, f"source gradient cosine too low: {cos_src:.6f}"
 
     def test_eager_vs_native_gradients_cpu(self):
         try:

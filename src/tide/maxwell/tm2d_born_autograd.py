@@ -14,7 +14,12 @@ from ..storage import (
 )
 from ..validation import validate_model_gradient_sampling_interval
 from .common import _get_ctx_handle, _register_ctx_handle, _release_ctx_handle
-from .common import _clone_param, _directional_receiver_hvp, ReceiverMisfit
+from .common import (
+    _clone_param,
+    _directional_receiver_hvp,
+    _receiver_gauss_newton_vjp,
+    ReceiverMisfit,
+)
 from .tm2d_helpers import _make_tm_storage_streams, _resolve_tm2d_storage_spec
 
 
@@ -1252,9 +1257,10 @@ def tm2d_receiver_hvp_native(
     model_gradient_sampling_interval: int = 1,
     linearize_source: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """TM2D native receiver-space HVP via the native Born bggrad path."""
+    """TM2D native receiver-space normal operator via Maxwell VJP."""
     from .. import backend_utils
     from ..grid_utils import _normalize_pml_width_2d
+    from .tm2d import maxwelltm
     from .tm2d_born_cuda import borntm_c_cuda
 
     if vepsilon is None and vsigma is None:
@@ -1288,47 +1294,64 @@ def tm2d_receiver_hvp_native(
         else False
     )
 
-    born_outputs = borntm_c_cuda(
+    predicted_data = maxwelltm(
         epsilon_req,
         sigma_req,
         mu_fixed,
-        vepsilon,
-        vsigma,
-        None,
-        None,
-        grid_spacing,
-        dt,
-        source_amplitude,
-        source_location,
-        receiver_location,
-        stencil,
-        pml_width,
-        max_vel,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        nt,
-        "epsilon_sigma",
-        model_gradient_sampling_interval,
-        linearize_source,
+        grid_spacing=grid_spacing,
+        dt=dt,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        stencil=stencil,
+        pml_width=pml_width,
+        max_vel=max_vel,
+        nt=nt,
+        model_gradient_sampling_interval=model_gradient_sampling_interval,
+        python_backend=False,
         storage_mode="device",
         storage_compression=storage_compression,
-        return_background_receiver_amplitudes=True,
-    )
-    delta_predicted_data = born_outputs[-2]
-    predicted_data = born_outputs[-1]
-    hvp_epsilon, hvp_sigma = _directional_receiver_hvp(
+    )[-1]
+
+    with torch.no_grad():
+        delta_predicted_data = borntm_c_cuda(
+            epsilon_req,
+            sigma_req,
+            mu_fixed,
+            vepsilon,
+            vsigma,
+            None,
+            None,
+            grid_spacing,
+            dt,
+            source_amplitude,
+            source_location,
+            receiver_location,
+            stencil,
+            pml_width,
+            max_vel,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            nt,
+            "epsilon_sigma",
+            model_gradient_sampling_interval,
+            linearize_source,
+            storage_mode="device",
+            storage_compression=storage_compression,
+        )[-1]
+    hvp_epsilon, hvp_sigma = _receiver_gauss_newton_vjp(
         params=(epsilon_req, sigma_req),
         observed_data=observed_data,
         misfit_fn=misfit_fn,
