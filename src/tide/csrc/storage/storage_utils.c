@@ -3,8 +3,6 @@
 #include <errno.h>
 #include <string.h>
 
-
-/*nes*/
 static bool read_exact(FILE* fp, void* dst, size_t nbytes) {
   size_t total = 0;
   while (total < nbytes) {

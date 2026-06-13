@@ -12,7 +12,6 @@ from . import (
     callbacks,
     cfl,
     maxwell,
-    optim,
     padding,
     resampling,
     staggered,
@@ -37,27 +36,6 @@ from .maxwell import (
 )
 from .padding import create_or_pad, reverse_pad, zero_interior
 from .resampling import downsample, downsample_and_movedim, upsample
-from .typing import (
-    BatchedModel2D,
-    BatchedModel3D,
-    Field2DLike,
-    Field3DLike,
-    Location2D,
-    Location3D,
-    MatrixF32,
-    Model2D,
-    Model2DLike,
-    Model3D,
-    Model3DLike,
-    ReceiverData,
-    ReceiverLocation2D,
-    ReceiverLocation3D,
-    SourceLocation2D,
-    SourceLocation3D,
-    VectorF32,
-    WaveletBatch,
-    runtime_typecheck,
-)
 from .validation import (
     validate_freq_taper_frac,
     validate_model_gradient_sampling_interval,
@@ -70,7 +48,6 @@ __all__ = [
     "callbacks",
     "cfl",
     "maxwell",
-    "optim",
     "padding",
     "resampling",
     "staggered",
@@ -85,25 +62,7 @@ __all__ = [
     "CallbackState",
     "DebyeDispersion",
     # Type aliases
-    "BatchedModel2D",
-    "BatchedModel3D",
     "Callback",
-    "Field2DLike",
-    "Field3DLike",
-    "Location2D",
-    "Location3D",
-    "MatrixF32",
-    "Model2D",
-    "Model2DLike",
-    "Model3D",
-    "Model3DLike",
-    "ReceiverData",
-    "ReceiverLocation2D",
-    "ReceiverLocation3D",
-    "SourceLocation2D",
-    "SourceLocation3D",
-    "VectorF32",
-    "WaveletBatch",
     # Functions
     "maxwelltm",
     "maxwell3d",
@@ -127,7 +86,6 @@ __all__ = [
     "reverse_pad",
     # Wavelets
     "ricker",
-    "runtime_typecheck",
 ]
 
 

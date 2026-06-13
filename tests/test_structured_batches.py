@@ -1,6 +1,5 @@
 import pytest
 import torch
-from jaxtyping import TypeCheckError
 
 import tide
 from tide import backend_utils
@@ -487,7 +486,7 @@ def test_batched_models_validate_B_and_S_mismatch():
     )
     bad_source = source_amplitude.unsqueeze(0).expand(3, -1, -1, -1).clone()
 
-    with pytest.raises((RuntimeError, TypeCheckError)):
+    with pytest.raises(RuntimeError):
         tide.maxwelltm(
             epsilon,
             sigma,
@@ -504,7 +503,7 @@ def test_batched_models_validate_B_and_S_mismatch():
 
     bad_receiver = receiver_location.unsqueeze(0).expand(2, -1, -1, -1).clone()
     bad_receiver = bad_receiver[:, :1]
-    with pytest.raises((RuntimeError, TypeCheckError)):
+    with pytest.raises(RuntimeError):
         tide.maxwelltm(
             epsilon,
             sigma,

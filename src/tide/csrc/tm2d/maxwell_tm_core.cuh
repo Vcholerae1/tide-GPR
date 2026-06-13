@@ -563,8 +563,7 @@ forward_kernel_e_core(GridParams<T> const &params, T const *ca_ptr,
 }
 
 // Update E field (Ey) with generic storage saving mechanics
-template <typename T, typename StoreT, int STENCIL_ORDER,
-          bool PHYSICAL_STORAGE = false>
+template <typename T, typename StoreT, int STENCIL_ORDER>
 static TIDE_HOST_DEVICE void forward_kernel_e_with_storage_core(
     GridParams<T> const &params, T const *ca_ptr, T const *cb_ptr, T const *hx,
     T const *hz, T *ey, T *m_hx_z, T *m_hz_x, StoreT *ey_store,
@@ -603,76 +602,15 @@ static TIDE_HOST_DEVICE void forward_kernel_e_with_storage_core(
     }
 
     T curl_h = dhz_dx - dhx_dz;
-    int64_t store_i = i;
-    bool write_snapshot = true;
-    if constexpr (PHYSICAL_STORAGE) {
-      write_snapshot = y >= params.pml_y0 && y < params.pml_y1 &&
-                       x >= params.pml_x0 && x < params.pml_x1;
-      if (write_snapshot) {
-        int64_t const physical_y = params.pml_y1 - params.pml_y0;
-        int64_t const physical_x = params.pml_x1 - params.pml_x0;
-        store_i = (shot_idx * physical_y + (y - params.pml_y0)) * physical_x +
-                  (x - params.pml_x0);
-      }
-    }
 
-    if (write_snapshot && ca_requires_grad && ey_store != nullptr) {
-      ey_store[store_i] = encode_snapshot<StoreT, T>(ey[i]);
+    if (ca_requires_grad && ey_store != nullptr) {
+      ey_store[i] = encode_snapshot<StoreT, T>(ey[i]);
     }
-    if (write_snapshot && cb_requires_grad && curl_h_store != nullptr) {
-      curl_h_store[store_i] = encode_snapshot<StoreT, T>(curl_h);
+    if (cb_requires_grad && curl_h_store != nullptr) {
+      curl_h_store[i] = encode_snapshot<StoreT, T>(curl_h);
     }
 
     ey[i] = ca_val * ey[i] + cb_val * curl_h;
-  }
-}
-
-// Update E field and store the source-free E increment. This is used by the
-// direct epsilon-gradient prototype:
-//   dJ/deps_r += -eps0 * cb/dt * lambda_E * (E^{n+1,no source} - E^n)
-template <typename T, typename StoreT, int STENCIL_ORDER>
-static TIDE_HOST_DEVICE void forward_kernel_e_with_delta_storage_core(
-    GridParams<T> const &params, T const *ca_ptr, T const *cb_ptr, T const *hx,
-    T const *hz, T *ey, T *m_hx_z, T *m_hz_x, StoreT *delta_ey_store,
-    int64_t y, int64_t x, int64_t shot_idx) {
-
-  int const FD_PAD = tide::StencilTraits<STENCIL_ORDER>::FD_PAD;
-
-  if (y >= FD_PAD && x >= FD_PAD && y < params.ny - FD_PAD + 1 &&
-      x < params.nx - FD_PAD + 1 && shot_idx < params.n_shots) {
-    int64_t j = y * params.nx + x;
-    int64_t i = shot_idx * params.shot_numel + j;
-
-    T const ca_val = params.ca_batched ? ca_ptr[i] : ca_ptr[j];
-    T const cb_val = params.cb_batched ? cb_ptr[i] : cb_ptr[j];
-
-    bool pml_y = y < params.pml_y0 || y >= params.pml_y1;
-    bool pml_x = x < params.pml_x0 || x >= params.pml_x1;
-
-    GlobalFieldAccessor<T> L_HZ(hz, params.nx);
-    GlobalFieldAccessor<T> L_HX(hx, params.nx);
-
-    T dhz_dx = DiffForward<STENCIL_ORDER>::diff_x1(
-        L_HZ, shot_idx * params.shot_numel, y, x, params.nx, params.rdx);
-    T dhx_dz = DiffForward<STENCIL_ORDER>::diff_y1(
-        L_HX, shot_idx * params.shot_numel, y, x, params.nx, params.rdy);
-
-    if (pml_x) {
-      m_hz_x[i] = params.bx[x] * m_hz_x[i] + params.ax[x] * dhz_dx;
-      dhz_dx = dhz_dx / params.kx[x] + m_hz_x[i];
-    }
-
-    if (pml_y) {
-      m_hx_z[i] = params.by[y] * m_hx_z[i] + params.ay[y] * dhx_dz;
-      dhx_dz = dhx_dz / params.ky[y] + m_hx_z[i];
-    }
-
-    T const ey_old = ey[i];
-    T const ey_new = ca_val * ey_old + cb_val * (dhz_dx - dhx_dz);
-    if (delta_ey_store != nullptr) {
-      delta_ey_store[i] = encode_snapshot<StoreT, T>(ey_new - ey_old);
-    }
-    ey[i] = ey_new;
   }
 }
 

@@ -1,5 +1,3 @@
-import math
-import os
 import warnings
 from collections.abc import Sequence
 
@@ -15,11 +13,9 @@ from .common import (
     _make_compute_stream,
     _pad_dispersion_for_model,
 )
-from .maxwell3d_autograd import Maxwell3DCheckpointForwardFunc, Maxwell3DForwardFunc
+from .maxwell3d_autograd import Maxwell3DForwardFunc
 from .maxwell3d_python import maxwell3d_python
 from .validation_internal import _COMPONENT_TO_INDEX_3D
-
-_MAXWELL3D_NUM_CHECKPOINT_FIELDS = 18
 
 
 def maxwell3d_c_cuda(
@@ -76,8 +72,8 @@ def maxwell3d_c_cuda(
     """3D C/CUDA forward propagation path with Python fallback for gradients."""
     from .. import backend_utils, staggered
     from ..padding import create_or_pad, zero_interior
-
     del (
+        storage_chunk_steps,
         freq_taper_frac,
         time_pad_frac,
         time_taper,
@@ -97,17 +93,9 @@ def maxwell3d_c_cuda(
             "storage_mode must be 'device', 'cpu', 'disk', 'none', or 'auto', "
             f"but got {storage_mode!r}"
         )
-    if execution_backend_str not in {
-        "standard",
-        "eonly_snapshot",
-        "direct_material_grad",
-        "checkpoint_recompute",
-        "checkpoint_revolve",
-    }:
+    if execution_backend_str != "standard":
         raise ValueError(
-            "execution_backend must be 'standard', 'eonly_snapshot', "
-            "'direct_material_grad', 'checkpoint_recompute', or "
-            "'checkpoint_revolve', "
+            "execution_backend must be 'standard', "
             f"but got {execution_backend!r}"
         )
     execution_backend_id = 0
@@ -123,31 +111,10 @@ def maxwell3d_c_cuda(
     functorch_active = torch._C._are_functorch_transforms_active()
     device = epsilon.device
     storage_bytes_per_elem = epsilon.element_size()
-    experimental_eonly_snapshots_requested = execution_backend_str in {
-        "eonly_snapshot",
-        "direct_material_grad",
-    } or os.environ.get("TIDE_EM3D_EONLY_SNAPSHOT", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    physical_snapshot_storage_requested = os.environ.get(
-        "TIDE_EM3D_PHYSICAL_SNAPSHOT_STORAGE", ""
-    ).strip().lower() in {"1", "true", "yes", "on"}
-    uniform_coeffs_requested = os.environ.get(
-        "TIDE_EM3D_UNIFORM_COEFFS", ""
-    ).strip().lower() in {"1", "true", "yes", "on"}
-
     def _fallback_reason(reason: str):
         fallback_storage_mode = storage_mode
         if str(fallback_storage_mode).lower() in {"cpu", "disk", "auto"}:
             fallback_storage_mode = "device"
-        fallback_execution_backend = (
-            "standard"
-            if execution_backend_str in {"checkpoint_recompute", "checkpoint_revolve"}
-            else execution_backend_str
-        )
         warnings.warn(
             f"{reason}; falling back to Python backend.",
             RuntimeWarning,
@@ -193,7 +160,7 @@ def maxwell3d_c_cuda(
             callback_frequency,
             source_component,
             receiver_component,
-            fallback_execution_backend,
+            execution_backend_str,
             storage_mode=fallback_storage_mode,
             storage_compression=storage_compression,
             n_threads=n_threads,
@@ -275,19 +242,6 @@ def maxwell3d_c_cuda(
             "Batched model count must match the effective shot count after normalization."
         )
 
-    checkpoint_revolve_requested = execution_backend_str == "checkpoint_revolve"
-    checkpoint_recompute_requested = execution_backend_str in {
-        "checkpoint_recompute",
-        "checkpoint_revolve",
-    }
-    checkpoint_segment_steps = int(storage_chunk_steps)
-    if checkpoint_segment_steps < 0:
-        raise ValueError("storage_chunk_steps must be >= 0.")
-    if checkpoint_recompute_requested and checkpoint_segment_steps == 0:
-        checkpoint_segment_steps = max(1, int(round(math.sqrt(6 * nt_steps))))
-    if nt_steps > 0 and checkpoint_segment_steps > 0:
-        checkpoint_segment_steps = min(checkpoint_segment_steps, nt_steps)
-
     effective_storage_mode_str = storage_mode_str
     if requires_grad:
         if device.type == "cpu" and effective_storage_mode_str in {"cpu", "disk"}:
@@ -301,46 +255,8 @@ def maxwell3d_c_cuda(
                 ) // gradient_sampling_interval
                 shot_numel_est = model_nz * model_ny * model_nx
                 shot_bytes_uncomp_est = shot_numel_est * storage_bytes_per_elem
-                if (
-                    checkpoint_recompute_requested
-                    and checkpoint_segment_steps > 0
-                    and gradient_sampling_interval == 1
-                ):
-                    n_segments = (
-                        nt_steps + checkpoint_segment_steps - 1
-                    ) // checkpoint_segment_steps
-                    if checkpoint_revolve_requested:
-                        checkpoint_slots = (
-                            1
-                            if n_segments <= 1
-                            else int(math.ceil(math.log2(n_segments))) + 1
-                        )
-                    else:
-                        checkpoint_slots = n_segments
-                    checkpoint_bytes = (
-                        n_shots
-                        * shot_numel_est
-                        * epsilon.element_size()
-                        * _MAXWELL3D_NUM_CHECKPOINT_FIELDS
-                        * checkpoint_slots
-                    )
-                    segment_bytes = (
-                        n_shots
-                        * shot_numel_est
-                        * storage_bytes_per_elem
-                        * (3 * checkpoint_segment_steps + 3)
-                    )
-                    total_bytes = checkpoint_bytes + segment_bytes
-                else:
-                    snapshot_components = 6
-                    if (
-                        experimental_eonly_snapshots_requested
-                        and gradient_sampling_interval == 1
-                    ):
-                        snapshot_components = 3 * n_stored + 3
-                    else:
-                        snapshot_components *= n_stored
-                    total_bytes = n_shots * shot_bytes_uncomp_est * snapshot_components
+                snapshot_components = 6 * n_stored
+                total_bytes = n_shots * shot_bytes_uncomp_est * snapshot_components
                 limit_device = (
                     storage_bytes_limit_device
                     if storage_bytes_limit_device is not None
@@ -567,41 +483,6 @@ def maxwell3d_c_cuda(
     ca = ca.contiguous() if model_batched else ca[None, :, :, :].contiguous()
     cb = cb.contiguous() if model_batched else cb[None, :, :, :].contiguous()
     cq = cq.contiguous() if model_batched else cq[None, :, :, :].contiguous()
-    uniform_coeffs_active = False
-    ca_uniform = 0.0
-    cb_uniform = 0.0
-    cq_uniform = 0.0
-    if (
-        uniform_coeffs_requested
-        and device.type == "cuda"
-        and not has_dispersion
-        and not requires_grad
-    ):
-
-        def _uniform_value(tensor: torch.Tensor) -> tuple[bool, float]:
-            flat = tensor.reshape(-1)
-            first = flat[0]
-            return bool(torch.all(flat == first).item()), float(first.item())
-
-        ca_is_uniform, ca_uniform = _uniform_value(ca)
-        cb_is_uniform, cb_uniform = _uniform_value(cb)
-        cq_is_uniform, cq_uniform = _uniform_value(cq)
-        uniform_coeffs_active = ca_is_uniform and cb_is_uniform and cq_is_uniform
-        if not uniform_coeffs_active:
-            warnings.warn(
-                "TIDE_EM3D_UNIFORM_COEFFS=1 requested, but ca/cb/cq are not all uniform.",
-                RuntimeWarning,
-            )
-    elif uniform_coeffs_requested and has_dispersion:
-        warnings.warn(
-            "TIDE_EM3D_UNIFORM_COEFFS=1 is ignored for 3D Debye forward.",
-            RuntimeWarning,
-        )
-    elif uniform_coeffs_requested and requires_grad:
-        warnings.warn(
-            "TIDE_EM3D_UNIFORM_COEFFS=1 is ignored when 3D gradients are requested.",
-            RuntimeWarning,
-        )
 
     callback_models = {
         "epsilon": epsilon_padded,
@@ -623,76 +504,15 @@ def maxwell3d_c_cuda(
 
     source_component_idx = _COMPONENT_TO_INDEX_3D[source_component]
     receiver_component_idx = _COMPONENT_TO_INDEX_3D[receiver_component]
-    checkpoint_recompute = (
-        checkpoint_recompute_requested
-        and requires_grad
-        and device.type == "cuda"
-        and effective_storage_mode_str == "device"
-        and gradient_sampling_interval == 1
-        and forward_callback is None
-        and backward_callback is None
-    )
-    if checkpoint_recompute_requested and not checkpoint_recompute:
-        warnings.warn(
-            f"execution_backend={execution_backend_str!r} requires CUDA gradients, "
-            "storage_mode='device', model_gradient_sampling_interval=1, and no "
-            "forward/backward callbacks; using the standard backend.",
-            RuntimeWarning,
-        )
-    experimental_eonly_snapshots = (
-        experimental_eonly_snapshots_requested
-        and requires_grad
-        and device.type == "cuda"
-        and effective_storage_mode_str == "device"
-        and not checkpoint_recompute
-        and gradient_sampling_interval == 1
-        and forward_callback is None
-        and backward_callback is None
-    )
-    if execution_backend_str == "eonly_snapshot" and not experimental_eonly_snapshots:
-        warnings.warn(
-            "execution_backend='eonly_snapshot' requires CUDA gradients, "
-            "storage_mode='device', model_gradient_sampling_interval=1, and no "
-            "forward/backward callbacks; using the standard backend.",
-            RuntimeWarning,
-        )
-    if (
-        execution_backend_str == "direct_material_grad"
-        and not experimental_eonly_snapshots
-    ):
-        warnings.warn(
-            "execution_backend='direct_material_grad' requires CUDA gradients, "
-            "storage_mode='device', model_gradient_sampling_interval=1, and no "
-            "forward/backward callbacks; using the standard backend.",
-            RuntimeWarning,
-        )
-    if experimental_eonly_snapshots:
-        execution_backend_id = (
-            2 if execution_backend_str == "direct_material_grad" else 1
-        )
-    physical_snapshot_storage = (
-        physical_snapshot_storage_requested
-        and requires_grad
-        and device.type == "cuda"
-        and effective_storage_mode_str == "device"
-        and not checkpoint_recompute
-        and not experimental_eonly_snapshots
-        and forward_callback is None
-        and backward_callback is None
-    )
-    if physical_snapshot_storage_requested and not physical_snapshot_storage:
-        warnings.warn(
-            "TIDE_EM3D_PHYSICAL_SNAPSHOT_STORAGE=1 requires CUDA gradients, "
-            "storage_mode='device', no E-only snapshots, and no forward/backward "
-            "callbacks; using full-domain snapshot storage.",
-            RuntimeWarning,
-        )
+    eonly_snapshots = False
     if has_dispersion and requires_grad:
         return _fallback_reason(
             "3D Debye C/CUDA path currently supports forward inference only"
         )
     if has_dispersion and device.type == "cpu":
-        return _fallback_reason("3D Debye CPU backend is not enabled yet")
+        return _fallback_reason(
+            "3D Debye CPU backend is not enabled yet"
+        )
     if requires_grad:
         try:
             _ = backend_utils.get_backend_function(
@@ -701,14 +521,6 @@ def maxwell3d_c_cuda(
             _ = backend_utils.get_backend_function(
                 "maxwell_3d", "backward", stencil, dtype, device
             )
-            if checkpoint_revolve_requested:
-                _ = backend_utils.get_backend_function(
-                    "maxwell_3d",
-                    "checkpoint_revolve_backward",
-                    stencil,
-                    dtype,
-                    device,
-                )
         except (RuntimeError, AttributeError, TypeError) as e:
             return _fallback_reason(f"3D C/CUDA backward symbols are unavailable ({e})")
 
@@ -746,30 +558,16 @@ def maxwell3d_c_cuda(
             "storage_path": storage_path,
             "storage_compression": storage_compression,
             "execution_backend_id": execution_backend_id,
-            "experimental_eonly_snapshots": experimental_eonly_snapshots,
-            "physical_snapshot_storage": physical_snapshot_storage,
-            "checkpoint_recompute": checkpoint_recompute,
-            "checkpoint_scheduler": "revolve"
-            if checkpoint_revolve_requested
-            else "segmented",
-            "checkpoint_segment_steps": checkpoint_segment_steps,
+            "experimental_eonly_snapshots": eonly_snapshots,
             "ca_batched": model_batched,
             "cb_batched": model_batched,
             "cq_batched": model_batched,
         }
 
-        autograd_func = (
-            Maxwell3DCheckpointForwardFunc
-            if checkpoint_recompute
-            else Maxwell3DForwardFunc
-        )
-
-        outputs = autograd_func.apply(
+        outputs = Maxwell3DForwardFunc.apply(
             ca,
             cb,
             cq,
-            epsilon_padded,
-            sigma_padded,
             f,
             (
                 az_flat,
@@ -841,7 +639,9 @@ def maxwell3d_c_cuda(
                 "maxwell_3d", "forward", stencil, dtype, device
             )
         except (RuntimeError, AttributeError, TypeError) as e:
-            return _fallback_reason(f"3D C/CUDA forward symbol is unavailable ({e})")
+            return _fallback_reason(
+                f"3D C/CUDA forward symbol is unavailable ({e})"
+            )
 
         device_idx = (
             device.index if device.type == "cuda" and device.index is not None else 0
@@ -942,10 +742,6 @@ def maxwell3d_c_cuda(
                 backend_utils.tensor_to_ptr(kx_h_flat),
                 backend_utils.tensor_to_ptr(sources_i),
                 backend_utils.tensor_to_ptr(receivers_i),
-                uniform_coeffs_active,
-                ca_uniform,
-                cb_uniform,
-                cq_uniform,
                 1.0 / dz,
                 1.0 / dy,
                 1.0 / dx,
@@ -1063,6 +859,5 @@ def maxwell3d_c_cuda(
         receiver_amplitudes,
     )
     return outputs
-
 
 __all__ = ["maxwell3d_c_cuda"]

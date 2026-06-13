@@ -27,7 +27,6 @@ _SUPPORTED_PASSES = (
     "forward",
     "forward_with_storage",
     "backward",
-    "checkpoint_revolve_backward",
     "born_forward",
     "born_forward_with_storage",
     "born_backward",
@@ -219,7 +218,6 @@ _TM_FORWARD_WITH_STORAGE_SPEC: _Spec = [
     *_TM_COMMON_TAIL,
     *_TM_STORAGE_TAIL,
     *_TM_BATCHED_FLAGS,
-    (_I, 1, "execution_backend"),
     (_P, 2, "compute_stream, storage_stream"),
 ]
 
@@ -234,13 +232,12 @@ _TM_BACKWARD_SPEC: _Spec = [
         "ey_store_1, ey_store_3, ey_filenames, curl_store_1, curl_store_3, curl_filenames",
     ),
     (_P, 1, "grad_f"),
-    (_P, 4, "grad_ca, grad_cb, grad_eps, grad_sigma"),
+    (_P, 2, "grad_ca, grad_cb"),
     (_P, 2, "grad_ca_shot, grad_cb_shot"),
     *_TM_PML_PROFILES,
     *_TM_COMMON_TAIL,
     *_TM_STORAGE_TAIL,
     *_TM_BATCHED_FLAGS,
-    (_I, 1, "execution_backend"),
     (_P, 2, "compute_stream, storage_stream"),
 ]
 
@@ -367,11 +364,6 @@ _3D_PML_PROFILES: _Spec = [
     (_P, 2, "sources_i, receivers_i"),
 ]
 
-_3D_FORWARD_UNIFORM_COEFFS: _Spec = [
-    (_B, 1, "uniform_coeffs"),
-    (_F, 3, "ca_uniform, cb_uniform, cq_uniform"),
-]
-
 _3D_FIELDS: _Spec = [
     (_P, 6, "ex, ey, ez, hx, hy, hz"),
     (
@@ -394,7 +386,6 @@ _3D_FORWARD_SPEC: _Spec = [
     (_P, 1, "r"),
     (_I, 1, "n_poles"),
     *_3D_PML_PROFILES,
-    *_3D_FORWARD_UNIFORM_COEFFS,
     *_3D_COMMON_TAIL,
     (_B, 1, "has_dispersion"),
     *_3D_BATCHED_FLAGS,
@@ -448,29 +439,6 @@ _3D_BACKWARD_SPEC: _Spec = [
     *_3D_COMMON_TAIL,
     *_3D_STORAGE_TAIL,
     *_3D_BATCHED_FLAGS,
-    (_P, 2, "compute_stream, storage_stream"),
-]
-
-_3D_CHECKPOINT_REVOLVE_BACKWARD_SPEC: _Spec = [
-    (_P, 3, "ca, cb, cq"),
-    (_P, 1, "f"),
-    (_P, 1, "grad_r"),
-    (_P, 2, "checkpoint_pool, scratch_wavefields"),
-    *_3D_ADJ_FIELDS,
-    (
-        _P,
-        18,
-        "ex_s1,ex_s3,ex_fn, ey_s1,ey_s3,ey_fn, ez_s1,ez_s3,ez_fn, "
-        "cx_s1,cx_s3,cx_fn, cy_s1,cy_s3,cy_fn, cz_s1,cz_s3,cz_fn",
-    ),
-    (_P, 1, "grad_f"),
-    (_P, 4, "grad_ca, grad_cb, grad_eps, grad_sigma"),
-    (_P, 2, "grad_ca_shot, grad_cb_shot"),
-    *_3D_PML_PROFILES,
-    *_3D_COMMON_TAIL,
-    *_3D_STORAGE_TAIL,
-    *_3D_BATCHED_FLAGS,
-    (_I, 3, "segment_steps, num_segments, pool_slots"),
     (_P, 2, "compute_stream, storage_stream"),
 ]
 
@@ -601,7 +569,6 @@ _TEMPLATE_SPECS: dict[str, _Spec] = {
     "maxwell_3d_forward": _3D_FORWARD_SPEC,
     "maxwell_3d_forward_with_storage": _3D_FORWARD_WITH_STORAGE_SPEC,
     "maxwell_3d_backward": _3D_BACKWARD_SPEC,
-    "maxwell_3d_checkpoint_revolve_backward": _3D_CHECKPOINT_REVOLVE_BACKWARD_SPEC,
     "maxwell_3d_born_forward": _3D_BORN_FORWARD_SPEC,
     "maxwell_3d_born_forward_with_storage": _3D_BORN_FORWARD_WITH_STORAGE_SPEC,
     "maxwell_3d_born_backward": _3D_BORN_BACKWARD_SPEC,

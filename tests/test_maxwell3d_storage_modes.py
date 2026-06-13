@@ -43,13 +43,7 @@ def test_maxwell3d_storage_modes_are_accepted_in_backend_path(storage_mode: str)
 
 
 def _run_3d_grad(
-    storage_mode: str,
-    storage_path: str,
-    *,
-    stream: torch.cuda.Stream | None = None,
-    execution_backend: str = "standard",
-    storage_compression: bool | str = False,
-    storage_chunk_steps: int = 0,
+    storage_mode: str, storage_path: str, *, stream: torch.cuda.Stream | None = None
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     device = torch.device("cuda")
     dtype = torch.float32
@@ -62,8 +56,12 @@ def _run_3d_grad(
     sigma = torch.full_like(epsilon, 2e-4, requires_grad=True)
     mu = torch.ones_like(epsilon)
 
-    source_location = torch.tensor([[[2, 3, 2]]], dtype=torch.long, device=device)
-    receiver_location = torch.tensor([[[2, 3, 5]]], dtype=torch.long, device=device)
+    source_location = torch.tensor(
+        [[[2, 3, 2]]], dtype=torch.long, device=device
+    )
+    receiver_location = torch.tensor(
+        [[[2, 3, 5]]], dtype=torch.long, device=device
+    )
     source_amplitude = tide.ricker(
         80e6, nt, 4e-11, peak_time=1.0 / 80e6, dtype=dtype, device=device
     ).view(1, 1, nt)
@@ -81,11 +79,9 @@ def _run_3d_grad(
             receiver_location=receiver_location,
             pml_width=2,
             python_backend=False,
-            execution_backend=execution_backend,
             storage_mode=storage_mode,
             storage_path=storage_path,
-            storage_compression=storage_compression,
-            storage_chunk_steps=storage_chunk_steps,
+            storage_compression=False,
         )[-1]
         receivers.square().sum().backward()
     torch.cuda.synchronize()
@@ -104,13 +100,9 @@ def test_maxwell3d_storage_backend_argtypes_include_stream_handles():
         "maxwell_3d_forward_with_storage", "float"
     )
     backward_argtypes = backend_utils._template_argtypes("maxwell_3d_backward", "float")
-    checkpoint_argtypes = backend_utils._template_argtypes(
-        "maxwell_3d_checkpoint_revolve_backward", "float"
-    )
 
     assert forward_argtypes[-2:] == [ctypes.c_void_p, ctypes.c_void_p]
     assert backward_argtypes[-2:] == [ctypes.c_void_p, ctypes.c_void_p]
-    assert checkpoint_argtypes[-2:] == [ctypes.c_void_p, ctypes.c_void_p]
 
 
 def test_maxwell3d_forward_backend_argtypes_include_compute_stream_handle():
@@ -134,76 +126,6 @@ def test_maxwell3d_snapshot_storage_modes_match():
     torch.testing.assert_close(eps_disk, eps_dev, rtol=2e-4, atol=1e-5)
     torch.testing.assert_close(sig_cpu, sig_dev, rtol=2e-4, atol=1e-5)
     torch.testing.assert_close(sig_disk, sig_dev, rtol=2e-4, atol=1e-5)
-
-
-def test_maxwell3d_eonly_snapshot_backend_matches_standard():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for Maxwell3D snapshot storage tests.")
-
-    with tempfile.TemporaryDirectory() as storage_path:
-        eps_ref, sig_ref, rec_ref = _run_3d_grad("device", storage_path)
-        eps_eonly, sig_eonly, rec_eonly = _run_3d_grad(
-            "device",
-            storage_path,
-            execution_backend="eonly_snapshot",
-        )
-
-    torch.testing.assert_close(rec_eonly, rec_ref, rtol=1e-5, atol=1e-6)
-    torch.testing.assert_close(eps_eonly, eps_ref, rtol=2e-4, atol=1e-5)
-    torch.testing.assert_close(sig_eonly, sig_ref, rtol=2e-4, atol=1e-5)
-
-
-def test_maxwell3d_direct_material_grad_backend_matches_standard():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for Maxwell3D snapshot storage tests.")
-
-    with tempfile.TemporaryDirectory() as storage_path:
-        eps_ref, sig_ref, rec_ref = _run_3d_grad("device", storage_path)
-        eps_direct, sig_direct, rec_direct = _run_3d_grad(
-            "device",
-            storage_path,
-            execution_backend="direct_material_grad",
-        )
-
-    torch.testing.assert_close(rec_direct, rec_ref, rtol=1e-5, atol=1e-6)
-    torch.testing.assert_close(eps_direct, eps_ref, rtol=2e-4, atol=1e-5)
-    torch.testing.assert_close(sig_direct, sig_ref, rtol=2e-4, atol=1e-5)
-
-
-def test_maxwell3d_checkpoint_recompute_backend_matches_standard():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for Maxwell3D checkpoint storage tests.")
-
-    with tempfile.TemporaryDirectory() as storage_path:
-        eps_ref, sig_ref, rec_ref = _run_3d_grad("device", storage_path)
-        eps_checkpoint, sig_checkpoint, rec_checkpoint = _run_3d_grad(
-            "device",
-            storage_path,
-            execution_backend="checkpoint_recompute",
-            storage_chunk_steps=4,
-        )
-
-    torch.testing.assert_close(rec_checkpoint, rec_ref, rtol=1e-5, atol=1e-6)
-    torch.testing.assert_close(eps_checkpoint, eps_ref, rtol=2e-4, atol=1e-5)
-    torch.testing.assert_close(sig_checkpoint, sig_ref, rtol=2e-4, atol=1e-5)
-
-
-def test_maxwell3d_checkpoint_revolve_backend_matches_standard():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for Maxwell3D checkpoint storage tests.")
-
-    with tempfile.TemporaryDirectory() as storage_path:
-        eps_ref, sig_ref, rec_ref = _run_3d_grad("device", storage_path)
-        eps_checkpoint, sig_checkpoint, rec_checkpoint = _run_3d_grad(
-            "device",
-            storage_path,
-            execution_backend="checkpoint_revolve",
-            storage_chunk_steps=4,
-        )
-
-    torch.testing.assert_close(rec_checkpoint, rec_ref, rtol=1e-5, atol=1e-6)
-    torch.testing.assert_close(eps_checkpoint, eps_ref, rtol=2e-4, atol=1e-5)
-    torch.testing.assert_close(sig_checkpoint, sig_ref, rtol=2e-4, atol=1e-5)
 
 
 @pytest.mark.parametrize("storage_mode", ["cpu", "disk"])

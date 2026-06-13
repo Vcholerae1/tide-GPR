@@ -132,3 +132,4 @@ nav:
   - Development:
       - Build: dev/build.md
       - CUDA: dev/cuda.md
+      - Experimental Paths: dev/experimental-paths.md

@@ -22,12 +22,6 @@ option(TIDE_CUDA_PROFILE_BUILD "Enable CUDA line info and verbose ptxas output" 
 set(TIDE_TM_BLOCK_X "32" CACHE STRING "TM CUDA thread block size in X")
 set(TIDE_TM_BLOCK_Y "8" CACHE STRING "TM CUDA thread block size in Y")
 get_filename_component(TIDE_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
-set(TIDE_REFERENCE_REVOLVE_DIR "${TIDE_PROJECT_ROOT}/reference/revolve")
-if(EXISTS "${TIDE_REFERENCE_REVOLVE_DIR}/revolve.cpp" AND EXISTS "${TIDE_REFERENCE_REVOLVE_DIR}/revolve.h")
-    set(TIDE_HAS_REFERENCE_REVOLVE TRUE)
-else()
-    set(TIDE_HAS_REFERENCE_REVOLVE FALSE)
-endif()
 
 # Detect and enable CUDA if present and enabled
 if(TIDE_ENABLE_CUDA)
@@ -204,7 +198,6 @@ macro(add_tide_cpu_object_library BASENAME SOURCE_REL_PATH)
         ${CMAKE_CURRENT_SOURCE_DIR}/storage
         ${CMAKE_CURRENT_SOURCE_DIR}/tm2d
         ${CMAKE_CURRENT_SOURCE_DIR}/em3d
-        ${CMAKE_CURRENT_SOURCE_DIR}/optim
     )
     list(APPEND TIDE_OBJECTS $<TARGET_OBJECTS:${TARGET_NAME}>)
     list(APPEND CPU_TARGETS ${TARGET_NAME})
@@ -276,10 +269,6 @@ if(CUDAToolkit_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/em3d
             ${CMAKE_CURRENT_SOURCE_DIR}/optim
         )
-        if(TIDE_HAS_REFERENCE_REVOLVE)
-            target_include_directories(${TARGET_NAME} PRIVATE ${TIDE_REFERENCE_REVOLVE_DIR})
-            target_compile_definitions(${TARGET_NAME} PRIVATE TIDE_HAS_REFERENCE_REVOLVE=1)
-        endif()
         list(APPEND TIDE_OBJECTS $<TARGET_OBJECTS:${TARGET_NAME}>)
         
         set_target_properties(${TARGET_NAME} PROPERTIES CUDA_ARCHITECTURES "${TIDE_CUDA_ARCHES}")
@@ -307,13 +296,6 @@ endif()
 # Prepare lists that will collect the object files
 set(TIDE_OBJECTS)
 set(CPU_TARGETS)
-
-if(TIDE_HAS_REFERENCE_REVOLVE)
-    add_library(tide_reference_revolve_obj OBJECT ${TIDE_REFERENCE_REVOLVE_DIR}/revolve.cpp)
-    target_include_directories(tide_reference_revolve_obj PRIVATE ${TIDE_REFERENCE_REVOLVE_DIR})
-    set_target_properties(tide_reference_revolve_obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    list(APPEND TIDE_OBJECTS $<TARGET_OBJECTS:tide_reference_revolve_obj>)
-endif()
 
 # --- Storage utilities ---
 set(STORAGE_UTILS_CPU_SRC ${CMAKE_CURRENT_SOURCE_DIR}/storage/storage_utils.c)
@@ -403,7 +385,6 @@ if(CUDAToolkit_FOUND)
     message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
     message(STATUS "  CUDA Profile Build: ${TIDE_CUDA_PROFILE_BUILD}")
     message(STATUS "  TM Block: ${TIDE_TM_BLOCK_X}x${TIDE_TM_BLOCK_Y}")
-    message(STATUS "  Reference Revolve: ${TIDE_HAS_REFERENCE_REVOLVE}")
 else()
     message(STATUS "  CUDA: OFF")
 endif()

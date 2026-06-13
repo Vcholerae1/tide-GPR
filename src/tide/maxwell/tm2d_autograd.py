@@ -1,4 +1,3 @@
-import os
 from typing import Any
 
 import torch
@@ -84,9 +83,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         m_Hz_x: torch.Tensor,
         n_threads: int,
         backend_device: torch.device,
-        execution_backend_id: int,
-        epsilon_direct: torch.Tensor,
-        sigma_direct: torch.Tensor,
     ) -> tuple[Any, ...]:
         from .. import backend_utils
 
@@ -97,29 +93,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
 
         ca_requires_grad = ca.requires_grad
         cb_requires_grad = cb.requires_grad
-        direct_epsilon_grad = (
-            int(execution_backend_id) == 1 and epsilon_direct.requires_grad
-        )
-        direct_material_grad = int(execution_backend_id) == 2 and (
-            epsilon_direct.requires_grad or sigma_direct.requires_grad
-        )
-        direct_material_endpoint_grad = int(execution_backend_id) == 3 and (
-            epsilon_direct.requires_grad or sigma_direct.requires_grad
-        )
-        direct_material_ecurl_grad = int(execution_backend_id) == 4 and (
-            epsilon_direct.requires_grad or sigma_direct.requires_grad
-        )
-        direct_material_any = (
-            direct_material_grad
-            or direct_material_endpoint_grad
-            or direct_material_ecurl_grad
-        )
-        needs_grad = (
-            ca_requires_grad
-            or cb_requires_grad
-            or direct_epsilon_grad
-            or direct_material_any
-        )
+        needs_grad = ca_requires_grad or cb_requires_grad
 
         if n_receivers > 0:
             receiver_amplitudes = torch.zeros(
@@ -149,6 +123,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 _make_tm_storage_streams(device, storage_mode)
             )
 
+            num_elements_per_shot = ny * nx
             _, store_dtype, _, resolved_storage_format = _resolve_tm2d_storage_spec(
                 storage_compression=storage_compression,
                 dtype=coeff_dtype,
@@ -158,29 +133,8 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             if resolved_storage_format != storage_format:
                 raise RuntimeError("Mismatched TM2D storage format resolution.")
 
-            physical_snapshot_storage = (
-                os.environ.get("TIDE_TM2D_PHYSICAL_SNAPSHOT_STORAGE", "")
-                .strip()
-                .lower()
-                in {"1", "true", "yes", "on"}
-                and storage_mode == STORAGE_DEVICE
-                and device.type == "cuda"
-                and not direct_epsilon_grad
-                and not direct_material_any
-                and forward_callback is None
-                and backward_callback is None
-            )
-            physical_ny = max(0, pml_y1 - pml_y0)
-            physical_nx = max(0, pml_x1 - pml_x0)
-            if physical_ny == 0 or physical_nx == 0:
-                physical_snapshot_storage = False
-            store_ny = physical_ny if physical_snapshot_storage else ny
-            store_nx = physical_nx if physical_snapshot_storage else nx
-            num_elements_per_shot = store_ny * store_nx
             shot_bytes_uncomp = num_elements_per_shot * store_dtype.itemsize
             num_steps_stored = (nt + step_ratio - 1) // step_ratio
-            if direct_material_grad or direct_material_endpoint_grad:
-                num_steps_stored += 1
 
             char_ptr_type = ctypes.c_char_p
             is_cuda = device.type == "cuda"
@@ -195,8 +149,8 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                         store_1 = torch.empty(
                             num_steps_stored,
                             n_shots,
-                            store_ny,
-                            store_nx,
+                            ny,
+                            nx,
                             device=device,
                             dtype=store_dtype,
                         )
@@ -263,18 +217,9 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 )
                 return store_1, store_3, filenames_ptr
 
-            store_ey_for_grad = (
-                ca_requires_grad and not direct_epsilon_grad
-            ) or direct_material_any
-            store_curl_for_grad = (
-                cb_requires_grad or direct_epsilon_grad
-            ) and not (direct_material_grad or direct_material_endpoint_grad)
-            store_curl_for_grad = store_curl_for_grad or direct_material_ecurl_grad
-            ey_store_1, ey_store_3, ey_filenames_ptr = alloc_storage(
-                store_ey_for_grad
-            )
+            ey_store_1, ey_store_3, ey_filenames_ptr = alloc_storage(ca_requires_grad)
             curl_store_1, curl_store_3, curl_filenames_ptr = alloc_storage(
-                store_curl_for_grad
+                cb_requires_grad
             )
 
             forward_func = backend_utils.get_backend_function(
@@ -340,8 +285,8 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                     storage_mode,
                     storage_format,
                     shot_bytes_uncomp,
-                    store_ey_for_grad,
-                    store_curl_for_grad,
+                    ca_requires_grad,
+                    cb_requires_grad,
                     ca_batched,
                     cb_batched,
                     cq_batched,
@@ -352,7 +297,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                     pml_x1,
                     n_threads,
                     device_idx,
-                    int(execution_backend_id),
                     compute_stream_handle,
                     storage_stream_handle,
                 )
@@ -489,10 +433,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             "source_amplitudes_scaled": source_amplitudes_scaled,
             "ca_requires_grad": ca_requires_grad,
             "cb_requires_grad": cb_requires_grad,
-            "direct_epsilon_grad": direct_epsilon_grad,
-            "direct_material_grad": direct_material_grad,
-            "direct_material_endpoint_grad": direct_material_endpoint_grad,
-            "direct_material_ecurl_grad": direct_material_ecurl_grad,
             "scale_ctx": scale_ctx,
             "stream_keepalive": stream_keepalive,
         }
@@ -568,9 +508,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             _m_Hz_x,
             n_threads,
             _backend_device,
-            execution_backend_id,
-            epsilon_direct,
-            sigma_direct,
         ) = inputs
 
         outputs = output if isinstance(output, tuple) else (output,)
@@ -606,8 +543,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             sources_i,
             receivers_i,
             *backward_storage_tensors,
-            epsilon_direct,
-            sigma_direct,
         )
         ctx.backward_storage_objects = ctx_data["backward_storage_objects"]
         ctx.backward_storage_filename_arrays = ctx_data[
@@ -634,12 +569,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         ctx.pml_x1 = pml_x1
         ctx.ca_requires_grad = ctx_data["ca_requires_grad"]
         ctx.cb_requires_grad = ctx_data["cb_requires_grad"]
-        ctx.direct_epsilon_grad = ctx_data["direct_epsilon_grad"]
-        ctx.direct_material_grad = ctx_data["direct_material_grad"]
-        ctx.direct_material_endpoint_grad = ctx_data[
-            "direct_material_endpoint_grad"
-        ]
-        ctx.direct_material_ecurl_grad = ctx_data["direct_material_ecurl_grad"]
         ctx.storage_mode = ctx_data["storage_mode"]
         ctx.storage_format = ctx_data["storage_format"]
         ctx.shot_bytes_uncomp = ctx_data["shot_bytes_uncomp"]
@@ -651,7 +580,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         ctx.source_amplitudes_scaled = ctx_data["source_amplitudes_scaled"]
         ctx.n_threads = n_threads
         ctx.backend_device = _backend_device
-        ctx.execution_backend_id = int(execution_backend_id)
         ctx.scale_ctx = ctx_data["scale_ctx"]
 
     @staticmethod
@@ -682,8 +610,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         sources_i, receivers_i = saved[15], saved[16]
         ey_store_1, ey_store_3 = saved[17], saved[18]
         curl_store_1, curl_store_3 = saved[19], saved[20]
-        epsilon_direct = saved[21]
-        sigma_direct = saved[22]
 
         device = ca.device
         coeff_dtype = ca.dtype
@@ -709,27 +635,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         pml_x1 = ctx.pml_x1
         ca_requires_grad = ctx.ca_requires_grad
         cb_requires_grad = ctx.cb_requires_grad
-        direct_epsilon_grad = bool(ctx.direct_epsilon_grad)
-        direct_material_grad = bool(ctx.direct_material_grad)
-        direct_material_endpoint_grad = bool(ctx.direct_material_endpoint_grad)
-        direct_material_ecurl_grad = bool(ctx.direct_material_ecurl_grad)
-        direct_material_any = (
-            direct_material_grad
-            or direct_material_endpoint_grad
-            or direct_material_ecurl_grad
-        )
-        direct_eps_requires_grad = (
-            direct_epsilon_grad or direct_material_any
-        ) and epsilon_direct.requires_grad
-        direct_sigma_requires_grad = (
-            direct_material_any and sigma_direct.requires_grad
-        )
-        coeff_ca_requires_grad = ca_requires_grad and not (
-            direct_epsilon_grad or direct_material_any
-        )
-        coeff_cb_requires_grad = cb_requires_grad and not (
-            direct_epsilon_grad or direct_material_any
-        )
         pml_width = ctx.pml_width
         storage_mode = ctx.storage_mode
         storage_format = ctx.storage_format
@@ -772,7 +677,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         else:
             grad_f = torch.empty(0, device=device, dtype=coeff_dtype)
 
-        if coeff_ca_requires_grad:
+        if ca_requires_grad:
             grad_ca = (
                 torch.zeros(n_shots, ny, nx, device=device, dtype=coeff_dtype)
                 if ca_batched
@@ -783,13 +688,9 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             )
         else:
             grad_ca = torch.empty(0, device=device, dtype=coeff_dtype)
-            grad_ca_shot = (
-                torch.zeros(n_shots, ny, nx, device=device, dtype=coeff_dtype)
-                if direct_eps_requires_grad and not direct_material_ecurl_grad
-                else torch.empty(0, device=device, dtype=coeff_dtype)
-            )
+            grad_ca_shot = torch.empty(0, device=device, dtype=coeff_dtype)
 
-        if coeff_cb_requires_grad:
+        if cb_requires_grad:
             grad_cb = (
                 torch.zeros(n_shots, ny, nx, device=device, dtype=coeff_dtype)
                 if cb_batched
@@ -800,22 +701,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             )
         else:
             grad_cb = torch.empty(0, device=device, dtype=coeff_dtype)
-            grad_cb_shot = (
-                torch.zeros(n_shots, ny, nx, device=device, dtype=coeff_dtype)
-                if direct_sigma_requires_grad and not direct_material_ecurl_grad
-                else torch.empty(0, device=device, dtype=coeff_dtype)
-            )
-
-        grad_eps = (
-            torch.zeros_like(epsilon_direct)
-            if direct_eps_requires_grad
-            else torch.empty(0, device=device, dtype=coeff_dtype)
-        )
-        grad_sigma = (
-            torch.zeros_like(sigma_direct)
-            if direct_sigma_requires_grad
-            else torch.empty(0, device=device, dtype=coeff_dtype)
-        )
+            grad_cb_shot = torch.empty(0, device=device, dtype=coeff_dtype)
 
         device_idx = (
             device.index if device.type == "cuda" and device.index is not None else 0
@@ -866,8 +752,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(grad_f),
                 backend_utils.tensor_to_ptr(grad_ca),
                 backend_utils.tensor_to_ptr(grad_cb),
-                backend_utils.tensor_to_ptr(grad_eps),
-                backend_utils.tensor_to_ptr(grad_sigma),
                 backend_utils.tensor_to_ptr(grad_ca_shot),
                 backend_utils.tensor_to_ptr(grad_cb_shot),
                 backend_utils.tensor_to_ptr(ay),
@@ -909,7 +793,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 pml_x1,
                 n_threads,
                 device_idx,
-                int(ctx.execution_backend_id),
                 compute_stream_handle,
                 storage_stream_handle,
             )
@@ -928,11 +811,11 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                     scale_ctx=scale_ctx,
                 )
                 callback_gradients = {}
-                if coeff_ca_requires_grad:
+                if ca_requires_grad:
                     callback_gradients["ca"] = grad_ca
-                if coeff_cb_requires_grad:
+                if cb_requires_grad:
                     callback_gradients["cb"] = grad_cb
-                if coeff_ca_requires_grad or coeff_cb_requires_grad:
+                if ca_requires_grad or cb_requires_grad:
                     with torch.enable_grad():
                         eps_req = models["epsilon"].detach().requires_grad_(True)
                         sig_req = models["sigma"].detach().requires_grad_(True)
@@ -942,10 +825,10 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
 
                         vjp_tensors = []
                         vjp_grads = []
-                        if coeff_ca_requires_grad:
+                        if ca_requires_grad:
                             vjp_tensors.append(ca_v)
                             vjp_grads.append(grad_ca)
-                        if coeff_cb_requires_grad:
+                        if cb_requires_grad:
                             vjp_tensors.append(cb_v)
                             vjp_grads.append(callback_gradients["cb"])
 
@@ -968,15 +851,15 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 )
 
         grad_f_flat = grad_f.reshape(nt * n_shots * n_sources) if n_sources > 0 else None
-        if coeff_ca_requires_grad and not ca_batched:
+        if ca_requires_grad and not ca_batched:
             grad_ca = grad_ca.unsqueeze(0)
-        if coeff_cb_requires_grad and not cb_batched:
+        if cb_requires_grad and not cb_batched:
             grad_cb = grad_cb.unsqueeze(0)
 
         _release_ctx_handle(getattr(ctx, "_ctx_handle_id", None))
         return (
-            grad_ca if coeff_ca_requires_grad else None,
-            grad_cb if coeff_cb_requires_grad else None,
+            grad_ca if ca_requires_grad else None,
+            grad_cb if cb_requires_grad else None,
             None,
             grad_f_flat,
             None,
@@ -1031,9 +914,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             None,
             None,
             None,
-            None,
-            grad_eps if direct_eps_requires_grad else None,
-            grad_sigma if direct_sigma_requires_grad else None,
         )
 
 

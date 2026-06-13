@@ -38,9 +38,6 @@ classifiers = [
     "Operating System :: MacOS",
 ]
 dependencies = [
-    "beartype>=0.22.9",
-    "h5py>=3.16.0",
-    "jaxtyping>=0.3.10",
     "matplotlib>=3.10.9",
     "numpy>=2.3.5",
     "scipy>=1.16.3",
@@ -72,14 +69,27 @@ build-dir = "build/{wheel_tag}"
 ninja.make-fallback = true
 sdist.exclude = [
     "outputs/**",
+    "artifacts/**",
+    "benchmarks/**",
     "build/**",
     "dist/**",
+    "examples/**",
+    "references/**",
+    "tools/**",
     "*.h5",
+    "*.mat",
+    "*.npy",
+    "*.npz",
+    "*.png",
+    "*.jpg",
     "*.vtk",
 ]
 
 [tool.scikit-build.cmake.define]
 CMAKE_CUDA_ARCHITECTURES = "89"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.cibuildwheel]
 # Build for Python 3.12 only (python-independent wheel)

@@ -92,37 +92,6 @@ def _directional_receiver_hvp(
     return torch.autograd.grad(directional_objective, params)
 
 
-def _receiver_gauss_newton_vjp(
-    *,
-    params: tuple[torch.Tensor, ...],
-    observed_data: torch.Tensor,
-    misfit_fn: ReceiverMisfit,
-    predicted_data: torch.Tensor,
-    delta_predicted_data: torch.Tensor,
-) -> tuple[torch.Tensor, ...]:
-    """Apply J^T Phi_dd Jv using only the nonlinear Maxwell VJP."""
-    loss = misfit_fn(predicted_data, observed_data)
-    grad_data = torch.autograd.grad(
-        loss,
-        predicted_data,
-        create_graph=True,
-    )[0]
-    if grad_data.requires_grad:
-        data_direction = torch.autograd.grad(
-            grad_data,
-            predicted_data,
-            grad_outputs=delta_predicted_data.detach(),
-            retain_graph=True,
-        )[0]
-    else:
-        data_direction = torch.zeros_like(predicted_data)
-    return torch.autograd.grad(
-        predicted_data,
-        params,
-        grad_outputs=data_direction.detach(),
-    )
-
-
 def _init_polarization_state(
     *,
     n_shots: int,

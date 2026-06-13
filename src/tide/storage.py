@@ -21,8 +21,8 @@ STORAGE_DISK = 2  # Spill snapshots to disk (slowest, preserves host/GPU memory)
 STORAGE_NONE = 3  # Do not store snapshots
 
 # Snapshot payload formats. These are passed to the native TM2D storage path so
-# it can distinguish full-precision and bf16-compressed payloads without guessing
-# from element size alone.
+# it can distinguish full-precision, bf16-compressed, and fp16 payloads without
+# guessing from element size alone.
 STORAGE_FORMAT_FULL = 0
 STORAGE_FORMAT_BF16 = 1
 

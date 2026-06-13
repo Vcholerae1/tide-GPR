@@ -58,7 +58,6 @@ maxwell3d(
     source_amplitude, source_location, receiver_location,
     source_component="ey", receiver_component="ey",
     python_backend=False,
-    execution_backend="standard",
     storage_mode="device",
 )
 ```
@@ -74,18 +73,6 @@ Return tuple:
 - 12 CPML memory tensors
 - receiver_amplitudes shaped [nt, n_shots, n_receivers] for shared models
 - receiver_amplitudes shaped [nt, B, n_shots, n_receivers] for batched models
-
-Gradient backend notes:
-- `execution_backend="eonly_snapshot"` stores E snapshots and reconstructs curl
-  terms during the adjoint on supported CUDA device-storage runs.
-- `execution_backend="checkpoint_recompute"` is an experimental CUDA prototype
-  that stores segment-boundary checkpoints and replays each segment during
-  backward. Use `storage_chunk_steps` to set the segment length.
-- `execution_backend="checkpoint_revolve"` is a CUDA-native bounded-checkpoint
-  prototype. When `reference/revolve` is present at build time, it uses the
-  reference Offline Revolve action stream over coarse segments to regenerate
-  segment starts, then reuses the same segment replay/adjoint path. This trades
-  extra forward recomputation for lower peak memory than `checkpoint_recompute`.
 
 ## borntm / born3d
 
