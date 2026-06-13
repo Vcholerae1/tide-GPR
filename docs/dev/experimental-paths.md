@@ -1,14 +1,14 @@
 # Experimental Paths
 
-The main branch keeps only the stable public API and its direct implementation
-paths. Larger experiments are preserved in the archive tag
+The main branch keeps the stable public API, its direct implementation paths,
+the supported Python optimizer module, and reproducible scripts under
+`examples/`. Larger experiments are preserved in the archive tag
 `archive/experimental-snapshot-2026-06-13` instead of remaining importable from
 the package.
 
 ## What Was Archived
 
-- large inversion and LSRTM example scripts and generated result bundles
-- optimizer prototypes under `tide.optim`
+- large generated inversion and LSRTM result bundles
 - CUDA profiling, sweep, and comparison scripts
 - compact CPML layout and split-PML launch prototypes
 - alternate snapshot, checkpoint, and direct material-gradient runtime paths
