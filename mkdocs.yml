@@ -105,6 +105,7 @@ nav:
       - API Orientation: guides/api-orientation.md
       - Modeling: guides/modeling.md
       - Inversion Workflow: guides/inversion.md
+      - Workflow + Optim: guides/workflow-optim.md
       - Configuration Reference: guides/configuration.md
       - Sources and Receivers: guides/sources-receivers.md
       - Boundaries and PML: guides/boundaries.md
@@ -118,6 +119,7 @@ nav:
       - Index: api/index.md
       - Top-level Module: api/tide.md
       - Maxwell: api/maxwell.md
+      - Workflow: api/workflow.md
       - Wavelets: api/wavelets.md
       - Callbacks: api/callbacks.md
       - Resampling: api/resampling.md

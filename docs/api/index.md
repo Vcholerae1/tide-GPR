@@ -9,10 +9,12 @@ Start here if you already know which workflow you want:
 5. `tide.ricker` for source generation
 6. `tide.CallbackState` for forward and backward callbacks
 7. `tide.DebyeDispersion` and storage/backend helpers for advanced workflows
+8. `tide.workflow` for shot-batched modeling helpers around solver calls
 
 ## Public Modules
 - tide (top-level)
 - tide.callbacks
+- tide.workflow
 - tide.resampling
 - tide.cfl
 - tide.padding

@@ -19,6 +19,7 @@ from . import (
     utils,
     validation,
     wavelets,
+    workflow,
 )
 from .callbacks import Callback, CallbackState, create_callback_state
 from .cfl import cfl_condition
@@ -77,6 +78,7 @@ __all__ = [
     "validation",
     "utils",
     "wavelets",
+    "workflow",
     # Classes
     "BornTM",
     "Born3D",
@@ -131,4 +133,4 @@ __all__ = [
 ]
 
 
-__version__ = "0.0.28"
+__version__ = "0.0.29"

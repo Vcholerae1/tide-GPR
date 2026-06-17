@@ -14,7 +14,7 @@ TIDE is a PyTorch-based library for high-frequency electromagnetic wave propagat
 - **Automatic Differentiation**: Gradient support through PyTorch's autograd hooks
 - **High Performance**: Optimized C/CUDA kernels for critical operations
 - **Flexible Storage**: Device/CPU/disk snapshot modes for gradient computation
-- **Staggered Grid**: Industry-standard FDTD staggered grid implementation
+- **Staggered Grid**: Standard FDTD staggered grid implementation
 - **PML Boundaries**: Perfectly Matched Layer absorbing boundaries
 - **Snapshot Compression**: Optional BF16 snapshot compression on the default path
 
@@ -124,6 +124,7 @@ print(f"Recorded data shape: {receiver_data.shape}")
 - `tide.wavelets`: Source wavelet generation
 - `tide.callbacks`: Callback state and factories
 - `tide.storage`: Snapshot storage and compression controls
+- `tide.workflow`: Shot batching, receiver loss, and optimizer workflow helpers
 - `tide.resampling`: CFL resampling helpers
 - `tide.cfl`: CFL condition helper
 - `tide.padding`: Padding and interior masking helpers
