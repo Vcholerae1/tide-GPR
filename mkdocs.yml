@@ -50,6 +50,9 @@ theme:
     - content.tooltips
     - toc.follow
 
+extra_css:
+  - stylesheets/home.css
+
 docs_dir: docs
 site_dir: site
 exclude_docs: |

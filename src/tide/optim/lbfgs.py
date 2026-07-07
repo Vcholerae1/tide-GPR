@@ -174,6 +174,8 @@ def _lbfgs_minimize_direct_line_search(
         if remaining_evals is not None:
             max_trials = min(max_trials, remaining_evals)
 
+        if options.line_search == "weak_wolfe":
+            ls.alpha = options.initial_step
         result = _line_search_step(
             objective,
             options,

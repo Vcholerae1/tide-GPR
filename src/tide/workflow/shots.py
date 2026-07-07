@@ -26,13 +26,7 @@ def split_shots(
     batch_size: int,
     device: torch.device | str | None = None,
 ) -> list[torch.Tensor]:
-    """Return contiguous shot-index batches as int64 tensors.
-
-    The helper mirrors the shot-axis convention used by TIDE solvers:
-    source amplitudes, source locations, and receiver locations are indexed by
-    shot. It intentionally does not shuffle; callers that need randomized
-    batches should pass their own index tensors to :func:`index_shots`.
-    """
+    """Return contiguous, non-shuffled shot-index batches."""
 
     n_shots = int(n_shots)
     batch_size = int(batch_size)
@@ -40,30 +34,17 @@ def split_shots(
         raise ValueError("n_shots must be non-negative.")
     if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
-    if n_shots == 0:
-        return []
-
-    batch_size = min(batch_size, n_shots)
     indices = torch.arange(n_shots, device=device, dtype=torch.long)
-    return [indices[start : start + batch_size] for start in range(0, n_shots, batch_size)]
+    return list(indices.split(batch_size))
 
 
-def _normalize_dim(name: str, ndim: int, dim: int) -> int:
+def _normalize_dim(ndim: int, dim: int) -> int:
     dim = int(dim)
-    if dim < 0:
-        dim += ndim
-    if dim < 0 or dim >= ndim:
-        raise ValueError(f"{name}={dim} is out of bounds for tensor with ndim={ndim}.")
-    return dim
-
-
-def _indices_for_tensor(
-    shot_indices: torch.Tensor,
-    tensor: torch.Tensor,
-) -> torch.Tensor:
-    if shot_indices.ndim != 1:
-        raise ValueError("shot_indices must be a 1D tensor.")
-    return shot_indices.to(device=tensor.device, dtype=torch.long)
+    if not -ndim <= dim < ndim:
+        raise ValueError(
+            f"shot_dim={dim} is out of bounds for tensor with ndim={ndim}."
+        )
+    return dim % ndim
 
 
 def index_shots(
@@ -72,17 +53,14 @@ def index_shots(
     *,
     shot_dim: int = 0,
 ) -> torch.Tensor | None:
-    """Select one shot mini-batch from ``tensor`` along ``shot_dim``.
-
-    Use ``shot_dim=0`` for shared-shot tensors shaped ``[S, ...]`` and
-    ``shot_dim=1`` for per-model-shot tensors shaped ``[B, S, ...]``.
-    """
+    """Select one shot mini-batch from ``tensor`` along ``shot_dim``."""
 
     if tensor is None:
         return None
-    dim = _normalize_dim("shot_dim", tensor.ndim, shot_dim)
-    indices = _indices_for_tensor(shot_indices, tensor)
-    return torch.index_select(tensor, dim, indices)
+    if shot_indices.ndim != 1:
+        raise ValueError("shot_indices must be a 1D tensor.")
+    indices = shot_indices.to(device=tensor.device, dtype=torch.long)
+    return torch.index_select(tensor, _normalize_dim(tensor.ndim, shot_dim), indices)
 
 
 def take_shot_batch(
@@ -98,7 +76,9 @@ def take_shot_batch(
     return ShotBatch(
         source_amplitude=index_shots(source_amplitude, shot_indices, shot_dim=shot_dim),
         source_location=index_shots(source_location, shot_indices, shot_dim=shot_dim),
-        receiver_location=index_shots(receiver_location, shot_indices, shot_dim=shot_dim),
+        receiver_location=index_shots(
+            receiver_location, shot_indices, shot_dim=shot_dim
+        ),
     )
 
 
@@ -109,21 +89,21 @@ def _default_receiver_selector(output: ModelOutput) -> torch.Tensor:
         raise ValueError("model output sequence is empty.")
     receiver = output[-1]
     if not isinstance(receiver, torch.Tensor):
-        raise TypeError("default output selector expected the last model output to be a tensor.")
+        raise TypeError(
+            "default output selector expected the last model output to be a tensor."
+        )
     return receiver
 
 
 def infer_receiver_shot_dim(receiver: torch.Tensor) -> int:
     """Infer the receiver shot axis for standard TIDE receiver tensors."""
 
-    if receiver.ndim == 3:
-        return 1
-    if receiver.ndim == 4:
-        return 2
-    raise ValueError(
-        "receiver chunks must be shaped [nt, S, R] or [nt, B, S, R] "
-        f"when receiver_shot_dim is not provided, got {tuple(receiver.shape)}."
-    )
+    if receiver.ndim not in (3, 4):
+        raise ValueError(
+            "receiver chunks must be shaped [nt, S, R] or [nt, B, S, R] "
+            f"when receiver_shot_dim is not provided, got {tuple(receiver.shape)}."
+        )
+    return receiver.ndim - 2
 
 
 def merge_receiver_batches(
@@ -131,33 +111,16 @@ def merge_receiver_batches(
     *,
     shot_dim: int | None = None,
 ) -> torch.Tensor:
-    """Concatenate receiver chunks along the shot axis.
-
-    With TIDE receiver conventions, ``shot_dim`` is inferred as 1 for
-    ``[nt, S, R]`` chunks and 2 for ``[nt, B, S, R]`` chunks.
-    """
+    """Concatenate receiver chunks along their inferred shot axis."""
 
     chunk_list = list(chunks)
     if not chunk_list:
         raise ValueError("chunks must contain at least one receiver tensor.")
-    if shot_dim is None:
-        shot_dim = infer_receiver_shot_dim(chunk_list[0])
-    dim = _normalize_dim("shot_dim", chunk_list[0].ndim, shot_dim)
+    dim = infer_receiver_shot_dim(chunk_list[0]) if shot_dim is None else shot_dim
+    dim = _normalize_dim(chunk_list[0].ndim, dim)
     if len(chunk_list) == 1:
         return chunk_list[0]
     return torch.cat(chunk_list, dim=dim)
-
-
-def _infer_device(
-    device: torch.device | str | None,
-    tensors: Sequence[torch.Tensor | None],
-) -> torch.device | str | None:
-    if device is not None:
-        return device
-    for tensor in tensors:
-        if tensor is not None:
-            return tensor.device
-    return None
 
 
 def run_shot_batches(
@@ -174,17 +137,16 @@ def run_shot_batches(
     device: torch.device | str | None = None,
     **model_kwargs: Any,
 ) -> torch.Tensor:
-    """Run ``solver`` over shot mini-batches and concatenate receivers.
+    """Run ``solver`` over shot mini-batches and concatenate receivers."""
 
-    ``solver`` is called with selected ``source_amplitude``,
-    ``source_location``, and ``receiver_location`` plus ``model_kwargs``. By
-    default, the last item of a solver output tuple is treated as receiver data.
-    """
-
-    selector = _default_receiver_selector if receiver_selector is None else receiver_selector
-    batch_device = _infer_device(
-        device,
-        (source_amplitude, source_location, receiver_location),
+    selector = (
+        _default_receiver_selector if receiver_selector is None else receiver_selector
+    )
+    tensors = (source_amplitude, source_location, receiver_location)
+    batch_device = (
+        device
+        if device is not None
+        else next((tensor.device for tensor in tensors if tensor is not None), None)
     )
     chunks: list[torch.Tensor] = []
     for shot_indices in split_shots(n_shots, batch_size, batch_device):

@@ -9,14 +9,20 @@ from tide.workflow import (
     curvature_preconditioner_diagonal,
     diagonal_preconditioner,
     expand_source_amplitude,
+    gather_receiver_shards,
     index_shots,
     line_acquisition_2d,
+    local_shot_positions,
     merge_receiver_batches,
     point_acquisition,
     receiver_mse_loss,
+    receiver_mse_loss_shard,
+    rank_shot_indices,
     run_shot_batches,
+    split_rank_shots,
     split_shots,
     take_receiver_batch,
+    take_receiver_shard_batch,
     take_shot_batch,
 )
 
@@ -34,6 +40,29 @@ def test_split_shots_rejects_invalid_inputs() -> None:
         split_shots(-1, 2)
     with pytest.raises(ValueError, match="batch_size"):
         split_shots(2, 0)
+
+
+def test_rank_shot_indices_uses_round_robin_shards() -> None:
+    shards = [
+        rank_shot_indices(8, rank=rank, world_size=3).tolist() for rank in range(3)
+    ]
+
+    assert shards == [[0, 3, 6], [1, 4, 7], [2, 5]]
+
+
+def test_split_rank_shots_batches_local_shard() -> None:
+    batches = split_rank_shots(10, 2, rank=1, world_size=3)
+
+    assert [batch.tolist() for batch in batches] == [[1, 4], [7]]
+
+
+def test_local_shot_positions_maps_global_ids_to_shard_offsets() -> None:
+    local = torch.tensor([1, 4, 7])
+    positions = local_shot_positions(torch.tensor([4, 7]), local)
+
+    torch.testing.assert_close(positions, torch.tensor([1, 2]))
+    with pytest.raises(ValueError, match="local shard"):
+        local_shot_positions(torch.tensor([2]), local)
 
 
 def test_index_shots_handles_shared_and_per_model_shot_axes() -> None:
@@ -145,7 +174,38 @@ def test_receiver_batch_helpers_select_and_normalize_loss() -> None:
 
     torch.testing.assert_close(selected, observed[:, indices, :])
     torch.testing.assert_close(batch_loss, torch.tensor(1.0))
-    torch.testing.assert_close(full_loss, torch.tensor(predicted.numel() / observed.numel()))
+    torch.testing.assert_close(
+        full_loss, torch.tensor(predicted.numel() / observed.numel())
+    )
+
+
+def test_receiver_shard_batch_helpers_use_local_observed_columns() -> None:
+    observed = torch.arange(4 * 2 * 2, dtype=torch.float32).reshape(4, 2, 2)
+    local_indices = torch.tensor([1, 4])
+    global_batch = torch.tensor([4])
+    predicted = observed[:, 1:2, :] + 2.0
+
+    selected = take_receiver_shard_batch(observed, global_batch, local_indices)
+    loss = receiver_mse_loss_shard(
+        predicted,
+        observed,
+        global_batch,
+        local_indices,
+        global_observed_numel=4 * 5 * 2,
+    )
+
+    torch.testing.assert_close(selected, observed[:, 1:2, :])
+    torch.testing.assert_close(
+        loss, torch.tensor(predicted.numel() * 4.0 / (4 * 5 * 2))
+    )
+
+
+def test_gather_receiver_shards_noops_without_distributed_context() -> None:
+    receiver = torch.arange(4 * 2 * 1, dtype=torch.float32).reshape(4, 2, 1)
+
+    gathered = gather_receiver_shards(receiver, torch.tensor([0, 1]), 2)
+
+    assert gathered is receiver
 
 
 def test_backward_shot_batches_accumulates_full_gradient() -> None:
@@ -211,7 +271,9 @@ def test_backward_shot_batches_can_inspect_per_batch_gradients() -> None:
         expected_grads.append((2.0 * residual * x[shot_indices]).sum())
 
     assert len(per_batch_grads) == len(expected_grads)
-    torch.testing.assert_close(torch.stack(per_batch_grads), torch.stack(expected_grads))
+    torch.testing.assert_close(
+        torch.stack(per_batch_grads), torch.stack(expected_grads)
+    )
     torch.testing.assert_close(torch.tensor(total_loss), torch.tensor(expected_loss))
 
 
@@ -356,7 +418,9 @@ def _tm_case() -> dict[str, torch.Tensor | float | int | bool]:
     epsilon = torch.full((ny, nx), 4.0, dtype=dtype)
     sigma = torch.full_like(epsilon, 1e-3)
     mu = torch.ones_like(epsilon)
-    source_amplitude = tide.ricker(80e6, nt, dt, dtype=dtype).view(1, 1, nt).repeat(3, 1, 1)
+    source_amplitude = (
+        tide.ricker(80e6, nt, dt, dtype=dtype).view(1, 1, nt).repeat(3, 1, 1)
+    )
     source_location = torch.tensor(
         [[[3, 2]], [[3, 3]], [[3, 4]]],
         dtype=torch.long,
@@ -426,7 +490,9 @@ def _em3d_case() -> dict[str, torch.Tensor | float | int | str | bool]:
     epsilon = torch.full((nz, ny, nx), 4.0, dtype=dtype)
     sigma = torch.full_like(epsilon, 1e-3)
     mu = torch.ones_like(epsilon)
-    source_amplitude = tide.ricker(70e6, nt, dt, dtype=dtype).view(1, 1, nt).repeat(3, 1, 1)
+    source_amplitude = (
+        tide.ricker(70e6, nt, dt, dtype=dtype).view(1, 1, nt).repeat(3, 1, 1)
+    )
     source_location = torch.tensor(
         [[[2, 2, 2]], [[2, 3, 2]], [[2, 4, 2]]],
         dtype=torch.long,

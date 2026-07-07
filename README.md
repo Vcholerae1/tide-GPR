@@ -73,7 +73,7 @@ bash scripts/build_csrc.sh
 
 **Requirements:**
 - Python >= 3.12
-- PyTorch >= 2.9.1
+- PyTorch >= 2.12
 - CUDA Toolkit (optional, for GPU support)
 - CMake >= 3.28 (optional, for building from source)
 

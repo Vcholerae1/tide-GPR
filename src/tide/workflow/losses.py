@@ -8,6 +8,7 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 
+from .distributed import local_shot_positions
 from .shots import infer_receiver_shot_dim, index_shots
 
 LossNormalization = Literal["batch", "all", "sum"]
@@ -28,6 +29,20 @@ def take_receiver_batch(
     return index_shots(receiver, shot_indices, shot_dim=dim)
 
 
+def take_receiver_shard_batch(
+    receiver_shard: torch.Tensor,
+    global_shot_indices: torch.Tensor,
+    local_shot_indices: torch.Tensor,
+    *,
+    shot_dim: int | None = None,
+) -> torch.Tensor:
+    """Select global shot ids from a receiver tensor that stores one local shard."""
+
+    positions = local_shot_positions(global_shot_indices, local_shot_indices)
+    dim = infer_receiver_shot_dim(receiver_shard) if shot_dim is None else shot_dim
+    return index_shots(receiver_shard, positions, shot_dim=dim)
+
+
 def receiver_mse_loss(
     predicted: torch.Tensor,
     observed: torch.Tensor,
@@ -44,6 +59,36 @@ def receiver_mse_loss(
     residual = predicted - target
     if normalization == "all":
         return residual.square().sum() / observed.numel()
+    if normalization == "sum":
+        return residual.square().sum()
+    raise ValueError("normalization must be 'batch', 'all', or 'sum'.")
+
+
+def receiver_mse_loss_shard(
+    predicted: torch.Tensor,
+    observed_shard: torch.Tensor,
+    global_shot_indices: torch.Tensor,
+    local_shot_indices: torch.Tensor,
+    *,
+    global_observed_numel: int,
+    shot_dim: int | None = None,
+    normalization: LossNormalization = "all",
+) -> torch.Tensor:
+    """Return MSE for one local observed shard using global normalization."""
+
+    target = take_receiver_shard_batch(
+        observed_shard,
+        global_shot_indices,
+        local_shot_indices,
+        shot_dim=shot_dim,
+    )
+    if normalization == "batch":
+        return F.mse_loss(predicted, target)
+    residual = predicted - target
+    if normalization == "all":
+        if global_observed_numel <= 0:
+            raise ValueError("global_observed_numel must be positive.")
+        return residual.square().sum() / int(global_observed_numel)
     if normalization == "sum":
         return residual.square().sum()
     raise ValueError("normalization must be 'batch', 'all', or 'sum'.")
@@ -97,5 +142,7 @@ __all__ = [
     "LossNormalization",
     "backward_shot_batches",
     "receiver_mse_loss",
+    "receiver_mse_loss_shard",
     "take_receiver_batch",
+    "take_receiver_shard_batch",
 ]

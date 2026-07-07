@@ -1,6 +1,6 @@
 [project]
 name = "tide-GPR"
-version = "0.0.29"
+version = "0.0.30"
 description = "Torch-based Inversion & Development Engine for electromagnetic wave propagation"
 readme = "README.md"
 license = {text = "MIT"}
@@ -44,7 +44,7 @@ dependencies = [
     "matplotlib>=3.10.9",
     "numpy>=2.3.5",
     "scipy>=1.16.3",
-    "torch>=2.9.1",
+    "torch>=2.12",
 ]
 
 [project.optional-dependencies]
