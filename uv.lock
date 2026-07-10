@@ -1431,6 +1431,9 @@ docs = [
     { name = "mkdocs-material" },
     { name = "pymdown-extensions" },
 ]
+experiments = [
+    { name = "pyyaml" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1455,10 +1458,11 @@ requires-dist = [
     { name = "pymdown-extensions", marker = "extra == 'docs'", specifier = ">=10.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
+    { name = "pyyaml", marker = "extra == 'experiments'", specifier = ">=6.0" },
     { name = "scipy", specifier = ">=1.16.3" },
     { name = "torch", specifier = ">=2.12" },
 ]
-provides-extras = ["dev", "docs"]
+provides-extras = ["dev", "docs", "experiments"]
 
 [package.metadata.requires-dev]
 dev = [

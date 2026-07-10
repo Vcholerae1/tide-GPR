@@ -57,6 +57,9 @@ docs = [
     "mkdocs-material>=9.6.0",
     "pymdown-extensions>=10.0",
 ]
+experiments = [
+    "pyyaml>=6.0",
+]
 
 [build-system]
 requires = ["scikit-build-core>=0.10", "cmake>=3.18", "ninja"]
@@ -77,6 +80,8 @@ sdist.exclude = [
     "build/**",
     "dist/**",
     "examples/**",
+    "experiments/**",
+    "data/**",
     "references/**",
     "tools/**",
     "*.h5",

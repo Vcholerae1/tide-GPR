@@ -32,7 +32,7 @@ compile_commands.json
 outputs/
 benchmark_history/
 artifacts/
-examples/
+data/
 
 # Development notes 
 .vscode/
