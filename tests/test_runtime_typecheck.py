@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 import torch
 from jaxtyping import TypeCheckError
@@ -42,6 +43,18 @@ def test_shape_aliases_are_public() -> None:
     ):
         assert name in tide.__all__
         assert hasattr(tide, name)
+
+
+def test_numpy_shape_aliases_support_runtime_typechecking() -> None:
+    @tide.runtime_typecheck
+    def accept_vector(value: tide.VectorF32) -> tide.VectorF32:
+        return value
+
+    vector = np.zeros(3, dtype=np.float32)
+    assert accept_vector(vector) is vector
+
+    with pytest.raises(TypeCheckError):
+        accept_vector(np.zeros(3, dtype=np.float64))
 
 
 def test_maxwelltm_rejects_3d_coordinates() -> None:

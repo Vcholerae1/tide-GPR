@@ -24,7 +24,7 @@
 
 !!! warning "GPU Support"
     If you use CUDA, install a CUDA-enabled PyTorch build before installing TIDE.
-    
+
 ### Requirements
 
 | Dependency | Version |

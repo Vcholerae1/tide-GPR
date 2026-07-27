@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 from beartype import beartype
-from jaxtyping import Float, Int, jaxtyped
-from numpy.typing import NDArray
+from jaxtyping import Float, Float32, Int, jaxtyped
 from torch import Tensor
 
 runtime_typecheck = jaxtyped(typechecker=beartype)
@@ -55,8 +54,8 @@ ReceiverData = (
     | Float[Tensor, "batch time shot receiver"]
 )
 
-VectorF32 = Float[NDArray[np.float32], "n"]
-MatrixF32 = Float[NDArray[np.float32], "m n"]
+VectorF32 = Float32[np.ndarray, "n"]
+MatrixF32 = Float32[np.ndarray, "m n"]
 
 __all__ = [
     "BatchedModel2D",

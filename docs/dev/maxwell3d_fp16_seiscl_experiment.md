@@ -28,11 +28,13 @@ Three forward paths were compared:
 | Paired FP16 I/O | FP16 | FP32 `float2` | 2 x-cells | FP32 |
 
 The paired path follows the central mechanism in
-[`header_FD_fp16.cl`](../../references/SeisCL/src/header_FD_fp16.cl): two
+[`header_FD_fp16.cl`](https://github.com/gfabieno/SeisCL/blob/3a52b6869c0042b225173504949dea8e4674472e/src/header_FD_fp16.cl):
+two
 adjacent values are loaded as a pair, converted to FP32 lanes for stencil
 arithmetic, and rounded back to FP16. SeisCL also stores its `psi` absorbing
 boundary state using the precision-selected paired type, as visible in
-[`update_v3D_half2.cl`](../../references/SeisCL/src/update_v3D_half2.cl). Tide's
+[`update_v3D_half2.cl`](https://github.com/gfabieno/SeisCL/blob/3a52b6869c0042b225173504949dea8e4674472e/src/update_v3D_half2.cl).
+Tide's
 prototype deliberately leaves all 12 CPML memories in FP32 to isolate paired
 primary-field execution.
 
@@ -149,4 +151,3 @@ shows a clear end-to-end gain.
 - Do not make paired execution the default or add a public compute-mode value
 - Do not extend FP16 to gradients, dispersion, or callbacks from this evidence
 - Require workload-specific accuracy checks before using FP16-generated data
-
