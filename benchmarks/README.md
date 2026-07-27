@@ -39,10 +39,15 @@ evaluations. It also reports peak allocation and relative error. Use
 `--storage-compression none` to isolate reuse accuracy from BF16 background
 snapshot quantization.
 
-On the same RTX 4070, four large BF16 directions (10 repeats) measured
-246.25 ms with the context, 275.44 ms as independent HVPs, and 255.97 ms as
-central differences. Background reuse was therefore about 10.6% faster than
-independent HVPs and 3.8% faster than finite differences. Peak allocation was
-517.6 MiB for the context versus 517.1 MiB for independent HVPs and 258.5 MiB
-for finite differences. Reusing BF16 snapshots changed the result by relative
-L2 `1.28e-3`; full-precision storage is the accuracy-first option.
+On the same RTX 4070, four large BF16 directions (20 repeats) measured
+149.49 ms with `block_size=4`, 274.31 ms as independent HVPs, and 260.94 ms as
+central differences. Caching the forward and background-adjoint histories and
+using a native direction batch was therefore about 45.5% faster than
+independent HVPs and 42.7% faster than finite differences. Peak allocation was
+1207.0 MiB for the context versus 517.1 MiB for independent HVPs and 258.5 MiB
+for finite differences.
+
+For a lower-memory setting, `block_size=2` measured 206.03 ms and 926.7 MiB.
+Reusing BF16 snapshots changed the result by relative L2 `1.28e-3`;
+full-precision storage reduced the medium-case reuse error to `1.80e-7` and is
+the accuracy-first option.

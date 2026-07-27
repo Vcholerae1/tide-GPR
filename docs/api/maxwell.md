@@ -142,10 +142,11 @@ implementation.
 
 `linearize_maxwelltm` creates a `TM2DLinearizationContext` for applying the
 same TM2D Hessian to several epsilon/sigma directions. Its first `hvp` builds
-the normal background forward/adjoint state; later calls reuse the background
-receiver data and forward `Ey`/`curl(H)` snapshots and propagate only the new
-tangent field. `hvp_batch` accepts direction tensors shaped `(K, ny, nx)` and
-processes them in bounded blocks.
+the normal background forward/adjoint state. Later full-Hessian calls reuse the
+background receiver data, forward `Ey`/`curl(H)` snapshots, and the
+direction-independent background-adjoint `lambda_Ey` history. `hvp_batch`
+accepts direction tensors shaped `(K, ny, nx)` and executes each block as one
+native `K * shots` CUDA launch group.
 
 ```python
 with tide.linearize_maxwelltm(
@@ -168,11 +169,12 @@ with tide.linearize_maxwelltm(
 
 Native snapshot reuse currently requires CUDA, `storage_mode="device"`, and
 `model_gradient_sampling_interval` 0 or 1. Other configurations keep the same
-API but execute independent HVPs. Directions inside a block currently execute
-sequentially; `block_size` bounds orchestration and is reserved for a future
-direction-batched CUDA launch. The context detects in-place changes to its
-model, source amplitudes, or observations and must be recreated after such a
-change. Call `close`, or use the context manager, to release cached snapshots.
+API but execute independent HVPs. A larger `block_size` reduces launches and
+increases parallelism, while allocating tangent snapshots and workspaces for
+more directions at once. The context detects in-place changes to its model,
+source/receiver geometry, source amplitudes, or observations and must be
+recreated after such a change. Call `close`, or use the context manager, to
+release cached snapshots.
 
 ## Advanced or Internal Functions
 - prepare_parameters

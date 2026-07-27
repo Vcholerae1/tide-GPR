@@ -95,10 +95,21 @@ class TM2DLinearizationContext:
                 if source_amplitude is not None
                 else None
             ),
+            "source_location": (
+                _tensor_fingerprint(source_location)
+                if source_location is not None
+                else None
+            ),
+            "receiver_location": (
+                _tensor_fingerprint(receiver_location)
+                if receiver_location is not None
+                else None
+            ),
             "observed_data": _tensor_fingerprint(observed_data),
         }
         self.background_builds = 0
         self.reused_directions = 0
+        self.batched_blocks = 0
 
     @property
     def can_reuse_background(self) -> bool:
@@ -109,6 +120,11 @@ class TM2DLinearizationContext:
             and self.storage_mode == "device"
             and self.model_gradient_sampling_interval in {0, 1}
         )
+
+    @property
+    def can_batch_directions(self) -> bool:
+        """Whether full-Hessian directions can share one native CUDA batch."""
+        return self.can_reuse_background and self.hessian_mode == "full"
 
     @property
     def predicted_data(self) -> torch.Tensor | None:
@@ -125,6 +141,8 @@ class TM2DLinearizationContext:
             "sigma": self.sigma,
             "mu": self.mu,
             "source_amplitude": self.source_amplitude,
+            "source_location": self.source_location,
+            "receiver_location": self.receiver_location,
             "observed_data": self.observed_data,
         }
         for name, tensor in tensors.items():
@@ -227,6 +245,12 @@ class TM2DLinearizationContext:
             raise ValueError("At least one direction batch must be provided.")
         if any(direction.ndim != 3 for direction in directions):
             raise ValueError("Direction batches must have shape (K, ny, nx).")
+        if any(
+            tuple(direction.shape[1:]) != self.epsilon.shape for direction in directions
+        ):
+            raise ValueError(
+                f"Direction batches must have spatial shape {tuple(self.epsilon.shape)}."
+            )
         k = int(directions[0].shape[0])
         if any(int(direction.shape[0]) != k for direction in directions):
             raise ValueError("Direction batches must have the same leading size.")
@@ -239,16 +263,96 @@ class TM2DLinearizationContext:
 
         epsilon_parts: list[torch.Tensor] = []
         sigma_parts: list[torch.Tensor] = []
-        for block_start in range(0, k, block_size):
+        block_start = 0
+        if self.can_batch_directions and self._background_cache is None:
+            first_epsilon, first_sigma = self.hvp(
+                vepsilon=None if vepsilon is None else vepsilon[0],
+                vsigma=None if vsigma is None else vsigma[0],
+            )
+            epsilon_parts.append(first_epsilon)
+            sigma_parts.append(first_sigma)
+            block_start = 1
+
+        for block_start in range(block_start, k, block_size):
             block_end = min(block_start + block_size, k)
-            for index in range(block_start, block_end):
-                hvp_epsilon, hvp_sigma = self.hvp(
-                    vepsilon=None if vepsilon is None else vepsilon[index],
-                    vsigma=None if vsigma is None else vsigma[index],
+            if self.can_batch_directions:
+                block_epsilon, block_sigma = self._hvp_native_block(
+                    vepsilon=(
+                        None if vepsilon is None else vepsilon[block_start:block_end]
+                    ),
+                    vsigma=(None if vsigma is None else vsigma[block_start:block_end]),
                 )
-                epsilon_parts.append(hvp_epsilon)
-                sigma_parts.append(hvp_sigma)
+                epsilon_parts.extend(block_epsilon.unbind(0))
+                sigma_parts.extend(block_sigma.unbind(0))
+                self.reused_directions += block_end - block_start
+                self.batched_blocks += 1
+            else:
+                for index in range(block_start, block_end):
+                    hvp_epsilon, hvp_sigma = self.hvp(
+                        vepsilon=None if vepsilon is None else vepsilon[index],
+                        vsigma=None if vsigma is None else vsigma[index],
+                    )
+                    epsilon_parts.append(hvp_epsilon)
+                    sigma_parts.append(hvp_sigma)
         return torch.stack(epsilon_parts), torch.stack(sigma_parts)
+
+    def _hvp_native_block(
+        self,
+        *,
+        vepsilon: torch.Tensor | None,
+        vsigma: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply one native CUDA launch group to a block of directions."""
+        if self._background_cache is None:
+            raise RuntimeError("The background cache has not been built.")
+        directions = [value for value in (vepsilon, vsigma) if value is not None]
+        block_directions = int(directions[0].shape[0])
+        n_shots = int(self._background_cache["n_shots"])
+        execution_batch = block_directions * n_shots
+
+        def repeat_model(model: torch.Tensor) -> torch.Tensor:
+            return model.unsqueeze(0).expand(execution_batch, *model.shape).contiguous()
+
+        def repeat_direction(direction: torch.Tensor | None) -> torch.Tensor | None:
+            if direction is None:
+                return None
+            return direction.repeat_interleave(n_shots, dim=0).contiguous()
+
+        def repeat_shots(tensor: torch.Tensor | None) -> torch.Tensor | None:
+            if tensor is None:
+                return None
+            return tensor.repeat((block_directions,) + (1,) * (tensor.ndim - 1))
+
+        observed_data = self.observed_data.repeat(1, block_directions, 1)
+        hvp_epsilon, hvp_sigma = tm2d_receiver_hvp_native(
+            repeat_model(self.epsilon),
+            repeat_model(self.sigma),
+            repeat_model(self.mu),
+            vepsilon=repeat_direction(vepsilon),
+            vsigma=repeat_direction(vsigma),
+            grid_spacing=self.grid_spacing,
+            dt=self.dt,
+            source_amplitude=repeat_shots(self.source_amplitude),
+            source_location=repeat_shots(self.source_location),
+            receiver_location=repeat_shots(self.receiver_location),
+            observed_data=observed_data,
+            misfit_fn=self.misfit,
+            stencil=self.stencil,
+            pml_width=self.pml_width,
+            max_vel=self.max_vel,
+            nt=self.nt,
+            model_gradient_sampling_interval=self.model_gradient_sampling_interval,
+            linearize_source=self.linearize_source,
+            hessian_mode=self.hessian_mode,
+            storage_mode=self.storage_mode,
+            storage_compression=self.storage_compression,
+            background_cache=self._background_cache,
+        )
+        spatial_shape = self.epsilon.shape
+        return (
+            hvp_epsilon.reshape(block_directions, n_shots, *spatial_shape).sum(1),
+            hvp_sigma.reshape(block_directions, n_shots, *spatial_shape).sum(1),
+        )
 
     def close(self) -> None:
         """Release cached snapshots."""

@@ -710,13 +710,15 @@ static TIDE_HOST_DEVICE void forward_kernel_e_born_from_snapshots_core(
     T const *dca_ptr, T const *dcb_ptr, T const *dhx, T const *dhz, T *dey,
     T *dm_hx_z, T *dm_hz_x, StoreT const *ey_store,
     StoreT const *curl_h_store, StoreT *dey_store, StoreT *dcurl_h_store,
-    int64_t y, int64_t x, int64_t shot_idx) {
+    int64_t background_shot_idx, int64_t y, int64_t x, int64_t shot_idx) {
 
   int const FD_PAD = tide::StencilTraits<STENCIL_ORDER>::FD_PAD;
   if (y >= FD_PAD && x >= FD_PAD && y < params.ny - FD_PAD + 1 &&
       x < params.nx - FD_PAD + 1 && shot_idx < params.n_shots) {
     int64_t const j = y * params.nx + x;
     int64_t const i = shot_idx * params.shot_numel + j;
+    int64_t const background_i =
+        background_shot_idx * params.shot_numel + j;
     T const ca_val = params.ca_batched ? ca_ptr[i] : ca_ptr[j];
     T const cb_val = params.cb_batched ? cb_ptr[i] : cb_ptr[j];
     T const dca_val = params.ca_batched ? dca_ptr[i] : dca_ptr[j];
@@ -742,8 +744,9 @@ static TIDE_HOST_DEVICE void forward_kernel_e_born_from_snapshots_core(
 
     T const dcurl_h = ddhz_dx - ddhx_dz;
     T const dey_n = dey[i];
-    T const ey_n = decode_snapshot<StoreT, T>(ey_store[i]);
-    T const curl_h = decode_snapshot<StoreT, T>(curl_h_store[i]);
+    T const ey_n = decode_snapshot<StoreT, T>(ey_store[background_i]);
+    T const curl_h =
+        decode_snapshot<StoreT, T>(curl_h_store[background_i]);
     if (dey_store != nullptr) {
       dey_store[i] = encode_snapshot<StoreT, T>(dey_n);
     }

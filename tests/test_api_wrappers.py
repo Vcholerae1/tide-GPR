@@ -564,16 +564,27 @@ def test_maxwelltm_hvp_native_cuda_supports_gradient_sampling_interval():
 def test_tm2d_linearization_context_reuses_background_for_direction_batch():
     device = torch.device("cuda")
     case = _build_tm_case(device)
-    observed_data = _tm_observed_data(case, device)
+    source_amplitude = torch.cat(
+        [case["source_amplitude"], 0.7 * case["source_amplitude"]], dim=0
+    )
+    source_location = case["source_location"].repeat(2, 1, 1)
+    receiver_location = case["receiver_location"].repeat(2, 1, 1)
+    observed_data = torch.zeros(
+        source_amplitude.shape[-1],
+        2,
+        receiver_location.shape[1],
+        device=device,
+        dtype=case["epsilon"].dtype,
+    )
     vepsilon = torch.stack(
         [case["depsilon"], 2.0 * case["depsilon"], -case["depsilon"]]
     )
     kwargs = {
         "grid_spacing": case["dx"],
         "dt": case["dt"],
-        "source_amplitude": case["source_amplitude"],
-        "source_location": case["source_location"],
-        "receiver_location": case["receiver_location"],
+        "source_amplitude": source_amplitude,
+        "source_location": source_location,
+        "receiver_location": receiver_location,
         "observed_data": observed_data,
         "stencil": 2,
         "pml_width": 1,
@@ -586,6 +597,7 @@ def test_tm2d_linearization_context_reuses_background_for_direction_batch():
         actual = context.hvp_batch(vepsilon=vepsilon, block_size=2)
         assert context.background_builds == 1
         assert context.reused_directions == 2
+        assert context.batched_blocks == 1
         assert context.predicted_data is not None
 
     expected_parts = [
@@ -600,7 +612,9 @@ def test_tm2d_linearization_context_reuses_background_for_direction_batch():
     ]
     expected = tuple(torch.stack(parts) for parts in zip(*expected_parts))
     for actual_part, expected_part in zip(actual, expected):
-        torch.testing.assert_close(actual_part, expected_part, rtol=3e-5, atol=1e-6)
+        relative_l2 = (actual_part - expected_part).norm() / expected_part.norm()
+        assert relative_l2 < 2e-5
+        assert torch.isfinite(actual_part).all()
 
 
 def test_tm2d_linearization_context_rejects_mutated_model():

@@ -1432,8 +1432,8 @@ extern "C"
         TIDE_DTYPE *const ey_store_1, void *const ey_store_3,
         char const *const *const ey_filenames, TIDE_DTYPE *const curl_store_1,
         void *const curl_store_3, char const *const *const curl_filenames,
-        void const *const dey_store,
-        void const *const dcurl_store,
+        void const *const dey_store, void const *const dcurl_store,
+        void *const lambda_store, int64_t const background_n_shots,
         TIDE_DTYPE *const ey, TIDE_DTYPE *const hx, TIDE_DTYPE *const hz,
         TIDE_DTYPE *const dey, TIDE_DTYPE *const dhx, TIDE_DTYPE *const dhz,
         TIDE_DTYPE *const grad_f0, TIDE_DTYPE *const grad_df,
@@ -1463,6 +1463,8 @@ extern "C"
         int64_t const storage_mode, int64_t const storage_format,
         int64_t const shot_bytes_uncomp, bool const store_ey_needed,
         bool const store_curl_needed,
+        bool const capture_background_adjoint,
+        bool const reuse_background_adjoint,
         bool const ca_batched, bool const cb_batched, bool const cq_batched,
         int64_t const start_t, int64_t const pml_y0, int64_t const pml_x0,
         int64_t const pml_y1, int64_t const pml_x1, int64_t const n_threads,
@@ -1477,6 +1479,10 @@ extern "C"
   (void)df;
   (void)ey_store_3;
   (void)curl_store_3;
+  (void)lambda_store;
+  (void)background_n_shots;
+  (void)capture_background_adjoint;
+  (void)reuse_background_adjoint;
 #ifdef _OPENMP
   int const prev_threads = omp_get_max_threads();
   if (n_threads > 0) {

@@ -287,6 +287,7 @@ _TM_BORN_TANGENT_FORWARD_WITH_STORAGE_SPEC: _Spec = [
     *_TM_PML_PROFILES,
     *_TM_COMMON_TAIL,
     (_I, 1, "storage_format"),
+    (_I, 1, "background_n_shots"),
     *_TM_BATCHED_FLAGS,
     (_P, 1, "compute_stream"),
 ]
@@ -323,6 +324,8 @@ _TM_BORN_BACKWARD_BGGRAD_SPEC: _Spec = [
         "ey_store_1, ey_store_3, ey_filenames, curl_store_1, curl_store_3, curl_filenames",
     ),
     (_P, 2, "dey_store, dcurl_store"),
+    (_P, 1, "lambda_store"),
+    (_I, 1, "background_n_shots"),
     (_P, 3, "ey, hx, hz"),
     (_P, 3, "dey, dhx, dhz"),
     (_P, 2, "grad_f0, grad_df"),
@@ -339,6 +342,7 @@ _TM_BORN_BACKWARD_BGGRAD_SPEC: _Spec = [
     *_TM_PML_PROFILES,
     *_TM_COMMON_TAIL,
     *_TM_STORAGE_TAIL,
+    (_B, 2, "capture_background_adjoint, reuse_background_adjoint"),
     *_TM_BATCHED_FLAGS,
     (_P, 2, "compute_stream, storage_stream"),
 ]

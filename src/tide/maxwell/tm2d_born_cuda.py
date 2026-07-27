@@ -67,12 +67,13 @@ def borntm_c_cuda(
     return_background_receiver_amplitudes: bool = False,
     background_cache: dict[str, Any] | None = None,
     capture_background_cache: bool = False,
+    capture_background_adjoint: bool = False,
 ):
     from .. import backend_utils
 
-    if epsilon.ndim != 2:
+    if epsilon.ndim not in {2, 3}:
         raise NotImplementedError(
-            "Native borntm currently supports a single 2D model only."
+            "Native borntm requires a 2D model or one 2D model per shot."
         )
     if sigma.shape != epsilon.shape or mu.shape != epsilon.shape:
         raise RuntimeError("sigma and mu must have the same shape as epsilon")
@@ -241,7 +242,7 @@ def borntm_c_cuda(
     fd_pad_list = [fd_pad, fd_pad - 1, fd_pad, fd_pad - 1]
     total_pad = [fd + pml for fd, pml in zip(fd_pad_list, pml_width_list)]
 
-    model_ny, model_nx = epsilon.shape
+    model_ny, model_nx = epsilon.shape[-2:]
     padded_ny = model_ny + total_pad[0] + total_pad[1]
     padded_nx = model_nx + total_pad[2] + total_pad[3]
     padded_size = (padded_ny, padded_nx)
@@ -262,9 +263,16 @@ def borntm_c_cuda(
         mu_padded,
         dt,
     )
-    ca = material["ca"][None, :, :].contiguous()
-    cb = material["cb"][None, :, :].contiguous()
-    cq = material["cq"][None, :, :].contiguous()
+    model_batched = epsilon.ndim == 3
+    if model_batched and int(epsilon.shape[0]) != n_shots:
+        raise ValueError("Native batched borntm currently requires one model per shot.")
+    ca = material["ca"].contiguous()
+    cb = material["cb"].contiguous()
+    cq = material["cq"].contiguous()
+    if not model_batched:
+        ca = ca[None, :, :]
+        cb = cb[None, :, :]
+        cq = cq[None, :, :]
 
     if parameterization == "epsilon_sigma":
         depsilon_padded = create_or_pad(
@@ -312,8 +320,11 @@ def borntm_c_cuda(
             mode="constant",
         )
 
-    dca_native = dca_padded[None, :, :].contiguous()
-    dcb_native = dcb_padded[None, :, :].contiguous()
+    dca_native = dca_padded.contiguous()
+    dcb_native = dcb_padded.contiguous()
+    if not model_batched:
+        dca_native = dca_native[None, :, :]
+        dcb_native = dcb_native[None, :, :]
 
     flat_model_shape = padded_ny * padded_nx
     if source_location is not None and source_location.numel() > 0:
@@ -338,10 +349,14 @@ def borntm_c_cuda(
     cb_at_src: torch.Tensor | None = None
     dcb_at_src: torch.Tensor | None = None
     if n_sources > 0:
-        cb_flat = cb.reshape(1, flat_model_shape).expand(n_shots, -1)
+        cb_flat = cb.reshape(-1, flat_model_shape)
+        if not model_batched:
+            cb_flat = cb_flat.expand(n_shots, -1)
         cb_at_src = cb_flat.gather(1, sources_i)
         if linearize_source:
-            dcb_flat = dcb_native.reshape(1, flat_model_shape).expand(n_shots, -1)
+            dcb_flat = dcb_native.reshape(-1, flat_model_shape)
+            if not model_batched:
+                dcb_flat = dcb_flat.expand(n_shots, -1)
             dcb_at_src = dcb_flat.gather(1, sources_i)
 
     f0 = _prepare_tm2d_source_injection(
@@ -618,6 +633,16 @@ def borntm_c_cuda(
         if background_cache is not None
         else empty_cached
     )
+    cached_lambda_store = (
+        background_cache.get("lambda_store", empty_cached)
+        if background_cache is not None
+        else empty_cached
+    )
+    background_n_shots = (
+        int(background_cache.get("n_shots", n_shots))
+        if background_cache is not None
+        else n_shots
+    )
 
     if needs_autograd:
         result = BornTMForwardFunc.apply(
@@ -653,9 +678,9 @@ def borntm_c_cuda(
             n_receivers,
             gradient_sampling_interval,
             stencil,
-            False,
-            False,
-            False,
+            model_batched,
+            model_batched,
+            model_batched,
             pml_y0,
             pml_x0,
             pml_y1,
@@ -684,6 +709,9 @@ def borntm_c_cuda(
             cached_curl_store,
             cached_background_receiver,
             background_cache is not None,
+            cached_lambda_store,
+            capture_background_adjoint,
+            background_n_shots,
         )
         (
             dEy_out,
@@ -709,9 +737,11 @@ def borntm_c_cuda(
             captured_cache = {
                 "ey_store": ctx_data["backward_storage_tensors"][0],
                 "curl_store": ctx_data["backward_storage_tensors"][2],
+                "lambda_store": ctx_data["lambda_store"],
                 "predicted_data": background_receiver_amplitudes.detach(),
                 "storage_format": ctx_data["storage_format"],
                 "shot_bytes_uncomp": ctx_data["shot_bytes_uncomp"],
+                "n_shots": n_shots,
             }
     else:
         forward_func = backend_utils.get_backend_function(
@@ -791,9 +821,9 @@ def borntm_c_cuda(
             n_sources,
             n_receivers,
             gradient_sampling_interval,
-            False,
-            False,
-            False,
+            model_batched,
+            model_batched,
+            model_batched,
             0,
             pml_y0,
             pml_x0,

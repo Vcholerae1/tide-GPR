@@ -105,6 +105,9 @@ class BornTMForwardFunc(torch.autograd.Function):
         cached_curl_store: torch.Tensor | None = None,
         cached_background_receiver: torch.Tensor | None = None,
         reuse_background: bool = False,
+        cached_lambda_store: torch.Tensor | None = None,
+        capture_background_adjoint: bool = False,
+        background_n_shots: int = 0,
     ) -> tuple[Any, ...]:
         from .. import backend_utils
 
@@ -118,6 +121,10 @@ class BornTMForwardFunc(torch.autograd.Function):
             cached_background_receiver = torch.empty(
                 0, device=device, dtype=coeff_dtype
             )
+        if cached_lambda_store is None:
+            cached_lambda_store = torch.empty(0, device=device, dtype=coeff_dtype)
+        if background_n_shots <= 0:
+            background_n_shots = n_shots
 
         dca_requires_grad = dca.requires_grad
         dcb_requires_grad = dcb.requires_grad
@@ -165,6 +172,7 @@ class BornTMForwardFunc(torch.autograd.Function):
             torch.empty(0, device=device, dtype=store_dtype),
             torch.empty(0, device=device, dtype=store_dtype),
         )
+        lambda_store = torch.empty(0, device=device, dtype=store_dtype)
 
         if needs_storage:
             import ctypes
@@ -306,7 +314,31 @@ class BornTMForwardFunc(torch.autograd.Function):
                     curl_store_1,
                     curl_store_3,
                 ]
-                background_receiver_amplitudes.copy_(cached_background_receiver)
+                if n_shots % background_n_shots != 0:
+                    raise ValueError(
+                        "Direction-batched shots must be a multiple of cached "
+                        "background shots."
+                    )
+                background_receiver_amplitudes.copy_(
+                    cached_background_receiver.repeat(
+                        1, n_shots // background_n_shots, 1
+                    )
+                )
+            if capture_background_adjoint:
+                if storage_mode != STORAGE_DEVICE:
+                    raise NotImplementedError(
+                        "Reusable TM2D background adjoints require device storage."
+                    )
+                lambda_store = torch.empty(
+                    num_steps_stored,
+                    n_shots,
+                    ny,
+                    nx,
+                    device=device,
+                    dtype=store_dtype,
+                )
+            elif reuse_background and cached_lambda_store.numel() > 0:
+                lambda_store = cached_lambda_store
 
             if reuse_background:
                 forward_func = backend_utils.get_backend_function(
@@ -360,6 +392,7 @@ class BornTMForwardFunc(torch.autograd.Function):
                     n_receivers,
                     step_ratio,
                     storage_format,
+                    background_n_shots,
                     ca_batched,
                     cb_batched,
                     cq_batched,
@@ -547,6 +580,12 @@ class BornTMForwardFunc(torch.autograd.Function):
             "dcb_requires_grad": dcb_requires_grad,
             "df_requires_grad": df_requires_grad,
             "direct_snapshot_tensors": direct_snapshot_tensors,
+            "lambda_store": lambda_store,
+            "capture_background_adjoint": capture_background_adjoint,
+            "reuse_background_adjoint": (
+                reuse_background and cached_lambda_store.numel() > 0
+            ),
+            "background_n_shots": background_n_shots,
             "stream_keepalive": stream_keepalive,
         }
         ctx_handle = _register_ctx_handle(ctx_data)
@@ -603,6 +642,7 @@ class BornTMForwardFunc(torch.autograd.Function):
             inputs[20],  # receivers_i
             *backward_storage_tensors,
             *direct_snapshot_tensors,
+            ctx_data["lambda_store"],
         )
         ctx.stream_keepalive = ctx_data["stream_keepalive"]
         ctx.rdy = inputs[21]
@@ -629,6 +669,9 @@ class BornTMForwardFunc(torch.autograd.Function):
         ctx.dca_requires_grad = ctx_data["dca_requires_grad"]
         ctx.dcb_requires_grad = ctx_data["dcb_requires_grad"]
         ctx.df_requires_grad = ctx_data["df_requires_grad"]
+        ctx.capture_background_adjoint = ctx_data["capture_background_adjoint"]
+        ctx.reuse_background_adjoint = ctx_data["reuse_background_adjoint"]
+        ctx.background_n_shots = ctx_data["background_n_shots"]
         ctx.background_grad_required = any(ctx.needs_input_grad[i] for i in (2, 3, 5))
         ctx.n_threads = inputs[57]
         ctx.backend_device = inputs[58]
@@ -693,6 +736,7 @@ class BornTMForwardFunc(torch.autograd.Function):
             curl_store_3,
             dey_store,
             dcurl_store,
+            lambda_store,
         ) = ctx.saved_tensors
 
         device = ca.device
@@ -886,10 +930,10 @@ class BornTMForwardFunc(torch.autograd.Function):
             _make_tm_storage_streams(device, ctx.storage_mode)
         )
         ctx.stream_keepalive = stream_keepalive
-        grad_ca_shot_ptr = grad_ca if ctx.ca_batched else grad_ca_shot
-        grad_cb_shot_ptr = grad_cb if ctx.cb_batched else grad_cb_shot
-        grad_dca_shot_ptr = grad_dca if ctx.ca_batched else grad_dca_shot
-        grad_dcb_shot_ptr = grad_dcb if ctx.cb_batched else grad_dcb_shot
+        grad_ca_shot_ptr = grad_ca_shot
+        grad_cb_shot_ptr = grad_cb_shot
+        grad_dca_shot_ptr = grad_dca_shot
+        grad_dcb_shot_ptr = grad_dcb_shot
 
         if needs_background_backward and not needs_bggrad:
             _zero_tensors_(
@@ -994,12 +1038,8 @@ class BornTMForwardFunc(torch.autograd.Function):
             bggrad_grad_f0 = grad_f0
             bggrad_grad_ca = grad_ca
             bggrad_grad_cb = grad_cb
-            bggrad_grad_ca_shot_ptr = (
-                bggrad_grad_ca if ctx.ca_batched else grad_ca_shot_ptr
-            )
-            bggrad_grad_cb_shot_ptr = (
-                bggrad_grad_cb if ctx.cb_batched else grad_cb_shot_ptr
-            )
+            bggrad_grad_ca_shot_ptr = grad_ca_shot_ptr
+            bggrad_grad_cb_shot_ptr = grad_cb_shot_ptr
             if not ctx.ca_batched:
                 _zero_tensors_(grad_ca_shot, grad_dca_shot)
             if not ctx.cb_batched:
@@ -1029,6 +1069,8 @@ class BornTMForwardFunc(torch.autograd.Function):
                 curl_filenames_ptr,
                 backend_utils.tensor_to_ptr(dey_store),
                 backend_utils.tensor_to_ptr(dcurl_store),
+                backend_utils.tensor_to_ptr(lambda_store),
+                ctx.background_n_shots,
                 backend_utils.tensor_to_ptr(lambda_ey),
                 backend_utils.tensor_to_ptr(lambda_hx),
                 backend_utils.tensor_to_ptr(lambda_hz),
@@ -1085,6 +1127,8 @@ class BornTMForwardFunc(torch.autograd.Function):
                 ctx.shot_bytes_uncomp,
                 store_ey_needed,
                 store_curl_needed,
+                ctx.capture_background_adjoint,
+                ctx.reuse_background_adjoint,
                 ctx.ca_batched,
                 ctx.cb_batched,
                 ctx.cq_batched,
@@ -1415,6 +1459,9 @@ def tm2d_receiver_hvp_native(
         return_background_receiver_amplitudes=True,
         background_cache=background_cache,
         capture_background_cache=capture_background_cache,
+        capture_background_adjoint=(
+            capture_background_cache and hessian_mode == "full"
+        ),
     )
     captured_cache = born_outputs[-1] if capture_background_cache else None
     data_offset = 1 if capture_background_cache else 0

@@ -1283,11 +1283,15 @@ void born_tangent_kernel_e_from_snapshots(
     TIDE_DTYPE const *__restrict const ky,
     TIDE_DTYPE const *__restrict const kyh,
     TIDE_DTYPE const *__restrict const kx,
-    TIDE_DTYPE const *__restrict const kxh) {
+    TIDE_DTYPE const *__restrict const kxh,
+    int64_t const background_n_shots) {
   int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
   int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
   int64_t shot_idx =
       (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
+  int64_t const background_shot_idx =
+      background_n_shots == n_shots ? shot_idx
+                                    : shot_idx % background_n_shots;
   ::tide::GridParams<TIDE_DTYPE> params = {
       ay,      ayh,        ax,         axh,        by,     byh,    bx,
       bxh,     ky,         kyh,        kx,         kxh,
@@ -1297,7 +1301,8 @@ void born_tangent_kernel_e_from_snapshots(
   ::tide::forward_kernel_e_born_from_snapshots_core<
       TIDE_DTYPE, StoreT, TIDE_STENCIL>(
       params, ca, cb, dca, dcb, dhx, dhz, dey, dm_hx_z, dm_hz_x, ey_store,
-      curl_h_store, dey_store, dcurl_h_store, y, x, shot_idx);
+      curl_h_store, dey_store, dcurl_h_store, background_shot_idx, y, x,
+      shot_idx);
 }
 
 template <typename StoreT>
@@ -1420,13 +1425,52 @@ __global__ void add_inplace_and_zero(TIDE_DTYPE *__restrict const dest,
   }
 }
 
-template <typename StoreT, bool GradCa, bool GradCb>
+template <typename StoreT>
+__global__ __launch_bounds__(256) void store_adjoint_snapshot_kernel(
+    TIDE_DTYPE const *__restrict const source,
+    StoreT *__restrict const destination) {
+  int64_t const x =
+      (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t const y =
+      (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
+  int64_t const shot_idx =
+      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
+  if (shot_idx < n_shots && y < ny && x < nx) {
+    int64_t const i = shot_idx * shot_numel + y * nx + x;
+    destination[i] =
+        ::tide::encode_snapshot<StoreT, TIDE_DTYPE>(source[i]);
+  }
+}
+
+template <typename StoreT>
+__global__ __launch_bounds__(256) void load_adjoint_snapshot_kernel(
+    StoreT const *__restrict const source,
+    TIDE_DTYPE *__restrict const destination,
+    int64_t const source_n_shots) {
+  int64_t const x =
+      (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t const y =
+      (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
+  int64_t const shot_idx =
+      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
+  if (shot_idx < n_shots && y < ny && x < nx) {
+    int64_t const i = shot_idx * shot_numel + y * nx + x;
+    int64_t const source_shot_idx =
+        source_n_shots == n_shots ? shot_idx : shot_idx % source_n_shots;
+    int64_t const source_i = source_shot_idx * shot_numel + y * nx + x;
+    destination[i] =
+        ::tide::decode_snapshot<StoreT, TIDE_DTYPE>(source[source_i]);
+  }
+}
+
+template <typename StoreT, bool GradCa, bool GradCb, bool MapStoreShots>
 __global__ void coeff_grad_kernel(
     TIDE_DTYPE const *__restrict const lambda_ey,
     StoreT const *__restrict const ey_store,
     StoreT const *__restrict const curl_h_store,
     TIDE_DTYPE *__restrict const grad_ca_shot,
-    TIDE_DTYPE *__restrict const grad_cb_shot, int64_t const step_ratio_val) {
+    TIDE_DTYPE *__restrict const grad_cb_shot, int64_t const step_ratio_val,
+    int64_t const store_n_shots) {
   int64_t x =
       (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
   int64_t y =
@@ -1440,16 +1484,20 @@ __global__ void coeff_grad_kernel(
 
   int64_t const j = y * nx + x;
   int64_t const i = shot_idx * shot_numel + j;
+  int64_t store_i = i;
+  if constexpr (MapStoreShots) {
+    store_i = (shot_idx % store_n_shots) * shot_numel + j;
+  }
   TIDE_DTYPE const lambda_val = lambda_ey[i];
   TIDE_DTYPE const step_scale = step_ratio_to_field(step_ratio_val);
   if constexpr (GradCa) {
     TIDE_DTYPE const ey_n =
-        tide::decode_snapshot<StoreT, TIDE_DTYPE>(ey_store[i]);
+        tide::decode_snapshot<StoreT, TIDE_DTYPE>(ey_store[store_i]);
     grad_ca_shot[i] += lambda_val * ey_n * step_scale;
   }
   if constexpr (GradCb) {
     TIDE_DTYPE const curl_h_n =
-        tide::decode_snapshot<StoreT, TIDE_DTYPE>(curl_h_store[i]);
+        tide::decode_snapshot<StoreT, TIDE_DTYPE>(curl_h_store[store_i]);
     grad_cb_shot[i] += lambda_val * curl_h_n * step_scale;
   }
 }
@@ -1462,22 +1510,44 @@ static inline void launch_coeff_grad_kernel(
     StoreT const *__restrict const curl_h_store,
     TIDE_DTYPE *__restrict const grad_ca_shot,
     TIDE_DTYPE *__restrict const grad_cb_shot, bool const ca_requires_grad,
-    bool const cb_requires_grad, int64_t const step_ratio_val) {
+    bool const cb_requires_grad, int64_t const step_ratio_val,
+    int64_t const store_n_shots, bool const map_store_shots = false) {
   if (ca_requires_grad && cb_requires_grad) {
-    coeff_grad_kernel<StoreT, true, true>
-        <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream>>>(
-            lambda_ey, ey_store, curl_h_store, grad_ca_shot, grad_cb_shot,
-            step_ratio_val);
+    if (map_store_shots) {
+      coeff_grad_kernel<StoreT, true, true, true>
+          <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream>>>(
+              lambda_ey, ey_store, curl_h_store, grad_ca_shot, grad_cb_shot,
+              step_ratio_val, store_n_shots);
+    } else {
+      coeff_grad_kernel<StoreT, true, true, false>
+          <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream>>>(
+              lambda_ey, ey_store, curl_h_store, grad_ca_shot, grad_cb_shot,
+              step_ratio_val, store_n_shots);
+    }
   } else if (ca_requires_grad) {
-    coeff_grad_kernel<StoreT, true, false>
-        <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream>>>(
-            lambda_ey, ey_store, nullptr, grad_ca_shot, grad_cb_shot,
-            step_ratio_val);
+    if (map_store_shots) {
+      coeff_grad_kernel<StoreT, true, false, true>
+          <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream>>>(
+              lambda_ey, ey_store, nullptr, grad_ca_shot, grad_cb_shot,
+              step_ratio_val, store_n_shots);
+    } else {
+      coeff_grad_kernel<StoreT, true, false, false>
+          <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream>>>(
+              lambda_ey, ey_store, nullptr, grad_ca_shot, grad_cb_shot,
+              step_ratio_val, store_n_shots);
+    }
   } else if (cb_requires_grad) {
-    coeff_grad_kernel<StoreT, false, true>
-        <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream>>>(
-            lambda_ey, nullptr, curl_h_store, grad_ca_shot, grad_cb_shot,
-            step_ratio_val);
+    if (map_store_shots) {
+      coeff_grad_kernel<StoreT, false, true, true>
+          <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream>>>(
+              lambda_ey, nullptr, curl_h_store, grad_ca_shot, grad_cb_shot,
+              step_ratio_val, store_n_shots);
+    } else {
+      coeff_grad_kernel<StoreT, false, true, false>
+          <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream>>>(
+              lambda_ey, nullptr, curl_h_store, grad_ca_shot, grad_cb_shot,
+              step_ratio_val, store_n_shots);
+    }
   }
 }
 
@@ -3458,6 +3528,7 @@ extern "C" void FUNC(born_tangent_forward_with_storage)(
     int64_t const n_shots_h, int64_t const ny_h, int64_t const nx_h,
     int64_t const n_sources_per_shot_h, int64_t const n_receivers_per_shot_h,
     int64_t const step_ratio_h, int64_t const storage_format_h,
+    int64_t const background_n_shots_h,
     bool const ca_batched_h, bool const cb_batched_h,
     bool const cq_batched_h, int64_t const start_t, int64_t const pml_y0_h,
     int64_t const pml_x0_h, int64_t const pml_y1_h,
@@ -3477,6 +3548,8 @@ extern "C" void FUNC(born_tangent_forward_with_storage)(
       resolve_cuda_stream(compute_stream_handle);
   int64_t const shot_numel_h = ny_h * nx_h;
   int64_t const store_size = n_shots_h * shot_numel_h;
+  int64_t const background_store_size =
+      background_n_shots_h * shot_numel_h;
   bool const storage_bf16_h =
       (!kFieldIsHalf) && (storage_format_h == STORAGE_FORMAT_BF16);
 
@@ -3498,20 +3571,26 @@ extern "C" void FUNC(born_tangent_forward_with_storage)(
       born_tangent_kernel_e_from_snapshots<__nv_bfloat16>
           <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
               ca, cb, dca, dcb, dhx, dhz, dey, dm_hx_z, dm_hz_x,
-              (const __nv_bfloat16 *)ey_store + store_idx * store_size,
-              (const __nv_bfloat16 *)curl_store + store_idx * store_size,
+              (const __nv_bfloat16 *)ey_store +
+                  store_idx * background_store_size,
+              (const __nv_bfloat16 *)curl_store +
+                  store_idx * background_store_size,
               (__nv_bfloat16 *)dey_store + store_idx * store_size,
               (__nv_bfloat16 *)dcurl_store + store_idx * store_size, ay, ayh,
-              ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
+              ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh,
+              background_n_shots_h);
     } else {
       born_tangent_kernel_e_from_snapshots<TIDE_DTYPE>
           <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
               ca, cb, dca, dcb, dhx, dhz, dey, dm_hx_z, dm_hz_x,
-              (const TIDE_DTYPE *)ey_store + store_idx * store_size,
-              (const TIDE_DTYPE *)curl_store + store_idx * store_size,
+              (const TIDE_DTYPE *)ey_store +
+                  store_idx * background_store_size,
+              (const TIDE_DTYPE *)curl_store +
+                  store_idx * background_store_size,
               (TIDE_DTYPE *)dey_store + store_idx * store_size,
               (TIDE_DTYPE *)dcurl_store + store_idx * store_size, ay, ayh, ax,
-              axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
+              axh, by, byh, bx, bxh, ky, kyh, kx, kxh,
+              background_n_shots_h);
     }
     if (n_sources_per_shot_h > 0) {
       add_sources_ey<<<launch_cfg.dimGridSources, launch_cfg.dimBlockSources, 0,
@@ -3774,13 +3853,15 @@ extern "C" void FUNC(born_backward)(
             launch_cfg, stream_compute, lambda_ey,
             grad_ey ? (__nv_bfloat16 const *)ey_store_1_t : nullptr,
             grad_curl ? (__nv_bfloat16 const *)curl_store_1_t : nullptr,
-            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h);
+            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h,
+            n_shots_h);
       } else {
         launch_coeff_grad_kernel<TIDE_DTYPE>(
             launch_cfg, stream_compute, lambda_ey,
             grad_ey ? (TIDE_DTYPE const *)ey_store_1_t : nullptr,
             grad_curl ? (TIDE_DTYPE const *)curl_store_1_t : nullptr,
-            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h);
+            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h,
+            n_shots_h);
       }
     }
 
@@ -4076,13 +4157,15 @@ extern "C" void FUNC(backward)(
             launch_cfg, stream_compute, lambda_ey,
             grad_ey ? (__nv_bfloat16 const *)ey_store_1_t : nullptr,
             grad_curl ? (__nv_bfloat16 const *)curl_store_1_t : nullptr,
-            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h);
+            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h,
+            n_shots_h);
       } else {
         launch_coeff_grad_kernel<TIDE_DTYPE>(
             launch_cfg, stream_compute, lambda_ey,
             grad_ey ? (TIDE_DTYPE const *)ey_store_1_t : nullptr,
             grad_curl ? (TIDE_DTYPE const *)curl_store_1_t : nullptr,
-            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h);
+            grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h,
+            n_shots_h);
       }
     }
 
@@ -4157,8 +4240,8 @@ extern "C" void FUNC(born_backward_bggrad)(
     TIDE_DTYPE *const ey_store_1, void *const ey_store_3,
     char const *const *const ey_filenames, TIDE_DTYPE *const curl_store_1,
     void *const curl_store_3, char const *const *const curl_filenames,
-    void const *const dey_store,
-    void const *const dcurl_store,
+    void const *const dey_store, void const *const dcurl_store,
+    void *const lambda_store, int64_t const background_n_shots_h,
     TIDE_DTYPE *const ey, TIDE_DTYPE *const hx, TIDE_DTYPE *const hz,
     TIDE_DTYPE *const dey, TIDE_DTYPE *const dhx, TIDE_DTYPE *const dhz,
     TIDE_DTYPE *const grad_f0, TIDE_DTYPE *const grad_df,
@@ -4185,7 +4268,8 @@ extern "C" void FUNC(born_backward_bggrad)(
     int64_t const n_receivers_per_shot_h, int64_t const step_ratio_h,
     int64_t const storage_mode_h, int64_t const storage_format_h,
     int64_t const shot_bytes_uncomp_h, bool const ca_requires_grad,
-    bool const cb_requires_grad, bool const ca_batched_h,
+    bool const cb_requires_grad, bool const capture_background_adjoint,
+    bool const reuse_background_adjoint, bool const ca_batched_h,
     bool const cb_batched_h, bool const cq_batched_h, int64_t const start_t,
     int64_t const pml_y0_h, int64_t const pml_x0_h, int64_t const pml_y1_h,
     int64_t const pml_x1_h, int64_t const n_threads, int64_t const device,
@@ -4221,9 +4305,25 @@ extern "C" void FUNC(born_backward_bggrad)(
                  "born_backward_bggrad requires explicit scattered snapshots.\n");
     std::abort();
   }
+  if ((capture_background_adjoint || reuse_background_adjoint) &&
+      lambda_store == nullptr) {
+    std::fprintf(
+        stderr,
+        "born_backward_bggrad requires lambda storage when capturing or reusing "
+        "the background adjoint.\n");
+    std::abort();
+  }
+  if (capture_background_adjoint && reuse_background_adjoint) {
+    std::fprintf(stderr,
+                 "born_backward_bggrad cannot capture and reuse the background "
+                 "adjoint in the same pass.\n");
+    std::abort();
+  }
 
   int64_t const shot_numel_h = ny_h * nx_h;
   int64_t const store_size = n_shots_h * shot_numel_h;
+  int64_t const background_store_size =
+      background_n_shots_h * shot_numel_h;
   bool const storage_bf16_h =
       (!kFieldIsHalf) && (storage_format_h == STORAGE_FORMAT_BF16);
 
@@ -4312,14 +4412,33 @@ extern "C" void FUNC(born_backward_bggrad)(
     int64_t const store_idx = t / step_ratio_h;
     bool const do_grad = (t % step_ratio_h) == 0;
 
-    forward_kernel_h<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                       stream_compute>>>(
-        cq, lambda_ey, lambda_hx, lambda_hz, m_lambda_ey_x, m_lambda_ey_z, ay,
-        ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
-    forward_kernel_e<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                       stream_compute>>>(
-        ca, cb, lambda_hx, lambda_hz, lambda_ey, m_lambda_hx_z,
-        m_lambda_hz_x, ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
+    if (reuse_background_adjoint) {
+      if (storage_bf16_h) {
+        __nv_bfloat16 const *const lambda_store_t =
+            (__nv_bfloat16 const *)lambda_store +
+            store_idx * background_store_size;
+        load_adjoint_snapshot_kernel<__nv_bfloat16>
+            <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
+                lambda_store_t, lambda_ey, background_n_shots_h);
+      } else {
+        TIDE_DTYPE const *const lambda_store_t =
+            (TIDE_DTYPE const *)lambda_store +
+            store_idx * background_store_size;
+        load_adjoint_snapshot_kernel<TIDE_DTYPE>
+            <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
+                lambda_store_t, lambda_ey, background_n_shots_h);
+      }
+    } else {
+      forward_kernel_h<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                         stream_compute>>>(
+          cq, lambda_ey, lambda_hx, lambda_hz, m_lambda_ey_x, m_lambda_ey_z, ay,
+          ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
+      forward_kernel_e<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                         stream_compute>>>(
+          ca, cb, lambda_hx, lambda_hz, lambda_ey, m_lambda_hx_z,
+          m_lambda_hz_x, ay, ayh, ax, axh, by, byh, bx, bxh, ky, kyh, kx,
+          kxh);
+    }
     forward_kernel_h<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
                        stream_compute>>>(
         cq, eta_ey, eta_hx, eta_hz, m_eta_ey_x, m_eta_ey_z, ay, ayh, ax, axh,
@@ -4332,11 +4451,13 @@ extern "C" void FUNC(born_backward_bggrad)(
                            stream_compute>>>(eta_ey, eta_source_old);
 
     if (n_receivers_per_shot_h > 0) {
-      add_adjoint_sources_ey<<<launch_cfg.dimGridReceivers,
-                               launch_cfg.dimBlockReceivers, 0,
-                               stream_compute>>>(
-          lambda_ey, grad_r + t * n_shots_h * n_receivers_per_shot_h,
-          receivers_i);
+      if (!reuse_background_adjoint) {
+        add_adjoint_sources_ey<<<launch_cfg.dimGridReceivers,
+                                 launch_cfg.dimBlockReceivers, 0,
+                                 stream_compute>>>(
+            lambda_ey, grad_r + t * n_shots_h * n_receivers_per_shot_h,
+            receivers_i);
+      }
       add_adjoint_sources_ey<<<launch_cfg.dimGridReceivers,
                                launch_cfg.dimBlockReceivers, 0,
                                stream_compute>>>(
@@ -4344,6 +4465,23 @@ extern "C" void FUNC(born_backward_bggrad)(
           grad_background_r +
               t * n_shots_h * n_receivers_per_shot_h,
           receivers_i);
+    }
+    if (capture_background_adjoint && do_grad) {
+      if (storage_bf16_h) {
+        __nv_bfloat16 *const lambda_store_t =
+            (__nv_bfloat16 *)lambda_store +
+            store_idx * background_store_size;
+        store_adjoint_snapshot_kernel<__nv_bfloat16>
+            <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
+                lambda_ey, lambda_store_t);
+      } else {
+        TIDE_DTYPE *const lambda_store_t =
+            (TIDE_DTYPE *)lambda_store +
+            store_idx * background_store_size;
+        store_adjoint_snapshot_kernel<TIDE_DTYPE>
+            <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
+                lambda_ey, lambda_store_t);
+      }
     }
     if (do_grad) {
       size_t const direct_store_offset =
@@ -4377,39 +4515,51 @@ extern "C" void FUNC(born_backward_bggrad)(
           bx, bxh, ky, kyh, kx, kxh);
       if (storage_bf16_h) {
         __nv_bfloat16 const *const ey_store_t =
-            (__nv_bfloat16 const *)ey_store_1 + store_idx * store_size;
+            (__nv_bfloat16 const *)ey_store_1 +
+            store_idx * background_store_size;
         __nv_bfloat16 const *const curl_store_t =
-            (__nv_bfloat16 const *)curl_store_1 + store_idx * store_size;
+            (__nv_bfloat16 const *)curl_store_1 +
+            store_idx * background_store_size;
         launch_coeff_grad_kernel<__nv_bfloat16>(
             launch_cfg, stream_compute, lambda_ey, ey_store_t, curl_store_t,
-            grad_dca_shot, grad_dcb_shot, true, true, step_ratio_h);
+            grad_dca_shot, grad_dcb_shot, true, true, step_ratio_h,
+            background_n_shots_h, background_n_shots_h != n_shots_h);
       } else {
         TIDE_DTYPE const *const ey_store_t =
-            (TIDE_DTYPE const *)ey_store_1 + store_idx * store_size;
+            (TIDE_DTYPE const *)ey_store_1 +
+            store_idx * background_store_size;
         TIDE_DTYPE const *const curl_store_t =
-            (TIDE_DTYPE const *)curl_store_1 + store_idx * store_size;
+            (TIDE_DTYPE const *)curl_store_1 +
+            store_idx * background_store_size;
         launch_coeff_grad_kernel<TIDE_DTYPE>(
             launch_cfg, stream_compute, lambda_ey, ey_store_t, curl_store_t,
-            grad_dca_shot, grad_dcb_shot, true, true, step_ratio_h);
+            grad_dca_shot, grad_dcb_shot, true, true, step_ratio_h,
+            background_n_shots_h, background_n_shots_h != n_shots_h);
       }
       if (storage_bf16_h) {
         __nv_bfloat16 const *const ey_store_t =
-            (__nv_bfloat16 const *)ey_store_1 + store_idx * store_size;
+            (__nv_bfloat16 const *)ey_store_1 +
+            store_idx * background_store_size;
         __nv_bfloat16 const *const curl_store_t =
-            (__nv_bfloat16 const *)curl_store_1 + store_idx * store_size;
+            (__nv_bfloat16 const *)curl_store_1 +
+            store_idx * background_store_size;
         launch_coeff_grad_kernel<__nv_bfloat16>(
             launch_cfg, stream_compute, eta_ey, ey_store_t, curl_store_t,
             grad_ca_shot, grad_cb_shot, ca_requires_grad, cb_requires_grad,
-            step_ratio_h);
+            step_ratio_h, background_n_shots_h,
+            background_n_shots_h != n_shots_h);
       } else {
         TIDE_DTYPE const *const ey_store_t =
-            (TIDE_DTYPE const *)ey_store_1 + store_idx * store_size;
+            (TIDE_DTYPE const *)ey_store_1 +
+            store_idx * background_store_size;
         TIDE_DTYPE const *const curl_store_t =
-            (TIDE_DTYPE const *)curl_store_1 + store_idx * store_size;
+            (TIDE_DTYPE const *)curl_store_1 +
+            store_idx * background_store_size;
         launch_coeff_grad_kernel<TIDE_DTYPE>(
             launch_cfg, stream_compute, eta_ey, ey_store_t, curl_store_t,
             grad_ca_shot, grad_cb_shot, ca_requires_grad, cb_requires_grad,
-            step_ratio_h);
+            step_ratio_h, background_n_shots_h,
+            background_n_shots_h != n_shots_h);
       }
     }
 
