@@ -1,11 +1,13 @@
 import warnings
 from collections.abc import Sequence
+from typing import Any
 
 import torch
 
 from .. import staggered
 from ..grid_utils import _normalize_grid_spacing_2d, _normalize_pml_width_2d
 from ..padding import create_or_pad, zero_interior
+from ..storage import STORAGE_DEVICE
 from ..utils import (
     C0,
     EP0,
@@ -63,6 +65,8 @@ def borntm_c_cuda(
     storage_bytes_limit_host: int | None = None,
     n_threads: int | None = None,
     return_background_receiver_amplitudes: bool = False,
+    background_cache: dict[str, Any] | None = None,
+    capture_background_cache: bool = False,
 ):
     from .. import backend_utils
 
@@ -548,10 +552,7 @@ def borntm_c_cuda(
     pml_x1 = padded_nx - fd_pad_list[3] - pml_width_list[3]
 
     needs_storage = dca_native.requires_grad or dcb_native.requires_grad
-    needs_autograd = (
-        needs_storage
-        or df.requires_grad
-    )
+    needs_autograd = needs_storage or df.requires_grad
     if device.type == "cpu" and needs_autograd and gradient_sampling_interval != 1:
         raise NotImplementedError(
             "Native TM2D Born model/background gradients on CPU currently require "
@@ -582,8 +583,8 @@ def borntm_c_cuda(
             num_elements_per_shot = padded_ny * padded_nx
             shot_bytes_uncomp = num_elements_per_shot * storage_bytes_per_elem
             n_stored = (
-                (nt_steps + gradient_sampling_interval - 1) // gradient_sampling_interval
-            )
+                nt_steps + gradient_sampling_interval - 1
+            ) // gradient_sampling_interval
             total_bytes = n_stored * n_shots * shot_bytes_uncomp * 2
             limit_device = (
                 storage_bytes_limit_device
@@ -605,6 +606,18 @@ def borntm_c_cuda(
         storage_mode_str = "none"
 
     capture_background_receivers = return_background_receiver_amplitudes
+    empty_cached = torch.empty(0, device=device, dtype=dtype)
+    cached_ey_store = (
+        background_cache["ey_store"] if background_cache is not None else empty_cached
+    )
+    cached_curl_store = (
+        background_cache["curl_store"] if background_cache is not None else empty_cached
+    )
+    cached_background_receiver = (
+        background_cache["predicted_data"]
+        if background_cache is not None
+        else empty_cached
+    )
 
     if needs_autograd:
         result = BornTMForwardFunc.apply(
@@ -667,6 +680,10 @@ def borntm_c_cuda(
             dm_Hz_x,
             n_threads_val,
             backend_device,
+            cached_ey_store,
+            cached_curl_store,
+            cached_background_receiver,
+            background_cache is not None,
         )
         (
             dEy_out,
@@ -679,6 +696,23 @@ def borntm_c_cuda(
             receiver_amplitudes,
         ) = result[:8]
         background_receiver_amplitudes = result[8]
+        captured_cache: dict[str, Any] | None = None
+        if capture_background_cache:
+            from .common import _get_ctx_handle
+
+            ctx_handle_id = int(result[-1].item())
+            ctx_data = _get_ctx_handle(ctx_handle_id)
+            if ctx_data["storage_mode"] != STORAGE_DEVICE:
+                raise RuntimeError(
+                    "Reusable TM2D background cache requires device storage."
+                )
+            captured_cache = {
+                "ey_store": ctx_data["backward_storage_tensors"][0],
+                "curl_store": ctx_data["backward_storage_tensors"][2],
+                "predicted_data": background_receiver_amplitudes.detach(),
+                "storage_format": ctx_data["storage_format"],
+                "shot_bytes_uncomp": ctx_data["shot_bytes_uncomp"],
+            }
     else:
         forward_func = backend_utils.get_backend_function(
             "maxwell_tm",
@@ -701,9 +735,7 @@ def borntm_c_cuda(
             )
         else:
             receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
-            background_receiver_amplitudes = torch.empty(
-                0, device=device, dtype=dtype
-            )
+            background_receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
 
         compute_stream_handle = 0
         if device.type == "cuda":
@@ -788,7 +820,7 @@ def borntm_c_cuda(
             fd_pad_list[2], padded_nx - fd_pad_list[3] if fd_pad_list[3] > 0 else None
         ),
     )
-    return (
+    outputs = (
         Ey[s],
         Hx[s],
         Hz[s],
@@ -805,8 +837,13 @@ def borntm_c_cuda(
         dm_Hz_x_out[s],
         receiver_amplitudes,
     ) + (
-        (background_receiver_amplitudes,) if return_background_receiver_amplitudes else ()
+        (background_receiver_amplitudes,)
+        if return_background_receiver_amplitudes
+        else ()
     )
+    if capture_background_cache:
+        return outputs + (captured_cache,)
+    return outputs
 
 
 __all__ = ["borntm_c_cuda"]

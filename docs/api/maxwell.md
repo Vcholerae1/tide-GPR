@@ -138,6 +138,42 @@ implementation.
 - `storage_compression=None` preserves the automatic BF16 snapshot policy for
   CUDA float32 and full-precision storage elsewhere.
 
+## linearize_maxwelltm
+
+`linearize_maxwelltm` creates a `TM2DLinearizationContext` for applying the
+same TM2D Hessian to several epsilon/sigma directions. Its first `hvp` builds
+the normal background forward/adjoint state; later calls reuse the background
+receiver data and forward `Ey`/`curl(H)` snapshots and propagate only the new
+tangent field. `hvp_batch` accepts direction tensors shaped `(K, ny, nx)` and
+processes them in bounded blocks.
+
+```python
+with tide.linearize_maxwelltm(
+    epsilon,
+    sigma,
+    mu,
+    grid_spacing=grid_spacing,
+    dt=dt,
+    source_amplitude=source_amplitude,
+    source_location=source_location,
+    receiver_location=receiver_location,
+    observed_data=observed_data,
+) as linearization:
+    hvp_epsilon, hvp_sigma = linearization.hvp_batch(
+        vepsilon=epsilon_directions,
+        vsigma=sigma_directions,
+        block_size=4,
+    )
+```
+
+Native snapshot reuse currently requires CUDA, `storage_mode="device"`, and
+`model_gradient_sampling_interval` 0 or 1. Other configurations keep the same
+API but execute independent HVPs. Directions inside a block currently execute
+sequentially; `block_size` bounds orchestration and is reserved for a future
+direction-batched CUDA launch. The context detects in-place changes to its
+model, source amplitudes, or observations and must be recreated after such a
+change. Call `close`, or use the context manager, to release cached snapshots.
+
 ## Advanced or Internal Functions
 - prepare_parameters
 - maxwell_func

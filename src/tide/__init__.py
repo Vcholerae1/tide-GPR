@@ -29,12 +29,14 @@ from .maxwell import (
     BornTM,
     Maxwell3D,
     MaxwellTM,
+    TM2DLinearizationContext,
     born3d,
     borntm,
     maxwell3d,
     maxwell3d_hvp,
     maxwelltm,
     maxwelltm_hvp,
+    linearize_maxwelltm,
 )
 from .padding import create_or_pad, reverse_pad, zero_interior
 from .resampling import downsample, downsample_and_movedim, upsample
@@ -83,6 +85,7 @@ __all__ = [
     "BornTM",
     "Born3D",
     "MaxwellTM",
+    "TM2DLinearizationContext",
     "Maxwell3D",
     "CallbackState",
     "DebyeDispersion",
@@ -110,6 +113,7 @@ __all__ = [
     "maxwelltm",
     "maxwell3d",
     "maxwelltm_hvp",
+    "linearize_maxwelltm",
     "maxwell3d_hvp",
     "born3d",
     "borntm",

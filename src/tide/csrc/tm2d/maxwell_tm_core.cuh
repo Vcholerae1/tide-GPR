@@ -701,6 +701,60 @@ static TIDE_HOST_DEVICE void forward_kernel_e_born_with_storage_core(
   }
 }
 
+// Update only the scattered E field using cached background Ey/curl snapshots.
+// This is used by reusable linearization contexts so subsequent directions do
+// not repeat the background propagation.
+template <typename T, typename StoreT, int STENCIL_ORDER>
+static TIDE_HOST_DEVICE void forward_kernel_e_born_from_snapshots_core(
+    GridParams<T> const &params, T const *ca_ptr, T const *cb_ptr,
+    T const *dca_ptr, T const *dcb_ptr, T const *dhx, T const *dhz, T *dey,
+    T *dm_hx_z, T *dm_hz_x, StoreT const *ey_store,
+    StoreT const *curl_h_store, StoreT *dey_store, StoreT *dcurl_h_store,
+    int64_t y, int64_t x, int64_t shot_idx) {
+
+  int const FD_PAD = tide::StencilTraits<STENCIL_ORDER>::FD_PAD;
+  if (y >= FD_PAD && x >= FD_PAD && y < params.ny - FD_PAD + 1 &&
+      x < params.nx - FD_PAD + 1 && shot_idx < params.n_shots) {
+    int64_t const j = y * params.nx + x;
+    int64_t const i = shot_idx * params.shot_numel + j;
+    T const ca_val = params.ca_batched ? ca_ptr[i] : ca_ptr[j];
+    T const cb_val = params.cb_batched ? cb_ptr[i] : cb_ptr[j];
+    T const dca_val = params.ca_batched ? dca_ptr[i] : dca_ptr[j];
+    T const dcb_val = params.cb_batched ? dcb_ptr[i] : dcb_ptr[j];
+
+    bool const pml_y = y < params.pml_y0 || y >= params.pml_y1;
+    bool const pml_x = x < params.pml_x0 || x >= params.pml_x1;
+    GlobalFieldAccessor<T> sc_hz_acc(dhz, params.nx);
+    GlobalFieldAccessor<T> sc_hx_acc(dhx, params.nx);
+    T ddhz_dx = DiffForward<STENCIL_ORDER>::diff_x1(
+        sc_hz_acc, shot_idx * params.shot_numel, y, x, params.nx, params.rdx);
+    T ddhx_dz = DiffForward<STENCIL_ORDER>::diff_y1(
+        sc_hx_acc, shot_idx * params.shot_numel, y, x, params.nx, params.rdy);
+
+    if (pml_x) {
+      dm_hz_x[i] = params.bx[x] * dm_hz_x[i] + params.ax[x] * ddhz_dx;
+      ddhz_dx = ddhz_dx / params.kx[x] + dm_hz_x[i];
+    }
+    if (pml_y) {
+      dm_hx_z[i] = params.by[y] * dm_hx_z[i] + params.ay[y] * ddhx_dz;
+      ddhx_dz = ddhx_dz / params.ky[y] + dm_hx_z[i];
+    }
+
+    T const dcurl_h = ddhz_dx - ddhx_dz;
+    T const dey_n = dey[i];
+    T const ey_n = decode_snapshot<StoreT, T>(ey_store[i]);
+    T const curl_h = decode_snapshot<StoreT, T>(curl_h_store[i]);
+    if (dey_store != nullptr) {
+      dey_store[i] = encode_snapshot<StoreT, T>(dey_n);
+    }
+    if (dcurl_h_store != nullptr) {
+      dcurl_h_store[i] = encode_snapshot<StoreT, T>(dcurl_h);
+    }
+    dey[i] = ca_val * dey_n + cb_val * dcurl_h + dca_val * ey_n +
+             dcb_val * curl_h;
+  }
+}
+
 // Direct bggrad preparation for the full Hessian path. This accumulates the
 // local ca/cb direct term and emits the transposed dcb * lambda contribution
 // into alpha_h* without requiring scattered CPML memory reconstruction.

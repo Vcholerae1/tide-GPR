@@ -101,7 +101,7 @@ def _build_3d_case(device: torch.device):
 
 def test_maxwelltm_module_matches_functional_cpu():
     device = torch.device("cpu")
-    
+
     case = _build_tm_case(device)
 
     model = tide.MaxwellTM(
@@ -555,6 +555,73 @@ def test_maxwelltm_hvp_native_cuda_supports_gradient_sampling_interval():
         not torch.allclose(sampled_out, baseline_out)
         for sampled_out, baseline_out in zip(func_hvp, baseline_hvp)
     )
+
+
+@pytest.mark.skipif(
+    not backend_utils.is_backend_available() or not torch.cuda.is_available(),
+    reason="native CUDA backend not available",
+)
+def test_tm2d_linearization_context_reuses_background_for_direction_batch():
+    device = torch.device("cuda")
+    case = _build_tm_case(device)
+    observed_data = _tm_observed_data(case, device)
+    vepsilon = torch.stack(
+        [case["depsilon"], 2.0 * case["depsilon"], -case["depsilon"]]
+    )
+    kwargs = {
+        "grid_spacing": case["dx"],
+        "dt": case["dt"],
+        "source_amplitude": case["source_amplitude"],
+        "source_location": case["source_location"],
+        "receiver_location": case["receiver_location"],
+        "observed_data": observed_data,
+        "stencil": 2,
+        "pml_width": 1,
+        "storage_compression": False,
+    }
+
+    with tide.linearize_maxwelltm(
+        case["epsilon"], case["sigma"], case["mu"], **kwargs
+    ) as context:
+        actual = context.hvp_batch(vepsilon=vepsilon, block_size=2)
+        assert context.background_builds == 1
+        assert context.reused_directions == 2
+        assert context.predicted_data is not None
+
+    expected_parts = [
+        tide.maxwelltm_hvp(
+            case["epsilon"],
+            case["sigma"],
+            case["mu"],
+            vepsilon=direction,
+            **kwargs,
+        )
+        for direction in vepsilon
+    ]
+    expected = tuple(torch.stack(parts) for parts in zip(*expected_parts))
+    for actual_part, expected_part in zip(actual, expected):
+        torch.testing.assert_close(actual_part, expected_part, rtol=3e-5, atol=1e-6)
+
+
+def test_tm2d_linearization_context_rejects_mutated_model():
+    device = torch.device("cpu")
+    case = _build_tm_case(device)
+    context = tide.linearize_maxwelltm(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        grid_spacing=case["dx"],
+        dt=case["dt"],
+        source_amplitude=case["source_amplitude"],
+        source_location=case["source_location"],
+        receiver_location=case["receiver_location"],
+        observed_data=_tm_observed_data(case, device),
+        stencil=2,
+        pml_width=1,
+    )
+    case["epsilon"].add_(0.1)
+    with pytest.raises(RuntimeError, match="epsilon changed"):
+        context.hvp(vepsilon=case["depsilon"])
 
 
 def test_maxwell3d_hvp_module_matches_functional_cpu():

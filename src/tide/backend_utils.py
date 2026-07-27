@@ -29,6 +29,7 @@ _SUPPORTED_PASSES = (
     "backward",
     "born_forward",
     "born_forward_with_storage",
+    "born_tangent_forward_with_storage",
     "born_backward",
     "born_backward_bggrad",
 )
@@ -275,6 +276,19 @@ _TM_BORN_FORWARD_WITH_STORAGE_SPEC: _Spec = [
     *_TM_STORAGE_TAIL,
     *_TM_BATCHED_FLAGS,
     (_P, 2, "compute_stream, storage_stream"),
+]
+
+_TM_BORN_TANGENT_FORWARD_WITH_STORAGE_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 2, "dca, dcb"),
+    (_P, 1, "df"),
+    (_P, 7, "dey, dhx, dhz, dm_ey_x, dm_ey_z, dm_hx_z, dm_hz_x"),
+    (_P, 5, "r, ey_store, curl_store, dey_store, dcurl_store"),
+    *_TM_PML_PROFILES,
+    *_TM_COMMON_TAIL,
+    (_I, 1, "storage_format"),
+    *_TM_BATCHED_FLAGS,
+    (_P, 1, "compute_stream"),
 ]
 
 _TM_BORN_BACKWARD_SPEC: _Spec = [
@@ -564,6 +578,9 @@ _TEMPLATE_SPECS: dict[str, _Spec] = {
     "maxwell_tm_backward": _TM_BACKWARD_SPEC,
     "maxwell_tm_born_forward": _TM_BORN_FORWARD_SPEC,
     "maxwell_tm_born_forward_with_storage": _TM_BORN_FORWARD_WITH_STORAGE_SPEC,
+    "maxwell_tm_born_tangent_forward_with_storage": (
+        _TM_BORN_TANGENT_FORWARD_WITH_STORAGE_SPEC
+    ),
     "maxwell_tm_born_backward": _TM_BORN_BACKWARD_SPEC,
     "maxwell_tm_born_backward_bggrad": _TM_BORN_BACKWARD_BGGRAD_SPEC,
     "maxwell_3d_forward": _3D_FORWARD_SPEC,

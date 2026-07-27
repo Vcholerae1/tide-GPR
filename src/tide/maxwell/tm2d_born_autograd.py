@@ -101,11 +101,23 @@ class BornTMForwardFunc(torch.autograd.Function):
         dm_Hz_x: torch.Tensor,
         n_threads: int,
         backend_device: torch.device,
+        cached_ey_store: torch.Tensor | None = None,
+        cached_curl_store: torch.Tensor | None = None,
+        cached_background_receiver: torch.Tensor | None = None,
+        reuse_background: bool = False,
     ) -> tuple[Any, ...]:
         from .. import backend_utils
 
         device = dEy.device
         coeff_dtype = ca.dtype
+        if cached_ey_store is None:
+            cached_ey_store = torch.empty(0, device=device, dtype=coeff_dtype)
+        if cached_curl_store is None:
+            cached_curl_store = torch.empty(0, device=device, dtype=coeff_dtype)
+        if cached_background_receiver is None:
+            cached_background_receiver = torch.empty(
+                0, device=device, dtype=coeff_dtype
+            )
 
         dca_requires_grad = dca.requires_grad
         dcb_requires_grad = dcb.requires_grad
@@ -113,6 +125,16 @@ class BornTMForwardFunc(torch.autograd.Function):
         background_grad_possible = (
             ca.requires_grad or cb.requires_grad or f0.requires_grad
         )
+        if reuse_background:
+            if device.type != "cuda":
+                raise NotImplementedError(
+                    "Reusable TM2D background snapshots currently require CUDA."
+                )
+            if storage_mode_str != "device" or step_ratio != 1:
+                raise NotImplementedError(
+                    "Reusable TM2D background snapshots require "
+                    "storage_mode='device' and model gradient sampling interval 1."
+                )
         store_ey_needed = dca_requires_grad or background_grad_possible
         store_curl_needed = dcb_requires_grad or background_grad_possible
         needs_storage = store_ey_needed or store_curl_needed
@@ -267,92 +289,171 @@ class BornTMForwardFunc(torch.autograd.Function):
                 )
                 return store_1, store_3, filenames_ptr
 
-            ey_store_1, ey_store_3, ey_filenames_ptr = alloc_storage(store_ey_needed)
+            ey_store_1, ey_store_3, ey_filenames_ptr = alloc_storage(
+                store_ey_needed and not reuse_background
+            )
             curl_store_1, curl_store_3, curl_filenames_ptr = alloc_storage(
-                store_curl_needed
+                store_curl_needed and not reuse_background
             )
+            if reuse_background:
+                ey_store_1 = cached_ey_store
+                curl_store_1 = cached_curl_store
+                ey_store_3 = torch.empty(0, device=device, dtype=store_dtype)
+                curl_store_3 = torch.empty(0, device=device, dtype=store_dtype)
+                backward_storage_tensors = [
+                    ey_store_1,
+                    ey_store_3,
+                    curl_store_1,
+                    curl_store_3,
+                ]
+                background_receiver_amplitudes.copy_(cached_background_receiver)
 
-            forward_func = backend_utils.get_backend_function(
-                "maxwell_tm",
-                "born_forward_with_storage",
-                accuracy,
-                coeff_dtype,
-                backend_device,
-            )
-            forward_func(
-                backend_utils.tensor_to_ptr(ca),
-                backend_utils.tensor_to_ptr(cb),
-                backend_utils.tensor_to_ptr(cq),
-                backend_utils.tensor_to_ptr(dca),
-                backend_utils.tensor_to_ptr(dcb),
-                backend_utils.tensor_to_ptr(f0),
-                backend_utils.tensor_to_ptr(df),
-                backend_utils.tensor_to_ptr(Ey),
-                backend_utils.tensor_to_ptr(Hx),
-                backend_utils.tensor_to_ptr(Hz),
-                backend_utils.tensor_to_ptr(m_Ey_x),
-                backend_utils.tensor_to_ptr(m_Ey_z),
-                backend_utils.tensor_to_ptr(m_Hx_z),
-                backend_utils.tensor_to_ptr(m_Hz_x),
-                backend_utils.tensor_to_ptr(dEy),
-                backend_utils.tensor_to_ptr(dHx),
-                backend_utils.tensor_to_ptr(dHz),
-                backend_utils.tensor_to_ptr(dm_Ey_x),
-                backend_utils.tensor_to_ptr(dm_Ey_z),
-                backend_utils.tensor_to_ptr(dm_Hx_z),
-                backend_utils.tensor_to_ptr(dm_Hz_x),
-                backend_utils.tensor_to_ptr(receiver_amplitudes),
-                backend_utils.tensor_to_ptr(background_receiver_amplitudes),
-                backend_utils.tensor_to_ptr(ey_store_1),
-                backend_utils.tensor_to_ptr(ey_store_3),
-                ey_filenames_ptr,
-                backend_utils.tensor_to_ptr(curl_store_1),
-                backend_utils.tensor_to_ptr(curl_store_3),
-                curl_filenames_ptr,
-                backend_utils.tensor_to_ptr(direct_snapshot_tensors[0]),
-                backend_utils.tensor_to_ptr(direct_snapshot_tensors[1]),
-                backend_utils.tensor_to_ptr(ay),
-                backend_utils.tensor_to_ptr(by),
-                backend_utils.tensor_to_ptr(ay_h),
-                backend_utils.tensor_to_ptr(by_h),
-                backend_utils.tensor_to_ptr(ax),
-                backend_utils.tensor_to_ptr(bx),
-                backend_utils.tensor_to_ptr(ax_h),
-                backend_utils.tensor_to_ptr(bx_h),
-                backend_utils.tensor_to_ptr(ky),
-                backend_utils.tensor_to_ptr(ky_h),
-                backend_utils.tensor_to_ptr(kx),
-                backend_utils.tensor_to_ptr(kx_h),
-                backend_utils.tensor_to_ptr(sources_i),
-                backend_utils.tensor_to_ptr(receivers_i),
-                rdy,
-                rdx,
-                dt,
-                nt,
-                n_shots,
-                ny,
-                nx,
-                n_sources,
-                n_receivers,
-                step_ratio,
-                storage_mode,
-                storage_format,
-                shot_bytes_uncomp,
-                store_ey_needed,
-                store_curl_needed,
-                ca_batched,
-                cb_batched,
-                cq_batched,
-                0,
-                pml_y0,
-                pml_x0,
-                pml_y1,
-                pml_x1,
-                n_threads,
-                device_idx,
-                compute_stream_handle,
-                storage_stream_handle,
-            )
+            if reuse_background:
+                forward_func = backend_utils.get_backend_function(
+                    "maxwell_tm",
+                    "born_tangent_forward_with_storage",
+                    accuracy,
+                    coeff_dtype,
+                    backend_device,
+                )
+                forward_func(
+                    backend_utils.tensor_to_ptr(ca),
+                    backend_utils.tensor_to_ptr(cb),
+                    backend_utils.tensor_to_ptr(cq),
+                    backend_utils.tensor_to_ptr(dca),
+                    backend_utils.tensor_to_ptr(dcb),
+                    backend_utils.tensor_to_ptr(df),
+                    backend_utils.tensor_to_ptr(dEy),
+                    backend_utils.tensor_to_ptr(dHx),
+                    backend_utils.tensor_to_ptr(dHz),
+                    backend_utils.tensor_to_ptr(dm_Ey_x),
+                    backend_utils.tensor_to_ptr(dm_Ey_z),
+                    backend_utils.tensor_to_ptr(dm_Hx_z),
+                    backend_utils.tensor_to_ptr(dm_Hz_x),
+                    backend_utils.tensor_to_ptr(receiver_amplitudes),
+                    backend_utils.tensor_to_ptr(ey_store_1),
+                    backend_utils.tensor_to_ptr(curl_store_1),
+                    backend_utils.tensor_to_ptr(direct_snapshot_tensors[0]),
+                    backend_utils.tensor_to_ptr(direct_snapshot_tensors[1]),
+                    backend_utils.tensor_to_ptr(ay),
+                    backend_utils.tensor_to_ptr(by),
+                    backend_utils.tensor_to_ptr(ay_h),
+                    backend_utils.tensor_to_ptr(by_h),
+                    backend_utils.tensor_to_ptr(ax),
+                    backend_utils.tensor_to_ptr(bx),
+                    backend_utils.tensor_to_ptr(ax_h),
+                    backend_utils.tensor_to_ptr(bx_h),
+                    backend_utils.tensor_to_ptr(ky),
+                    backend_utils.tensor_to_ptr(ky_h),
+                    backend_utils.tensor_to_ptr(kx),
+                    backend_utils.tensor_to_ptr(kx_h),
+                    backend_utils.tensor_to_ptr(sources_i),
+                    backend_utils.tensor_to_ptr(receivers_i),
+                    rdy,
+                    rdx,
+                    dt,
+                    nt,
+                    n_shots,
+                    ny,
+                    nx,
+                    n_sources,
+                    n_receivers,
+                    step_ratio,
+                    storage_format,
+                    ca_batched,
+                    cb_batched,
+                    cq_batched,
+                    0,
+                    pml_y0,
+                    pml_x0,
+                    pml_y1,
+                    pml_x1,
+                    n_threads,
+                    device_idx,
+                    compute_stream_handle,
+                )
+            else:
+                forward_func = backend_utils.get_backend_function(
+                    "maxwell_tm",
+                    "born_forward_with_storage",
+                    accuracy,
+                    coeff_dtype,
+                    backend_device,
+                )
+                forward_func(
+                    backend_utils.tensor_to_ptr(ca),
+                    backend_utils.tensor_to_ptr(cb),
+                    backend_utils.tensor_to_ptr(cq),
+                    backend_utils.tensor_to_ptr(dca),
+                    backend_utils.tensor_to_ptr(dcb),
+                    backend_utils.tensor_to_ptr(f0),
+                    backend_utils.tensor_to_ptr(df),
+                    backend_utils.tensor_to_ptr(Ey),
+                    backend_utils.tensor_to_ptr(Hx),
+                    backend_utils.tensor_to_ptr(Hz),
+                    backend_utils.tensor_to_ptr(m_Ey_x),
+                    backend_utils.tensor_to_ptr(m_Ey_z),
+                    backend_utils.tensor_to_ptr(m_Hx_z),
+                    backend_utils.tensor_to_ptr(m_Hz_x),
+                    backend_utils.tensor_to_ptr(dEy),
+                    backend_utils.tensor_to_ptr(dHx),
+                    backend_utils.tensor_to_ptr(dHz),
+                    backend_utils.tensor_to_ptr(dm_Ey_x),
+                    backend_utils.tensor_to_ptr(dm_Ey_z),
+                    backend_utils.tensor_to_ptr(dm_Hx_z),
+                    backend_utils.tensor_to_ptr(dm_Hz_x),
+                    backend_utils.tensor_to_ptr(receiver_amplitudes),
+                    backend_utils.tensor_to_ptr(background_receiver_amplitudes),
+                    backend_utils.tensor_to_ptr(ey_store_1),
+                    backend_utils.tensor_to_ptr(ey_store_3),
+                    ey_filenames_ptr,
+                    backend_utils.tensor_to_ptr(curl_store_1),
+                    backend_utils.tensor_to_ptr(curl_store_3),
+                    curl_filenames_ptr,
+                    backend_utils.tensor_to_ptr(direct_snapshot_tensors[0]),
+                    backend_utils.tensor_to_ptr(direct_snapshot_tensors[1]),
+                    backend_utils.tensor_to_ptr(ay),
+                    backend_utils.tensor_to_ptr(by),
+                    backend_utils.tensor_to_ptr(ay_h),
+                    backend_utils.tensor_to_ptr(by_h),
+                    backend_utils.tensor_to_ptr(ax),
+                    backend_utils.tensor_to_ptr(bx),
+                    backend_utils.tensor_to_ptr(ax_h),
+                    backend_utils.tensor_to_ptr(bx_h),
+                    backend_utils.tensor_to_ptr(ky),
+                    backend_utils.tensor_to_ptr(ky_h),
+                    backend_utils.tensor_to_ptr(kx),
+                    backend_utils.tensor_to_ptr(kx_h),
+                    backend_utils.tensor_to_ptr(sources_i),
+                    backend_utils.tensor_to_ptr(receivers_i),
+                    rdy,
+                    rdx,
+                    dt,
+                    nt,
+                    n_shots,
+                    ny,
+                    nx,
+                    n_sources,
+                    n_receivers,
+                    step_ratio,
+                    storage_mode,
+                    storage_format,
+                    shot_bytes_uncomp,
+                    store_ey_needed,
+                    store_curl_needed,
+                    ca_batched,
+                    cb_batched,
+                    cq_batched,
+                    0,
+                    pml_y0,
+                    pml_x0,
+                    pml_y1,
+                    pml_x1,
+                    n_threads,
+                    device_idx,
+                    compute_stream_handle,
+                    storage_stream_handle,
+                )
         else:
             forward_func = backend_utils.get_backend_function(
                 "maxwell_tm",
@@ -1228,7 +1329,12 @@ def tm2d_receiver_hvp_native(
     hessian_mode: str = "full",
     storage_mode: str = "device",
     storage_compression: bool | str | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    background_cache: dict[str, Any] | None = None,
+    capture_background_cache: bool = False,
+) -> (
+    tuple[torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, dict[str, Any]]
+):
     """TM2D native receiver-space HVP via the native Born bggrad path."""
     from .. import backend_utils
     from ..grid_utils import _normalize_pml_width_2d
@@ -1266,8 +1372,7 @@ def tm2d_receiver_hvp_native(
     if storage_compression is None:
         storage_compression = (
             "bf16"
-            if epsilon_req.device.type == "cuda"
-            and epsilon_req.dtype == torch.float32
+            if epsilon_req.device.type == "cuda" and epsilon_req.dtype == torch.float32
             else False
         )
 
@@ -1308,9 +1413,13 @@ def tm2d_receiver_hvp_native(
         storage_mode=storage_mode,
         storage_compression=storage_compression,
         return_background_receiver_amplitudes=True,
+        background_cache=background_cache,
+        capture_background_cache=capture_background_cache,
     )
-    delta_predicted_data = born_outputs[-2]
-    predicted_data = born_outputs[-1]
+    captured_cache = born_outputs[-1] if capture_background_cache else None
+    data_offset = 1 if capture_background_cache else 0
+    delta_predicted_data = born_outputs[-2 - data_offset]
+    predicted_data = born_outputs[-1 - data_offset]
     hvp_epsilon, hvp_sigma = _directional_receiver_hvp(
         params=(epsilon_req, sigma_req),
         observed_data=observed_data,
@@ -1319,6 +1428,10 @@ def tm2d_receiver_hvp_native(
         delta_predicted_data=delta_predicted_data,
         hessian_mode=hessian_mode,
     )
+    if capture_background_cache:
+        if not isinstance(captured_cache, dict):
+            raise RuntimeError("Native TM2D HVP did not return a background cache.")
+        return hvp_epsilon, hvp_sigma, captured_cache
     return hvp_epsilon, hvp_sigma
 
 

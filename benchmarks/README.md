@@ -32,3 +32,17 @@ For the large float32 case on an RTX 4070 (20 repeats), the fused full-Hessian
 path measured 66.59 ms versus 63.25 ms for finite differences and 39.61 ms for
 Gauss-Newton. The pre-fusion full-Hessian baseline was 78.34 ms, so merging the
 two reverse passes reduced its median runtime by about 15%.
+
+`tm2d_hvp_batch.py` measures several full HVP directions independently, through
+a reusable `TM2DLinearizationContext`, and as `2K` central-difference gradient
+evaluations. It also reports peak allocation and relative error. Use
+`--storage-compression none` to isolate reuse accuracy from BF16 background
+snapshot quantization.
+
+On the same RTX 4070, four large BF16 directions (10 repeats) measured
+246.25 ms with the context, 275.44 ms as independent HVPs, and 255.97 ms as
+central differences. Background reuse was therefore about 10.6% faster than
+independent HVPs and 3.8% faster than finite differences. Peak allocation was
+517.6 MiB for the context versus 517.1 MiB for independent HVPs and 258.5 MiB
+for finite differences. Reusing BF16 snapshots changed the result by relative
+L2 `1.28e-3`; full-precision storage is the accuracy-first option.
