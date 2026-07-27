@@ -1364,6 +1364,8 @@ static void inverse_kernel_born_e_and_curl_no_pml(
 
 template <typename StoreT>
 static void born_background_prepare_direct(
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const cq,
     TIDE_DTYPE const *__restrict const dca,
     TIDE_DTYPE const *__restrict const dcb,
     TIDE_DTYPE const *__restrict const lambda_sc_ey,
@@ -1388,13 +1390,14 @@ static void born_background_prepare_direct(
     TIDE_DTYPE const rdx, int64_t const n_shots, int64_t const ny,
     int64_t const nx, int64_t const shot_numel, int64_t const pml_y0,
     int64_t const pml_y1, int64_t const pml_x0, int64_t const pml_x1,
-    bool const dca_batched, bool const dcb_batched, int64_t const step_ratio) {
+    bool const dca_batched, bool const dcb_batched, bool const cq_batched,
+    int64_t const step_ratio) {
 
   ::tide::GridParams<TIDE_DTYPE> params = {
       ay,      ayh,        ax,         axh,        by,     byh,    bx,
       bxh,     ky,         kyh,        kx,         kxh,    rdy,    rdx,
       n_shots, ny,         nx,         shot_numel, pml_y0, pml_y1, pml_x0,
-      pml_x1,  dca_batched, dcb_batched, false};
+      pml_x1,  dca_batched, dcb_batched, cq_batched};
 
   TIDE_OMP_INDEX shot_idx;
   TIDE_OMP_INDEX y;
@@ -1405,9 +1408,9 @@ static void born_background_prepare_direct(
       for (x = 0; x < nx; ++x) {
         ::tide::born_background_prepare_direct_core<TIDE_DTYPE, StoreT,
                                                     TIDE_STENCIL>(
-            params, dca, dcb, lambda_sc_ey, dey_old, dcurl_h_old, grad_ca_shot,
-            grad_cb_shot, eta_source_old, work_x, work_z, step_ratio, y, x,
-            shot_idx);
+            params, cb, cq, dca, dcb, lambda_sc_ey, dey_old, dcurl_h_old,
+            grad_ca_shot, grad_cb_shot, eta_source_old, work_x, work_z,
+            step_ratio, y, x, shot_idx);
       }
     }
   }
@@ -1425,6 +1428,7 @@ extern "C"
         TIDE_DTYPE const *const cq, TIDE_DTYPE const *const dca,
         TIDE_DTYPE const *const dcb, TIDE_DTYPE const *const f0,
         TIDE_DTYPE const *const df, TIDE_DTYPE const *const grad_r,
+        TIDE_DTYPE const *const grad_background_r,
         TIDE_DTYPE *const ey_store_1, void *const ey_store_3,
         char const *const *const ey_filenames, TIDE_DTYPE *const curl_store_1,
         void *const curl_store_3, char const *const *const curl_filenames,
@@ -1542,8 +1546,6 @@ extern "C"
   memset(m_eta_hx_z, 0, (size_t)store_size * sizeof(TIDE_DTYPE));
   memset(m_eta_hz_x, 0, (size_t)store_size * sizeof(TIDE_DTYPE));
   memset(eta_source_old, 0, (size_t)store_size * sizeof(TIDE_DTYPE));
-  memset(work_x, 0, (size_t)store_size * sizeof(TIDE_DTYPE));
-  memset(work_z, 0, (size_t)store_size * sizeof(TIDE_DTYPE));
 
   for (int64_t t = start_t - 1; t >= start_t - nt; --t) {
     int64_t const store_idx = t / step_ratio;
@@ -1578,10 +1580,22 @@ extern "C"
         axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx,
         shot_numel, pml_y0, pml_y1, pml_x0, pml_x1, ca_batched, cb_batched,
         false, false, (TIDE_DTYPE *)NULL, (TIDE_DTYPE *)NULL);
+    {
+      TIDE_OMP_INDEX i;
+      TIDE_OMP_PARALLEL_FOR_IF(store_size >= TIDE_OMP_MIN_PARALLEL_SHOTS)
+      for (i = 0; i < store_size; ++i) {
+        eta_ey[i] += eta_source_old[i];
+        eta_source_old[i] = (TIDE_DTYPE)0;
+      }
+    }
 
     if (n_receivers_per_shot > 0) {
       add_sources_ey(lambda_ey, grad_r + t * n_shots * n_receivers_per_shot,
                      receivers_i, n_shots, shot_numel, n_receivers_per_shot);
+      add_sources_ey(
+          eta_ey,
+          grad_background_r + t * n_shots * n_receivers_per_shot,
+          receivers_i, n_shots, shot_numel, n_receivers_per_shot);
     }
 
     if (do_grad && storage_bf16) {
@@ -1606,11 +1620,13 @@ extern "C"
         }
       }
       born_background_prepare_direct<tide_bfloat16>(
-          dca, dcb, lambda_ey, (tide_bfloat16 const *)dey_store_t,
+          cb, cq, dca, dcb, lambda_ey,
+          (tide_bfloat16 const *)dey_store_t,
           (tide_bfloat16 const *)dcurl_store_t, grad_ca_shot, grad_cb_shot,
           eta_source_old, work_x, work_z, ay, ayh, ax, axh, by, byh, bx, bxh,
           ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0,
-          pml_y1, pml_x0, pml_x1, ca_batched, cb_batched, step_ratio);
+          pml_y1, pml_x0, pml_x1, ca_batched, cb_batched, cq_batched,
+          step_ratio);
       born_backward_apply_e_to_h(work_x, work_z, eta_hx, eta_hz, ay, ayh, ax,
                                  axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy,
                                  rdx, n_shots, ny, nx, shot_numel, pml_y0,
@@ -1638,11 +1654,13 @@ extern "C"
         }
       }
       born_background_prepare_direct<TIDE_DTYPE>(
-          dca, dcb, lambda_ey, (TIDE_DTYPE const *)dey_store_t,
+          cb, cq, dca, dcb, lambda_ey,
+          (TIDE_DTYPE const *)dey_store_t,
           (TIDE_DTYPE const *)dcurl_store_t, grad_ca_shot, grad_cb_shot,
           eta_source_old, work_x, work_z, ay, ayh, ax, axh, by, byh, bx, bxh,
           ky, kyh, kx, kxh, rdy, rdx, n_shots, ny, nx, shot_numel, pml_y0,
-          pml_y1, pml_x0, pml_x1, ca_batched, cb_batched, step_ratio);
+          pml_y1, pml_x0, pml_x1, ca_batched, cb_batched, cq_batched,
+          step_ratio);
       born_backward_apply_e_to_h(work_x, work_z, eta_hx, eta_hz, ay, ayh, ax,
                                  axh, by, byh, bx, bxh, ky, kyh, kx, kxh, rdy,
                                  rdx, n_shots, ny, nx, shot_numel, pml_y0,
@@ -1653,10 +1671,22 @@ extern "C"
     }
 
     if (do_grad) {
-      TIDE_OMP_INDEX i;
-      TIDE_OMP_PARALLEL_FOR_IF(store_size >= TIDE_OMP_MIN_PARALLEL_SHOTS)
-      for (i = 0; i < store_size; ++i) {
-        eta_ey[i] += eta_source_old[i];
+      if (storage_bf16) {
+        tide_bfloat16 *const ey_store_1_t =
+            (tide_bfloat16 *)ey_store_1 + store_offset;
+        tide_bfloat16 *const curl_store_1_t =
+            (tide_bfloat16 *)curl_store_1 + store_offset;
+        coeff_grad<tide_bfloat16>(
+            eta_ey, ey_store_1_t, curl_store_1_t, grad_ca_shot,
+            grad_cb_shot, n_shots, ny, nx, shot_numel, store_ey_needed,
+            store_curl_needed, step_ratio);
+      } else {
+        TIDE_DTYPE *const ey_store_1_t = ey_store_1 + store_offset;
+        TIDE_DTYPE *const curl_store_1_t = curl_store_1 + store_offset;
+        coeff_grad<TIDE_DTYPE>(
+            eta_ey, ey_store_1_t, curl_store_1_t, grad_ca_shot,
+            grad_cb_shot, n_shots, ny, nx, shot_numel, store_ey_needed,
+            store_curl_needed, step_ratio);
       }
     }
 
@@ -1666,6 +1696,7 @@ extern "C"
       record_receivers_ey(grad_f0 + t * n_shots * n_sources_per_shot, eta_ey,
                           sources_i, n_shots, shot_numel, n_sources_per_shot);
     }
+
   }
 
   if (ca_batched) {

@@ -331,7 +331,42 @@ def test_tm2d_born_bggrad_matches_reference_with_sources():
         [ca, cb, dca, dcb, f0, df],
     )
 
-    _assert_native_grads_are_finite(native_grads)
+    ca_ref = ca.detach().clone().requires_grad_(True)
+    cb_ref = cb.detach().clone().requires_grad_(True)
+    dca_ref = dca.detach().clone().requires_grad_(True)
+    dcb_ref = dcb.detach().clone().requires_grad_(True)
+    f0_ref = f0.detach().clone().requires_grad_(True)
+    df_ref = df.detach().clone().requires_grad_(True)
+    reference_receivers = _reference_tm2d_born_receivers(
+        ca=ca_ref,
+        cb=cb_ref,
+        cq=cq,
+        dca=dca_ref,
+        dcb=dcb_ref,
+        f0=f0_ref,
+        df=df_ref,
+        sources_i=sources_i,
+        receivers_i=receivers_i,
+        nt=nt,
+        n_shots=n_shots,
+        ny=ny,
+        nx=nx,
+        n_sources=n_sources,
+        stencil=stencil,
+    )
+    reference_grads = torch.autograd.grad(
+        torch.sum(reference_receivers * residual),
+        [ca_ref, cb_ref, dca_ref, dcb_ref, f0_ref, df_ref],
+    )
+
+    errors = {
+        name: float((native_grad - reference_grad).norm())
+        / (float(reference_grad.norm()) + 1e-30)
+        for name, native_grad, reference_grad in zip(
+            ("ca", "cb", "dca", "dcb", "f0", "df"), native_grads, reference_grads
+        )
+    }
+    assert max(errors.values()) < 1e-9, errors
 
 
 @pytest.mark.skipif(

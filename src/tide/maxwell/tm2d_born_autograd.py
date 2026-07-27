@@ -665,6 +665,9 @@ class BornTMForwardFunc(torch.autograd.Function):
         needs_lambda_workspace = (
             needs_bggrad or needs_born_backward or needs_background_backward
         )
+        needs_standard_work = needs_born_backward or (
+            needs_background_backward and not needs_bggrad
+        )
 
         if needs_lambda_workspace:
             lambda_ey = _alloc_tm2d_field(ctx=ctx, device=device, dtype=coeff_dtype)
@@ -674,8 +677,12 @@ class BornTMForwardFunc(torch.autograd.Function):
             m_lambda_ey_z = torch.zeros_like(lambda_ey)
             m_lambda_hx_z = torch.zeros_like(lambda_ey)
             m_lambda_hz_x = torch.zeros_like(lambda_ey)
-            work_x = torch.zeros_like(lambda_ey)
-            work_z = torch.zeros_like(lambda_ey)
+            if needs_standard_work:
+                work_x = torch.zeros_like(lambda_ey)
+                work_z = torch.zeros_like(lambda_ey)
+            else:
+                work_x = torch.empty(0, device=device, dtype=coeff_dtype)
+                work_z = torch.empty(0, device=device, dtype=coeff_dtype)
         else:
             lambda_ey = torch.empty(0, device=device, dtype=coeff_dtype)
             lambda_hx = torch.empty(0, device=device, dtype=coeff_dtype)
@@ -783,7 +790,7 @@ class BornTMForwardFunc(torch.autograd.Function):
         grad_dca_shot_ptr = grad_dca if ctx.ca_batched else grad_dca_shot
         grad_dcb_shot_ptr = grad_dcb if ctx.cb_batched else grad_dcb_shot
 
-        if needs_background_backward:
+        if needs_background_backward and not needs_bggrad:
             _zero_tensors_(
                 lambda_ey,
                 lambda_hx,
@@ -873,53 +880,24 @@ class BornTMForwardFunc(torch.autograd.Function):
             )
 
         if needs_bggrad:
-            bg_eta_ey = torch.zeros_like(lambda_ey)
-            bg_eta_hx = torch.zeros_like(lambda_hx)
-            bg_eta_hz = torch.zeros_like(lambda_hz)
-            m_eta_ey_x = torch.zeros_like(lambda_ey)
-            m_eta_ey_z = torch.zeros_like(lambda_ey)
-            m_eta_hx_z = torch.zeros_like(lambda_ey)
-            m_eta_hz_x = torch.zeros_like(lambda_ey)
-            eta_source_old = torch.zeros_like(lambda_ey)
-            work_eta_x = torch.zeros_like(lambda_ey)
-            work_eta_z = torch.zeros_like(lambda_ey)
+            bg_eta_ey = torch.empty_like(lambda_ey)
+            bg_eta_hx = torch.empty_like(lambda_hx)
+            bg_eta_hz = torch.empty_like(lambda_hz)
+            m_eta_ey_x = torch.empty_like(lambda_ey)
+            m_eta_ey_z = torch.empty_like(lambda_ey)
+            m_eta_hx_z = torch.empty_like(lambda_ey)
+            m_eta_hz_x = torch.empty_like(lambda_ey)
+            eta_source_old = torch.empty_like(lambda_ey)
+            work_eta_x = torch.empty_like(lambda_ey)
+            work_eta_z = torch.empty_like(lambda_ey)
             bggrad_grad_f0 = grad_f0
             bggrad_grad_ca = grad_ca
             bggrad_grad_cb = grad_cb
-            if needs_background_backward:
-                bggrad_grad_f0 = (
-                    torch.zeros_like(grad_f0) if grad_f0.numel() > 0 else grad_f0
-                )
-                bggrad_grad_ca = (
-                    torch.zeros_like(grad_ca) if grad_ca.numel() > 0 else grad_ca
-                )
-                bggrad_grad_cb = (
-                    torch.zeros_like(grad_cb) if grad_cb.numel() > 0 else grad_cb
-                )
             bggrad_grad_ca_shot_ptr = (
                 bggrad_grad_ca if ctx.ca_batched else grad_ca_shot_ptr
             )
             bggrad_grad_cb_shot_ptr = (
                 bggrad_grad_cb if ctx.cb_batched else grad_cb_shot_ptr
-            )
-            _zero_tensors_(
-                lambda_ey,
-                lambda_hx,
-                lambda_hz,
-                m_lambda_ey_x,
-                m_lambda_ey_z,
-                m_lambda_hx_z,
-                m_lambda_hz_x,
-                bg_eta_ey,
-                bg_eta_hx,
-                bg_eta_hz,
-                m_eta_ey_x,
-                m_eta_ey_z,
-                m_eta_hx_z,
-                m_eta_hz_x,
-                eta_source_old,
-                work_eta_x,
-                work_eta_z,
             )
             if not ctx.ca_batched:
                 _zero_tensors_(grad_ca_shot, grad_dca_shot)
@@ -941,6 +919,7 @@ class BornTMForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(f0),
                 backend_utils.tensor_to_ptr(df),
                 backend_utils.tensor_to_ptr(grad_r),
+                backend_utils.tensor_to_ptr(grad_background_r),
                 backend_utils.tensor_to_ptr(ey_store_1),
                 backend_utils.tensor_to_ptr(ey_store_3),
                 ey_filenames_ptr,
@@ -1018,13 +997,6 @@ class BornTMForwardFunc(torch.autograd.Function):
                 compute_stream_handle,
                 storage_stream_handle,
             )
-            if needs_background_backward:
-                if bggrad_grad_f0.numel() > 0:
-                    grad_f0.add_(bggrad_grad_f0)
-                if bggrad_grad_ca.numel() > 0:
-                    grad_ca.add_(bggrad_grad_ca)
-                if bggrad_grad_cb.numel() > 0:
-                    grad_cb.add_(bggrad_grad_cb)
         elif needs_born_backward:
             _zero_tensors_(
                 lambda_ey,
@@ -1163,6 +1135,7 @@ def tm2d_receiver_hvp_naive(
     nt: int | None = None,
     model_gradient_sampling_interval: int = 1,
     linearize_source: bool = True,
+    hessian_mode: str = "full",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reference TM2D receiver-space HVP on the Python Maxwell/Born path."""
     if vepsilon is None and vsigma is None:
@@ -1227,6 +1200,7 @@ def tm2d_receiver_hvp_naive(
         misfit_fn=misfit_fn,
         predicted_data=predicted_data,
         delta_predicted_data=delta_predicted_data,
+        hessian_mode=hessian_mode,
     )
     return hvp_epsilon, hvp_sigma
 
@@ -1251,6 +1225,9 @@ def tm2d_receiver_hvp_native(
     nt: int | None = None,
     model_gradient_sampling_interval: int = 1,
     linearize_source: bool = True,
+    hessian_mode: str = "full",
+    storage_mode: str = "device",
+    storage_compression: bool | str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """TM2D native receiver-space HVP via the native Born bggrad path."""
     from .. import backend_utils
@@ -1274,6 +1251,10 @@ def tm2d_receiver_hvp_native(
             "model_gradient_sampling_interval in {0, 1}."
         )
     _normalize_pml_width_2d(pml_width)
+    if hessian_mode == "full" and storage_mode != "device":
+        raise NotImplementedError(
+            "Native TM2D full HVP currently requires storage_mode='device'."
+        )
 
     epsilon_req = _clone_param(epsilon)
     sigma_req = _clone_param(sigma)
@@ -1282,11 +1263,13 @@ def tm2d_receiver_hvp_native(
         vepsilon = torch.zeros_like(epsilon_req)
     if vsigma is None:
         vsigma = torch.zeros_like(sigma_req)
-    storage_compression = (
-        "bf16"
-        if epsilon_req.device.type == "cuda" and epsilon_req.dtype == torch.float32
-        else False
-    )
+    if storage_compression is None:
+        storage_compression = (
+            "bf16"
+            if epsilon_req.device.type == "cuda"
+            and epsilon_req.dtype == torch.float32
+            else False
+        )
 
     born_outputs = borntm_c_cuda(
         epsilon_req,
@@ -1322,7 +1305,7 @@ def tm2d_receiver_hvp_native(
         "epsilon_sigma",
         model_gradient_sampling_interval,
         linearize_source,
-        storage_mode="device",
+        storage_mode=storage_mode,
         storage_compression=storage_compression,
         return_background_receiver_amplitudes=True,
     )
@@ -1334,6 +1317,7 @@ def tm2d_receiver_hvp_native(
         misfit_fn=misfit_fn,
         predicted_data=predicted_data,
         delta_predicted_data=delta_predicted_data,
+        hessian_mode=hessian_mode,
     )
     return hvp_epsilon, hvp_sigma
 

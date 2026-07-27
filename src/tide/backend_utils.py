@@ -302,7 +302,7 @@ _TM_BORN_BACKWARD_BGGRAD_SPEC: _Spec = [
     (_P, 3, "ca, cb, cq"),
     (_P, 2, "dca, dcb"),
     (_P, 2, "f0, df"),
-    (_P, 1, "grad_r"),
+    (_P, 2, "grad_r, grad_background_r"),
     (
         _P,
         6,

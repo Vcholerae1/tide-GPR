@@ -80,14 +80,32 @@ def _directional_receiver_hvp(
     misfit_fn: ReceiverMisfit,
     predicted_data: torch.Tensor,
     delta_predicted_data: torch.Tensor,
+    hessian_mode: str = "full",
 ) -> tuple[torch.Tensor, ...]:
-    """Apply H to a fixed direction via <dPhi/dd, Jv>."""
+    """Apply a full or Gauss-Newton receiver Hessian to a fixed direction."""
     loss = misfit_fn(predicted_data, observed_data)
     grad_data = torch.autograd.grad(
         loss,
         predicted_data,
         create_graph=True,
     )[0]
+    if hessian_mode == "gauss_newton":
+        data_hvp = torch.autograd.grad(
+            grad_data,
+            predicted_data,
+            grad_outputs=delta_predicted_data,
+            retain_graph=True,
+        )[0]
+        return torch.autograd.grad(
+            predicted_data,
+            params,
+            grad_outputs=data_hvp,
+        )
+    if hessian_mode != "full":
+        raise ValueError(
+            "hessian_mode must be 'full' or 'gauss_newton', "
+            f"but got {hessian_mode!r}."
+        )
     directional_objective = (grad_data * delta_predicted_data).sum()
     return torch.autograd.grad(directional_objective, params)
 

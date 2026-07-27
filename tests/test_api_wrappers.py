@@ -252,6 +252,94 @@ def test_maxwelltm_hvp_module_matches_functional_cpu():
         torch.testing.assert_close(module_out, func_out)
 
 
+def test_maxwelltm_hvp_defaults_to_native_backend(monkeypatch):
+    device = torch.device("cpu")
+    case = _build_tm_case(device)
+    observed_data = _tm_observed_data(case, device)
+    marker = (
+        torch.full_like(case["epsilon"], 3.0),
+        torch.full_like(case["sigma"], 4.0),
+    )
+
+    def fake_native(*_args, **_kwargs):
+        return marker
+
+    def fail_python(*_args, **_kwargs):
+        raise AssertionError("default TM2D HVP used the Python reference backend")
+
+    monkeypatch.setattr(
+        "tide.maxwell.tm2d_born_autograd.tm2d_receiver_hvp_native",
+        fake_native,
+    )
+    monkeypatch.setattr(
+        "tide.maxwell.tm2d_born_autograd.tm2d_receiver_hvp_naive",
+        fail_python,
+    )
+
+    result = tide.maxwelltm_hvp(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        grid_spacing=case["dx"],
+        dt=case["dt"],
+        source_amplitude=case["source_amplitude"],
+        source_location=case["source_location"],
+        receiver_location=case["receiver_location"],
+        observed_data=observed_data,
+        vepsilon=case["depsilon"],
+        pml_width=1,
+    )
+
+    assert result is marker
+
+
+@pytest.mark.skipif(
+    not backend_utils.is_backend_available(), reason="native backend not available"
+)
+def test_maxwelltm_gauss_newton_hvp_matches_full_at_zero_residual_cpu():
+    device = torch.device("cpu")
+    case = _build_tm_case(device)
+    observed_data = tide.maxwelltm(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        grid_spacing=case["dx"],
+        dt=case["dt"],
+        source_amplitude=case["source_amplitude"],
+        source_location=case["source_location"],
+        receiver_location=case["receiver_location"],
+        stencil=2,
+        pml_width=1,
+        python_backend=False,
+        storage_compression=False,
+    )[-1].detach()
+    kwargs = {
+        "epsilon": case["epsilon"],
+        "sigma": case["sigma"],
+        "mu": case["mu"],
+        "grid_spacing": case["dx"],
+        "dt": case["dt"],
+        "source_amplitude": case["source_amplitude"],
+        "source_location": case["source_location"],
+        "receiver_location": case["receiver_location"],
+        "observed_data": observed_data,
+        "vepsilon": case["depsilon"],
+        "stencil": 2,
+        "pml_width": 1,
+        "python_backend": False,
+        "storage_compression": False,
+    }
+
+    full = tide.maxwelltm_hvp(**kwargs, hessian_mode="full")
+    gauss_newton = tide.maxwelltm_hvp(
+        **kwargs,
+        hessian_mode="gauss_newton",
+    )
+
+    for full_part, gn_part in zip(full, gauss_newton):
+        torch.testing.assert_close(full_part, gn_part, rtol=2e-5, atol=1e-10)
+
+
 @pytest.mark.skipif(
     not backend_utils.is_backend_available(), reason="native backend not available"
 )

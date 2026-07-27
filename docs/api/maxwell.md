@@ -124,6 +124,20 @@ See:
 - `guides/modeling.md`
 - `guides/inversion.md`
 
+## maxwelltm_hvp
+
+`maxwelltm_hvp` applies either the full receiver-space Hessian or its
+Gauss-Newton approximation to an epsilon/sigma model direction. The native
+backend is the default; set `python_backend=True` only for the reference
+implementation.
+
+- `hessian_mode="full"` computes the complete Hessian and preserves the
+  historical API semantics.
+- `hessian_mode="gauss_newton"` computes `J.T @ Phi'' @ Jv`.
+- Native full TM2D HVP currently requires `storage_mode="device"`.
+- `storage_compression=None` preserves the automatic BF16 snapshot policy for
+  CUDA float32 and full-precision storage elsewhere.
+
 ## Advanced or Internal Functions
 - prepare_parameters
 - maxwell_func

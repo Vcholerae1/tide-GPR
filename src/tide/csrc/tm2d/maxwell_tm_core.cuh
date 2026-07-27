@@ -706,7 +706,8 @@ static TIDE_HOST_DEVICE void forward_kernel_e_born_with_storage_core(
 // into alpha_h* without requiring scattered CPML memory reconstruction.
 template <typename T, typename StoreT, int STENCIL_ORDER>
 static TIDE_HOST_DEVICE void born_background_prepare_direct_core(
-    GridParams<T> const &params, T const *dca_ptr, T const *dcb_ptr,
+    GridParams<T> const &params, T const *cb_ptr, T const *cq_ptr,
+    T const *dca_ptr, T const *dcb_ptr,
     T const *lambda_sc_ey, StoreT const *dey_store,
     StoreT const *dcurl_h_store,
     T *grad_ca_shot, T *grad_cb_shot, T *eta_source_old, T *alpha_hz_x,
@@ -733,6 +734,9 @@ static TIDE_HOST_DEVICE void born_background_prepare_direct_core(
 
   T const dca_val = params.ca_batched ? dca_ptr[i] : dca_ptr[j];
   T const dcb_val = params.cb_batched ? dcb_ptr[i] : dcb_ptr[j];
+  T const cb_val = params.cb_batched ? cb_ptr[i] : cb_ptr[j];
+  T const cq_val = params.cq_batched ? cq_ptr[i] : cq_ptr[j];
+  T const scaled_dcb_val = -dcb_val * cq_val / cb_val;
   T const lambda_curr = lambda_sc_ey[i];
 
   if (grad_ca_shot != nullptr && dey_store != nullptr) {
@@ -747,14 +751,14 @@ static TIDE_HOST_DEVICE void born_background_prepare_direct_core(
 
   eta_source_old[i] = dca_val * lambda_curr;
 
-  T const beta_x = dcb_val * lambda_curr;
+  T const beta_x = scaled_dcb_val * lambda_curr;
   if (x >= params.pml_x0 && x < params.pml_x1) {
     alpha_hz_x[i] = beta_x;
   } else {
     alpha_hz_x[i] = beta_x / params.kx[x] + params.ax[x] * beta_x;
   }
 
-  T const beta_z = -dcb_val * lambda_curr;
+  T const beta_z = -scaled_dcb_val * lambda_curr;
   if (y >= params.pml_y0 && y < params.pml_y1) {
     alpha_hx_z[i] = beta_z;
   } else {

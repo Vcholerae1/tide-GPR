@@ -191,6 +191,49 @@ def test_tm2d_receiver_hvp_naive_matches_exact_nested_autodiff():
     _assert_relative_norm_close(hvp_sigma_proto, hvp_sigma_exact, rtol=1e-6)
 
 
+def test_tm2d_full_and_gauss_newton_hvp_match_at_zero_least_squares_residual():
+    case = _build_tm2d_native_case()
+    predicted = tide.maxwelltm(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        grid_spacing=case["grid_spacing"],
+        dt=case["dt"],
+        source_amplitude=case["source_amplitude"],
+        source_location=case["source_location"],
+        receiver_location=case["receiver_location"],
+        pml_width=2,
+        stencil=2,
+        python_backend=True,
+    )[-1].detach()
+
+    common = {
+        "epsilon": case["epsilon"],
+        "sigma": case["sigma"],
+        "mu": case["mu"],
+        "vepsilon": case["vepsilon"],
+        "vsigma": case["vsigma"],
+        "grid_spacing": case["grid_spacing"],
+        "dt": case["dt"],
+        "source_amplitude": case["source_amplitude"],
+        "source_location": case["source_location"],
+        "receiver_location": case["receiver_location"],
+        "observed_data": predicted,
+        "misfit_fn": lambda actual, observed: 0.5
+        * (actual - observed).square().sum(),
+        "pml_width": 2,
+        "stencil": 2,
+    }
+    full = tm2d_receiver_hvp_naive(**common, hessian_mode="full")
+    gauss_newton = tm2d_receiver_hvp_naive(
+        **common,
+        hessian_mode="gauss_newton",
+    )
+
+    for full_part, gn_part in zip(full, gauss_newton):
+        torch.testing.assert_close(full_part, gn_part, rtol=1e-8, atol=1e-12)
+
+
 @torch.no_grad()
 def _build_tm2d_native_case():
     dtype = torch.float64

@@ -181,7 +181,10 @@ class MaxwellTM(torch.nn.Module):
         nt: int | None = None,
         model_gradient_sampling_interval: int = 1,
         linearize_source: bool = True,
-        python_backend: bool = True,
+        hessian_mode: Literal["full", "gauss_newton"] = "full",
+        python_backend: bool = False,
+        storage_mode: Literal["device", "cpu", "disk"] = "device",
+        storage_compression: bool | str | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         _validate_optional_bool("python_backend", python_backend)
         assert isinstance(self.epsilon, torch.Tensor)
@@ -206,7 +209,10 @@ class MaxwellTM(torch.nn.Module):
             nt=nt,
             model_gradient_sampling_interval=model_gradient_sampling_interval,
             linearize_source=linearize_source,
+            hessian_mode=hessian_mode,
             python_backend=python_backend,
+            storage_mode=storage_mode,
+            storage_compression=storage_compression,
         )
 
 
@@ -231,16 +237,19 @@ def maxwelltm_hvp(
     nt: int | None = None,
     model_gradient_sampling_interval: int = 1,
     linearize_source: bool = True,
-    python_backend: bool = True,
+    hessian_mode: Literal["full", "gauss_newton"] = "full",
+    python_backend: bool = False,
+    storage_mode: Literal["device", "cpu", "disk"] = "device",
+    storage_compression: bool | str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply a receiver-space Hessian to a model direction.
 
-    The Python path (`python_backend=True`) evaluates a receiver-space
-    Hessian-vector product through the reference `maxwelltm` and `borntm`
-    operators:
+    ``hessian_mode="full"`` evaluates the complete receiver-space Hessian:
 
         Hv = grad_m <dPhi/dd, Jv>
 
+    ``hessian_mode="gauss_newton"`` evaluates only ``J.T @ Phi'' @ Jv``.
+    The Python path (`python_backend=True`) is the reference implementation.
     The native path (`python_backend=False`) uses the native TM2D forward solver
     together with the native Born background-gradient path.
 
@@ -253,6 +262,16 @@ def maxwelltm_hvp(
     _validate_tensor_arg("sigma", sigma)
     _validate_tensor_arg("mu", mu)
     _validate_tensor_arg("observed_data", observed_data)
+    if hessian_mode not in {"full", "gauss_newton"}:
+        raise ValueError(
+            "hessian_mode must be 'full' or 'gauss_newton', "
+            f"but got {hessian_mode!r}."
+        )
+    if storage_mode not in {"device", "cpu", "disk"}:
+        raise ValueError(
+            "storage_mode must be 'device', 'cpu', or 'disk', "
+            f"but got {storage_mode!r}."
+        )
     if epsilon.ndim != 2:
         raise NotImplementedError("maxwelltm_hvp currently supports a single 2D model.")
     if sigma.shape != epsilon.shape or mu.shape != epsilon.shape:
@@ -295,6 +314,7 @@ def maxwelltm_hvp(
             nt=nt,
             model_gradient_sampling_interval=model_gradient_sampling_interval,
             linearize_source=linearize_source,
+            hessian_mode=hessian_mode,
         )
 
     from .tm2d_born_autograd import tm2d_receiver_hvp_native
@@ -318,6 +338,9 @@ def maxwelltm_hvp(
         nt=nt,
         model_gradient_sampling_interval=model_gradient_sampling_interval,
         linearize_source=linearize_source,
+        hessian_mode=hessian_mode,
+        storage_mode=storage_mode,
+        storage_compression=storage_compression,
     )
 
 

@@ -1260,6 +1260,8 @@ __global__ __launch_bounds__(256) void born_forward_kernel_e_with_storage_bf16(
 
 template <typename StoreT>
 __global__ __launch_bounds__(256) void born_background_prepare_direct_kernel(
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const cq,
     TIDE_DTYPE const *__restrict const dca,
     TIDE_DTYPE const *__restrict const dcb,
     TIDE_DTYPE const *__restrict const lambda_sc_ey,
@@ -1290,11 +1292,11 @@ __global__ __launch_bounds__(256) void born_background_prepare_direct_kernel(
       bx,      bxh,         ky,         kyh,        kx,      kxh,
       static_cast<TIDE_DTYPE>(rdy), static_cast<TIDE_DTYPE>(rdx),
       n_shots, ny,          nx,         shot_numel, pml_y0,  pml_y1,
-      pml_x0,  pml_x1,      ca_batched, cb_batched, false};
+      pml_x0,  pml_x1,      ca_batched, cb_batched, cq_batched};
   ::tide::born_background_prepare_direct_core<TIDE_DTYPE, StoreT, TIDE_STENCIL>(
-      params, dca, dcb, lambda_sc_ey, dey_store, dcurl_h_store, grad_ca_shot,
-      grad_cb_shot, eta_source_old, work_x, work_z, step_ratio_val, y, x,
-      shot_idx);
+      params, cb, cq, dca, dcb, lambda_sc_ey, dey_store, dcurl_h_store,
+      grad_ca_shot, grad_cb_shot, eta_source_old, work_x, work_z,
+      step_ratio_val, y, x, shot_idx);
 }
 
 __global__ __launch_bounds__(256) void born_backward_apply_e_to_h_kernel(
@@ -1358,6 +1360,21 @@ __global__ void add_inplace(TIDE_DTYPE *__restrict const dest,
   if (shot_idx < n_shots && y < ny && x < nx) {
     int64_t const i = shot_idx * shot_numel + y * nx + x;
     dest[i] += src[i];
+  }
+}
+
+__global__ void add_inplace_and_zero(TIDE_DTYPE *__restrict const dest,
+                                     TIDE_DTYPE *__restrict const src) {
+  int64_t x =
+      (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  int64_t y =
+      (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
+  int64_t shot_idx =
+      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
+  if (shot_idx < n_shots && y < ny && x < nx) {
+    int64_t const i = shot_idx * shot_numel + y * nx + x;
+    dest[i] += src[i];
+    src[i] = static_cast<TIDE_DTYPE>(0);
   }
 }
 
@@ -4003,6 +4020,7 @@ extern "C" void FUNC(born_backward_bggrad)(
     TIDE_DTYPE const *const cq, TIDE_DTYPE const *const dca,
     TIDE_DTYPE const *const dcb, TIDE_DTYPE const *const f0,
     TIDE_DTYPE const *const df, TIDE_DTYPE const *const grad_r,
+    TIDE_DTYPE const *const grad_background_r,
     TIDE_DTYPE *const ey_store_1, void *const ey_store_3,
     char const *const *const ey_filenames, TIDE_DTYPE *const curl_store_1,
     void *const curl_store_3, char const *const *const curl_filenames,
@@ -4156,8 +4174,6 @@ extern "C" void FUNC(born_backward_bggrad)(
   zero_tensor(m_eta_hx_z, (size_t)store_size);
   zero_tensor(m_eta_hz_x, (size_t)store_size);
   zero_tensor(eta_source_old, (size_t)store_size);
-  zero_tensor(work_eta_x, (size_t)store_size);
-  zero_tensor(work_eta_z, (size_t)store_size);
 
   for (int64_t t = start_t - 1; t >= start_t - nt; --t) {
     int64_t const store_idx = t / step_ratio_h;
@@ -4179,12 +4195,21 @@ extern "C" void FUNC(born_backward_bggrad)(
                        stream_compute>>>(
         ca, cb, eta_hx, eta_hz, eta_ey, m_eta_hx_z, m_eta_hz_x, ay, ayh, ax,
         axh, by, byh, bx, bxh, ky, kyh, kx, kxh);
+    add_inplace_and_zero<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                           stream_compute>>>(eta_ey, eta_source_old);
 
     if (n_receivers_per_shot_h > 0) {
       add_adjoint_sources_ey<<<launch_cfg.dimGridReceivers,
                                launch_cfg.dimBlockReceivers, 0,
                                stream_compute>>>(
           lambda_ey, grad_r + t * n_shots_h * n_receivers_per_shot_h,
+          receivers_i);
+      add_adjoint_sources_ey<<<launch_cfg.dimGridReceivers,
+                               launch_cfg.dimBlockReceivers, 0,
+                               stream_compute>>>(
+          eta_ey,
+          grad_background_r +
+              t * n_shots_h * n_receivers_per_shot_h,
           receivers_i);
     }
     if (do_grad) {
@@ -4198,14 +4223,16 @@ extern "C" void FUNC(born_backward_bggrad)(
       if (storage_bf16_h) {
         born_background_prepare_direct_kernel<__nv_bfloat16>
             <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
-                dca, dcb, lambda_ey, (__nv_bfloat16 const *)dey_store_t,
+                cb, cq, dca, dcb, lambda_ey,
+                (__nv_bfloat16 const *)dey_store_t,
                 (__nv_bfloat16 const *)dcurl_store_t, grad_ca_shot,
                 grad_cb_shot, eta_source_old, work_eta_x, work_eta_z, ay, ayh,
                 ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh, step_ratio_h);
       } else {
         born_background_prepare_direct_kernel<TIDE_DTYPE>
             <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
-                dca, dcb, lambda_ey, (TIDE_DTYPE const *)dey_store_t,
+                cb, cq, dca, dcb, lambda_ey,
+                (TIDE_DTYPE const *)dey_store_t,
                 (TIDE_DTYPE const *)dcurl_store_t, grad_ca_shot, grad_cb_shot,
                 eta_source_old, work_eta_x, work_eta_z, ay, ayh, ax, axh, by,
                 byh, bx, bxh, ky, kyh, kx, kxh, step_ratio_h);
@@ -4232,8 +4259,25 @@ extern "C" void FUNC(born_backward_bggrad)(
             launch_cfg, stream_compute, lambda_ey, ey_store_t, curl_store_t,
             grad_dca_shot, grad_dcb_shot, true, true, step_ratio_h);
       }
-      add_inplace<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                    stream_compute>>>(eta_ey, eta_source_old);
+      if (storage_bf16_h) {
+        __nv_bfloat16 const *const ey_store_t =
+            (__nv_bfloat16 const *)ey_store_1 + store_idx * store_size;
+        __nv_bfloat16 const *const curl_store_t =
+            (__nv_bfloat16 const *)curl_store_1 + store_idx * store_size;
+        launch_coeff_grad_kernel<__nv_bfloat16>(
+            launch_cfg, stream_compute, eta_ey, ey_store_t, curl_store_t,
+            grad_ca_shot, grad_cb_shot, ca_requires_grad, cb_requires_grad,
+            step_ratio_h);
+      } else {
+        TIDE_DTYPE const *const ey_store_t =
+            (TIDE_DTYPE const *)ey_store_1 + store_idx * store_size;
+        TIDE_DTYPE const *const curl_store_t =
+            (TIDE_DTYPE const *)curl_store_1 + store_idx * store_size;
+        launch_coeff_grad_kernel<TIDE_DTYPE>(
+            launch_cfg, stream_compute, eta_ey, ey_store_t, curl_store_t,
+            grad_ca_shot, grad_cb_shot, ca_requires_grad, cb_requires_grad,
+            step_ratio_h);
+      }
     }
 
     if (n_sources_per_shot_h > 0) {
