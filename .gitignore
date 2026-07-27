@@ -33,6 +33,27 @@ outputs/
 benchmark_history/
 artifacts/
 data/
+tide-runs/
+
+# Local research workspaces
+experiments/
+docs/research/
+/benchmarks/hydro_*.py
+/benchmarks/ifwi_*.py
+/tests/test_ifwi_*.py
+/tests/test_rwi_*.py
+/tools/diagnostics/
+/tools/evaluation/
+/tools/literature/
+/tools/sweeps/
+/tools/plot_hydro_optimizer_slices.py
+
+# Generated numerical data and result bundles
+*.h5
+*.hdf5
+*.mat
+*.npy
+*.npz
 
 # Development notes 
 .vscode/
@@ -52,4 +73,3 @@ test.md
 .artifacts/
 references/
 .agents/
-

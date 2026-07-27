@@ -9,8 +9,8 @@ from the repository root with `uv run python -m ...`.
 | Minimal shot-batched 2D inversion | `uv run python -m examples.inversion.fwi_2d` |
 
 Long-running comparisons, paper reproductions, parameter sweeps, diagnostics,
-and benchmarks live outside this directory. See `experiments/README.md`,
-`benchmarks/`, and `tools/`.
+and other research work stay in local ignored workspaces. Stable performance
+benchmarks live under `benchmarks/`.
 
 Generated files belong under `artifacts/`; local model data belongs under
 `data/`. Neither is tracked by Git.

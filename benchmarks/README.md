@@ -1,8 +1,9 @@
 # Benchmarks
 
 Benchmarks measure runtime or memory behavior; they are not reduced-size
-examples. Their workload comes from explicit arguments and experiment configs.
-Results are written under `artifacts/benchmarks/`.
+examples. Their workloads are configured through explicit command-line
+arguments. Results are written under the ignored `artifacts/benchmarks/`
+directory.
 
 `maxwell3d_cuda_launch.py` sweeps native 3D CUDA launch configurations on a
 synthetic workload. Use `--backward` to include snapshot storage and the
