@@ -582,6 +582,7 @@ class BornTMForwardFunc(torch.autograd.Function):
             "direct_snapshot_tensors": direct_snapshot_tensors,
             "lambda_store": lambda_store,
             "capture_background_adjoint": capture_background_adjoint,
+            "reuse_background": reuse_background,
             "reuse_background_adjoint": (
                 reuse_background and cached_lambda_store.numel() > 0
             ),
@@ -670,6 +671,7 @@ class BornTMForwardFunc(torch.autograd.Function):
         ctx.dcb_requires_grad = ctx_data["dcb_requires_grad"]
         ctx.df_requires_grad = ctx_data["df_requires_grad"]
         ctx.capture_background_adjoint = ctx_data["capture_background_adjoint"]
+        ctx.reuse_background = ctx_data["reuse_background"]
         ctx.reuse_background_adjoint = ctx_data["reuse_background_adjoint"]
         ctx.background_n_shots = ctx_data["background_n_shots"]
         ctx.background_grad_required = any(ctx.needs_input_grad[i] for i in (2, 3, 5))
@@ -798,7 +800,19 @@ class BornTMForwardFunc(torch.autograd.Function):
         else:
             grad_background_r = torch.empty(0, device=device, dtype=coeff_dtype)
 
-        needs_bggrad = receiver_grad_needed and model_grad_requested
+        # A direction-batched Gauss-Newton VJP differentiates only the
+        # background receiver output, but its cached background snapshots may
+        # have fewer shots than the flattened direction-by-shot execution
+        # batch. The standard background adjoint assumes one stored snapshot
+        # per execution shot. The bggrad kernel is modulo-aware through
+        # ``background_n_shots`` and, with a zero Born receiver gradient,
+        # reduces exactly to the required background ``J.T @ w`` operation.
+        needs_cached_batched_background_vjp = (
+            background_receiver_grad_needed and ctx.reuse_background and ctx.ca_batched
+        )
+        needs_bggrad = model_grad_requested and (
+            receiver_grad_needed or needs_cached_batched_background_vjp
+        )
         needs_born_backward = (
             receiver_grad_needed
             and not needs_bggrad
@@ -839,7 +853,7 @@ class BornTMForwardFunc(torch.autograd.Function):
             work_x = torch.empty(0, device=device, dtype=coeff_dtype)
             work_z = torch.empty(0, device=device, dtype=coeff_dtype)
 
-        if receiver_grad_needed and ctx.n_sources > 0:
+        if (receiver_grad_needed or needs_bggrad) and ctx.n_sources > 0:
             grad_f = torch.zeros(
                 ctx.nt, ctx.n_shots, ctx.n_sources, device=device, dtype=coeff_dtype
             )

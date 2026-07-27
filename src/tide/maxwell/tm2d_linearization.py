@@ -123,8 +123,8 @@ class TM2DLinearizationContext:
 
     @property
     def can_batch_directions(self) -> bool:
-        """Whether full-Hessian directions can share one native CUDA batch."""
-        return self.can_reuse_background and self.hessian_mode == "full"
+        """Whether directions can share one native CUDA execution batch."""
+        return self.can_reuse_background
 
     @property
     def predicted_data(self) -> torch.Tensor | None:
@@ -323,6 +323,36 @@ class TM2DLinearizationContext:
                 return None
             return tensor.repeat((block_directions,) + (1,) * (tensor.ndim - 1))
 
+        misfit = self.misfit
+        if self.hessian_mode == "gauss_newton":
+            # Preserve the original receiver objective independently for every
+            # direction. Applying the user misfit once to a flattened K*S shot
+            # axis would generally change reductions and could introduce
+            # artificial cross-direction Hessian terms.
+            base_observed_data = self.observed_data
+            base_misfit = self.misfit
+
+            def direction_separable_misfit(
+                predicted: torch.Tensor, _observed: torch.Tensor
+            ) -> torch.Tensor:
+                predicted_by_direction = predicted.reshape(
+                    predicted.shape[0],
+                    block_directions,
+                    n_shots,
+                    predicted.shape[2],
+                )
+                return torch.stack(
+                    [
+                        base_misfit(
+                            predicted_by_direction[:, index],
+                            base_observed_data,
+                        )
+                        for index in range(block_directions)
+                    ]
+                ).sum()
+
+            misfit = direction_separable_misfit
+
         observed_data = self.observed_data.repeat(1, block_directions, 1)
         hvp_epsilon, hvp_sigma = tm2d_receiver_hvp_native(
             repeat_model(self.epsilon),
@@ -336,7 +366,7 @@ class TM2DLinearizationContext:
             source_location=repeat_shots(self.source_location),
             receiver_location=repeat_shots(self.receiver_location),
             observed_data=observed_data,
-            misfit_fn=self.misfit,
+            misfit_fn=misfit,
             stencil=self.stencil,
             pml_width=self.pml_width,
             max_vel=self.max_vel,

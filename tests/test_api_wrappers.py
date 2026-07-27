@@ -617,6 +617,171 @@ def test_tm2d_linearization_context_reuses_background_for_direction_batch():
         assert torch.isfinite(actual_part).all()
 
 
+@pytest.mark.skipif(
+    not backend_utils.is_backend_available() or not torch.cuda.is_available(),
+    reason="native CUDA backend not available",
+)
+@pytest.mark.parametrize("block_size", [1, 2, 3])
+@pytest.mark.parametrize(
+    ("storage_compression", "relative_tolerance"),
+    [(False, 5e-5), ("bf16", 1e-2)],
+)
+def test_tm2d_linearization_context_fuses_gauss_newton_directions(
+    block_size, storage_compression, relative_tolerance
+):
+    device = torch.device("cuda")
+    case = _build_tm_case(device)
+    source_amplitude = torch.cat(
+        [case["source_amplitude"], 0.7 * case["source_amplitude"]], dim=0
+    )
+    source_location = case["source_location"].repeat(2, 1, 1)
+    receiver_location = case["receiver_location"].repeat(2, 1, 1)
+    observed_data = torch.zeros(
+        source_amplitude.shape[-1],
+        2,
+        receiver_location.shape[1],
+        device=device,
+        dtype=case["epsilon"].dtype,
+    )
+    vepsilon = torch.stack(
+        [case["depsilon"], 2.0 * case["depsilon"], -case["depsilon"]]
+    )
+    sigma_direction = torch.full_like(case["sigma"], 1e-4)
+    vsigma = torch.stack(
+        [sigma_direction, -2.0 * sigma_direction, torch.zeros_like(sigma_direction)]
+    )
+
+    def coupled_misfit(predicted: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
+        residual = predicted - observed
+        shot_sum = predicted.sum(dim=1)
+        return (
+            0.5 * residual.square().sum()
+            + 0.01 * predicted.sin().sum()
+            + 0.02 * shot_sum.square().sum()
+        )
+
+    kwargs = {
+        "grid_spacing": case["dx"],
+        "dt": case["dt"],
+        "source_amplitude": source_amplitude,
+        "source_location": source_location,
+        "receiver_location": receiver_location,
+        "observed_data": observed_data,
+        "misfit": coupled_misfit,
+        "stencil": 2,
+        "pml_width": 1,
+        "storage_compression": storage_compression,
+        "hessian_mode": "gauss_newton",
+    }
+
+    with tide.linearize_maxwelltm(
+        case["epsilon"], case["sigma"], case["mu"], **kwargs
+    ) as context:
+        actual = context.hvp_batch(
+            vepsilon=vepsilon,
+            vsigma=vsigma,
+            block_size=block_size,
+        )
+        assert context.can_batch_directions
+        assert context.background_builds == 1
+        assert context.reused_directions == 2
+        assert context.batched_blocks == (2 + block_size - 1) // block_size
+
+    expected_parts = [
+        tide.maxwelltm_hvp(
+            case["epsilon"],
+            case["sigma"],
+            case["mu"],
+            vepsilon=epsilon_direction,
+            vsigma=sigma_direction,
+            **kwargs,
+        )
+        for epsilon_direction, sigma_direction in zip(vepsilon, vsigma)
+    ]
+    expected = tuple(torch.stack(parts) for parts in zip(*expected_parts))
+    for actual_part, expected_part in zip(actual, expected):
+        relative_l2 = (actual_part - expected_part).norm() / expected_part.norm()
+        assert relative_l2 < relative_tolerance
+        assert torch.isfinite(actual_part).all()
+
+
+@pytest.mark.skipif(
+    not backend_utils.is_backend_available() or not torch.cuda.is_available(),
+    reason="native CUDA backend not available",
+)
+def test_tm2d_gauss_newton_direction_block_is_symmetric_psd():
+    device = torch.device("cuda")
+    case = _build_tm_case(device)
+    source_amplitude = torch.cat(
+        [case["source_amplitude"], 0.7 * case["source_amplitude"]], dim=0
+    )
+    source_location = case["source_location"].repeat(2, 1, 1)
+    receiver_location = case["receiver_location"].repeat(2, 1, 1)
+    observed_data = torch.zeros(
+        source_amplitude.shape[-1],
+        2,
+        receiver_location.shape[1],
+        device=device,
+        dtype=case["epsilon"].dtype,
+    )
+    generator = torch.Generator(device=device).manual_seed(4)
+    vepsilon = (
+        torch.randn(
+            2,
+            *case["epsilon"].shape,
+            device=device,
+            dtype=case["epsilon"].dtype,
+            generator=generator,
+        )
+        * 1e-2
+    )
+    vsigma = (
+        torch.randn(
+            2,
+            *case["sigma"].shape,
+            device=device,
+            dtype=case["sigma"].dtype,
+            generator=generator,
+        )
+        * 1e-5
+    )
+
+    def squared_error(predicted: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
+        return 0.5 * (predicted - observed).square().sum()
+
+    with tide.linearize_maxwelltm(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        grid_spacing=case["dx"],
+        dt=case["dt"],
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        observed_data=observed_data,
+        misfit=squared_error,
+        stencil=2,
+        pml_width=1,
+        storage_compression=False,
+        hessian_mode="gauss_newton",
+    ) as context:
+        hvp_epsilon, hvp_sigma = context.hvp_batch(
+            vepsilon=vepsilon,
+            vsigma=vsigma,
+            block_size=2,
+        )
+
+    lhs = (vepsilon[0] * hvp_epsilon[1]).sum() + (vsigma[0] * hvp_sigma[1]).sum()
+    rhs = (hvp_epsilon[0] * vepsilon[1]).sum() + (hvp_sigma[0] * vsigma[1]).sum()
+    relative_symmetry_error = (lhs - rhs).abs() / torch.maximum(lhs.abs(), rhs.abs())
+    assert relative_symmetry_error < 2e-5
+
+    quadratic_forms = (vepsilon * hvp_epsilon).flatten(1).sum(1) + (
+        vsigma * hvp_sigma
+    ).flatten(1).sum(1)
+    assert torch.all(quadratic_forms >= -1e-5)
+
+
 def test_tm2d_linearization_context_rejects_mutated_model():
     device = torch.device("cpu")
     case = _build_tm_case(device)
