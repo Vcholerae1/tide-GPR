@@ -135,6 +135,7 @@ class Maxwell3D(torch.nn.Module):
         storage_chunk_steps: int = 0,
         n_threads: int | None = None,
         dispersion: DebyeDispersion | None = None,
+        compute_mode: str = "native",
     ):
         assert isinstance(self.epsilon, torch.Tensor)
         assert isinstance(self.sigma, torch.Tensor)
@@ -190,6 +191,7 @@ class Maxwell3D(torch.nn.Module):
             storage_chunk_steps,
             n_threads,
             dispersion=dispersion,
+            compute_mode=compute_mode,
         )
 
     @runtime_typecheck
@@ -412,10 +414,17 @@ def maxwell3d(
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
+    compute_mode: str = "native",
 ):
     """3D Maxwell equations solver.
 
     Coordinate convention is `[z, y, x]`.
+
+    ``compute_mode="fp16_io"`` is an experimental CUDA forward-only mode. It
+    stores the six primary E/H fields in FP16 while retaining FP32 stencil
+    arithmetic, material coefficients, CPML memories, and receiver samples.
+    Setting ``TIDE_EM3D_FP16_HALF2=1`` additionally enables an experimental
+    SeisCL-style path that packs two adjacent x-cells per CUDA thread.
     """
     epsilon_input = epsilon
     sigma_input = sigma
@@ -565,6 +574,10 @@ def maxwell3d(
         raise TypeError(
             f"python_backend must be bool or str, but got {type(python_backend).__name__}"
         )
+    if compute_mode not in {"native", "fp16_io"}:
+        raise ValueError("compute_mode must be 'native' or 'fp16_io'.")
+    if compute_mode == "fp16_io" and use_python:
+        raise NotImplementedError("compute_mode='fp16_io' requires the native CUDA backend.")
 
     if batch_meta["model_batched"] and use_python:
         if forward_callback is not None or backward_callback is not None:
@@ -994,6 +1007,7 @@ def maxwell3d(
         storage_chunk_steps,
         n_threads,
         dispersion,
+        compute_mode=compute_mode,
     )
 
     (

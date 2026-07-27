@@ -15,8 +15,12 @@ from tide.workflow import (
     local_shot_positions,
     merge_receiver_batches,
     point_acquisition,
+    receiver_gsot_loss,
+    receiver_gsot_loss_shard,
     receiver_mse_loss,
     receiver_mse_loss_shard,
+    receiver_sinkhorn_loss,
+    receiver_sinkhorn_loss_shard,
     rank_shot_indices,
     run_shot_batches,
     split_rank_shots,
@@ -198,6 +202,83 @@ def test_receiver_shard_batch_helpers_use_local_observed_columns() -> None:
     torch.testing.assert_close(
         loss, torch.tensor(predicted.numel() * 4.0 / (4 * 5 * 2))
     )
+
+
+def test_receiver_sinkhorn_loss_matches_shots_and_backpropagates() -> None:
+    pytest.importorskip("geomloss")
+    observed = torch.zeros(8, 3, 1)
+    observed[2, :, 0] = 1.0
+    indices = torch.tensor([0, 2])
+    predicted = torch.zeros(8, 2, 1, requires_grad=True)
+    with torch.no_grad():
+        predicted[3, :, 0] = 1.0
+
+    loss = receiver_sinkhorn_loss(
+        predicted,
+        observed,
+        indices,
+        dt=0.1,
+        p=1,
+        blur=0.05,
+    )
+    loss.backward()
+
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)
+    assert predicted.grad is not None
+    assert torch.isfinite(predicted.grad).all()
+
+
+def test_receiver_sinkhorn_loss_shard_selects_local_shots() -> None:
+    pytest.importorskip("geomloss")
+    observed = torch.zeros(8, 2, 1)
+    observed[2, :, 0] = 1.0
+    predicted = observed[:, 1:2].clone().requires_grad_()
+
+    loss = receiver_sinkhorn_loss_shard(
+        predicted,
+        observed,
+        torch.tensor([4]),
+        torch.tensor([1, 4]),
+        dt=0.1,
+        blur=0.05,
+    )
+
+    torch.testing.assert_close(loss, torch.tensor(0.0), atol=1e-7, rtol=0)
+
+
+def test_receiver_gsot_loss_uses_hard_assignment_and_backpropagates() -> None:
+    observed = torch.tensor([0.0, 0.0, 1.0]).reshape(3, 1, 1)
+    predicted = torch.tensor([1.0, 0.0, 0.0]).reshape(3, 1, 1).requires_grad_()
+
+    loss = receiver_gsot_loss(
+        predicted,
+        observed,
+        torch.tensor([0]),
+        dt=1.0,
+        p=2,
+        max_time_shift=0.1,
+        observed_energy_weighting=False,
+    )
+    loss.backward()
+
+    torch.testing.assert_close(loss, torch.tensor(2.0))
+    assert predicted.grad is not None
+    torch.testing.assert_close(predicted.grad[:, 0, 0], torch.tensor([2.0, 0.0, -2.0]))
+
+
+def test_receiver_gsot_loss_shard_selects_local_shots() -> None:
+    observed = torch.arange(4 * 2, dtype=torch.float32).reshape(4, 2, 1)
+    predicted = observed[:, 1:2].clone().requires_grad_()
+
+    loss = receiver_gsot_loss_shard(
+        predicted,
+        observed,
+        torch.tensor([4]),
+        torch.tensor([1, 4]),
+    )
+
+    torch.testing.assert_close(loss, torch.tensor(0.0))
 
 
 def test_gather_receiver_shards_noops_without_distributed_context() -> None:

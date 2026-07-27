@@ -106,6 +106,35 @@ receiver = tide.workflow.run_shot_batches(
 )
 ```
 
+## Graph-Space Optimal Transport Prototype
+
+`receiver_gsot_loss` provides a reference trace-wise GSOT objective. It treats
+each waveform sample as a `(time, amplitude)` point and solves an exact hard
+assignment with SciPy's linear-sum assignment solver:
+
+```python
+loss = tide.workflow.receiver_gsot_loss(
+    predicted,
+    observed,
+    shot_indices,
+    dt=4.0e-11,
+    sparse_sampling=5,
+    p=2,
+    max_time_shift=5.0e-9,
+)
+loss.backward()
+```
+
+The assignment is computed from detached CPU copies, while its selected
+permutation is applied to the original tensors so waveform gradients remain
+available. Following Métivier et al. (2019), the amplitude scale is computed
+per trace as `eta = max_time_shift / amplitude_range`, and trace costs are
+weighted by observed energy to retain relative AVO information. All traces are
+transferred to CPU together, but assignment is still
+serial and cubic in the samples per trace. This API is therefore a correctness
+and experimentation baseline rather than a high-performance GPU GSOT solver.
+Use `receiver_gsot_loss_shard` when observed receiver data is rank-sharded.
+
 ## With `tide.optim`
 
 For optimizer-driven inversion, keep model packing and constraints in the

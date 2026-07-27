@@ -101,6 +101,7 @@ def _build_3d_case(device: torch.device):
 
 def test_maxwelltm_module_matches_functional_cpu():
     device = torch.device("cpu")
+    
     case = _build_tm_case(device)
 
     model = tide.MaxwellTM(

@@ -30,6 +30,7 @@ def maxwell_func(
     python_backend: bool | str,
     *args,
     validate_material_inputs: bool = True,
+    compute_mode: str = "native",
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -73,6 +74,10 @@ def maxwell_func(
             use_python = True
 
     if use_python:
+        if compute_mode != "native":
+            raise NotImplementedError(
+                "compute_mode='fp16_io' is available only in the native CUDA backend."
+            )
         if python_backend is True or python_backend is False:
             mode = "eager"
         elif isinstance(python_backend, str):
@@ -106,7 +111,7 @@ def maxwell_func(
 
     from .tm2d_cuda import maxwell_c_cuda
 
-    return maxwell_c_cuda(*args)
+    return maxwell_c_cuda(*args, compute_mode=compute_mode)
 
 
 def maxwell_python(
@@ -496,10 +501,9 @@ def maxwell_python(
                 .reshape(size_with_batch)
             )
         if polarization is not None and debye is not None:
-            polarization = (
-                debye["a"].unsqueeze(0) * polarization
-                + debye["b"].unsqueeze(0) * (Ey + ey_prev).unsqueeze(1)
-            )
+            polarization = debye["a"].unsqueeze(0) * polarization + debye[
+                "b"
+            ].unsqueeze(0) * (Ey + ey_prev).unsqueeze(1)
 
         if n_receivers > 0:
             receiver_samples.append(

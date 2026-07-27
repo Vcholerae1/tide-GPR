@@ -19,6 +19,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(TIDE_ENABLE_CUDA "Enable CUDA backend" ON)
 option(TIDE_ENABLE_NATIVE_ARCH "Enable native CPU tuning flags (-march=native)" OFF)
 option(TIDE_CUDA_PROFILE_BUILD "Enable CUDA line info and verbose ptxas output" OFF)
+option(TIDE_EM3D_PERSISTENT_FORWARD
+    "Use an experimental cooperative persistent Maxwell 3D forward kernel" OFF)
+set(TIDE_EM3D_PERSISTENT_BLOCKS_PER_SM "0" CACHE STRING
+    "Persistent Maxwell blocks per SM; 0 uses the occupancy maximum")
+set(TIDE_CUDA_MAX_REGISTERS "64" CACHE STRING
+    "Maximum CUDA registers per thread; set to 0 to let ptxas decide")
 set(TIDE_TM_BLOCK_X "32" CACHE STRING "TM CUDA thread block size in X")
 set(TIDE_TM_BLOCK_Y "8" CACHE STRING "TM CUDA thread block size in Y")
 get_filename_component(TIDE_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
@@ -222,7 +228,7 @@ if(CUDAToolkit_FOUND)
        OR CMAKE_CUDA_ARCHITECTURES STREQUAL ""
        OR CMAKE_CUDA_ARCHITECTURES STREQUAL "52"
        OR CMAKE_CUDA_ARCHITECTURES STREQUAL "75")
-        set(_TIDE_ARCH_CANDIDATES "50;52;53;60;61;62;70;72;75;80;86;87;89;90")
+        set(_TIDE_ARCH_CANDIDATES "50;52;53;60;61;62;70;72;75;80;86;87;89;90;100;103;120;121")
         set(_TIDE_SUPPORTED_ARCHES "")
         set(_TIDE_ARCH_PROBE "${CMAKE_BINARY_DIR}/tide_cuda_arch_probe.cu")
         file(WRITE "${_TIDE_ARCH_PROBE}" "__global__ void tide_arch_probe() {}\n")
@@ -260,6 +266,8 @@ if(CUDAToolkit_FOUND)
             TIDE_DEVICE=cuda
             TIDE_TM_BLOCK_X=${TIDE_TM_BLOCK_X}
             TIDE_TM_BLOCK_Y=${TIDE_TM_BLOCK_Y}
+            TIDE_EM3D_PERSISTENT_FORWARD=$<BOOL:${TIDE_EM3D_PERSISTENT_FORWARD}>
+            TIDE_EM3D_PERSISTENT_BLOCKS_PER_SM=${TIDE_EM3D_PERSISTENT_BLOCKS_PER_SM}
         )
         target_include_directories(${TARGET_NAME} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}
@@ -279,8 +287,13 @@ if(CUDAToolkit_FOUND)
                     --use_fast_math
                     -O3
                     --restrict
-                    --maxrregcount=64
                     -Xptxas=-dlcm=ca
+                >)
+        endif()
+        if(TIDE_CUDA_MAX_REGISTERS GREATER 0)
+            target_compile_options(${TARGET_NAME} PRIVATE
+                $<$<COMPILE_LANGUAGE:CUDA>:
+                    --maxrregcount=${TIDE_CUDA_MAX_REGISTERS}
                 >)
         endif()
         if(TIDE_CUDA_PROFILE_BUILD)
@@ -315,9 +328,6 @@ endif()
 
 # --- CUDA object libraries ---
 if(CUDAToolkit_FOUND)
-    if(CMAKE_BUILD_TYPE MATCHES Release)
-        set(CUDA_RELEASE_OPTIONS --use_fast_math -O3 --restrict --maxrregcount=64 -Xptxas=-dlcm=ca)
-    endif()
     if(NOT WIN32)
         list(APPEND CMAKE_CUDA_FLAGS -Xcompiler=-fPIC)
     endif()
@@ -384,6 +394,8 @@ if(CUDAToolkit_FOUND)
     message(STATUS "  CUDA: ON")
     message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
     message(STATUS "  CUDA Profile Build: ${TIDE_CUDA_PROFILE_BUILD}")
+    message(STATUS "  CUDA Max Registers: ${TIDE_CUDA_MAX_REGISTERS}")
+    message(STATUS "  Maxwell 3D Persistent Forward: ${TIDE_EM3D_PERSISTENT_FORWARD}")
     message(STATUS "  TM Block: ${TIDE_TM_BLOCK_X}x${TIDE_TM_BLOCK_Y}")
 else()
     message(STATUS "  CUDA: OFF")

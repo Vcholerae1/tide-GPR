@@ -1,6 +1,7 @@
 """Minimal shot-batched inversion with tide.workflow and tide.optim."""
 
 from __future__ import annotations
+from tide.optim.types import OptimizerResult
 
 import numpy as np
 import torch
@@ -101,7 +102,7 @@ def objective(x: np.ndarray, grad_out: np.ndarray) -> float:
     return total_loss
 
 
-result = tide.optim.lbfgs_minimize(
+result: OptimizerResult = tide.optim.lbfgs_minimize(
     objective,
     np.array([3.0], dtype=np.float32),
     lower_bounds=np.array([1.0], dtype=np.float32),

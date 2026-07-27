@@ -2,25 +2,33 @@
 #undef TIDE_DTYPE
 #define TIDE_STENCIL 2
 #define TIDE_DTYPE float
+#define TIDE_DTYPE_IS_FLOAT 1
 #include "maxwell_3d_cuda_inst.cu"
+#undef TIDE_DTYPE_IS_FLOAT
 #undef TIDE_STENCIL
 #undef TIDE_DTYPE
 
 #define TIDE_STENCIL 4
 #define TIDE_DTYPE float
+#define TIDE_DTYPE_IS_FLOAT 1
 #include "maxwell_3d_cuda_inst.cu"
+#undef TIDE_DTYPE_IS_FLOAT
 #undef TIDE_STENCIL
 #undef TIDE_DTYPE
 
 #define TIDE_STENCIL 6
 #define TIDE_DTYPE float
+#define TIDE_DTYPE_IS_FLOAT 1
 #include "maxwell_3d_cuda_inst.cu"
+#undef TIDE_DTYPE_IS_FLOAT
 #undef TIDE_STENCIL
 #undef TIDE_DTYPE
 
 #define TIDE_STENCIL 8
 #define TIDE_DTYPE float
+#define TIDE_DTYPE_IS_FLOAT 1
 #include "maxwell_3d_cuda_inst.cu"
+#undef TIDE_DTYPE_IS_FLOAT
 #undef TIDE_STENCIL
 #undef TIDE_DTYPE
 

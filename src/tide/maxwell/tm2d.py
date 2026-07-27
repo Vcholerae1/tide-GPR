@@ -116,6 +116,9 @@ class MaxwellTM(torch.nn.Module):
         storage_bytes_limit_host: int | None = None,
         storage_chunk_steps: int = 0,
         dispersion: DebyeDispersion | None = None,
+        compute_mode: Literal[
+            "native", "fp16_io"
+        ] = "native",
     ):
         assert isinstance(self.epsilon, torch.Tensor)
         assert isinstance(self.sigma, torch.Tensor)
@@ -157,6 +160,7 @@ class MaxwellTM(torch.nn.Module):
             storage_chunk_steps,
             n_threads=None,
             dispersion=dispersion,
+            compute_mode=compute_mode,
         )
 
     @runtime_typecheck
@@ -355,8 +359,41 @@ def maxwelltm(
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
+    compute_mode: Literal[
+        "native", "fp16_io"
+    ] = "native",
 ):
-    """2D TM mode Maxwell equations solver."""
+    """2D TM mode Maxwell equations solver.
+
+    ``compute_mode="fp16_io"`` is an experimental CUDA inference mode that
+    stores the primary wavefields in FP16 and packs adjacent cells with
+    ``half2`` while retaining FP32-lane arithmetic, coefficients, CPML
+    memories, receiver data, and returned states. Set the diagnostic
+    environment variable ``TIDE_TM_FP16_HALF2=0`` to use the scalar FP16 I/O
+    kernel instead. ``TIDE_TM_FP16_HALF2_ARITH=1`` additionally enables
+    experimental native-half2 stencil and interior field arithmetic; it trades
+    accuracy for a small extra speedup and is disabled by default.
+    ``TIDE_TM_FP16_ADJOINT=1`` also stores and propagates the adjoint fields in
+    FP16. An exact power-of-two loss scale is selected from each adjoint source
+    and removed from the returned FP32 gradients to avoid FP16 underflow. This
+    remains an accuracy-limit experiment and is disabled by default.
+    This mode is
+    intended for large multi-shot workloads.
+    Material gradients use FP16
+    forward primary fields, reduced-precision snapshots, and an FP32 adjoint
+    with FP32 accumulation. Gradient mode currently requires device snapshot
+    storage. Batched models, dispersion, callbacks, and the Python backend are
+    not supported.
+
+    """
+    if compute_mode not in {
+        "native",
+        "fp16_io",
+    }:
+        raise ValueError(
+            "compute_mode must be 'native' or 'fp16_io'."
+        )
+
     epsilon_input = epsilon
     sigma_input = sigma
     mu_input = mu
@@ -413,6 +450,20 @@ def maxwelltm(
         raise TypeError(
             f"python_backend must be bool or str, but got {type(python_backend).__name__}"
         )
+
+    if compute_mode == "fp16_io":
+        if use_python:
+            raise NotImplementedError(
+                f"compute_mode={compute_mode!r} requires the native CUDA backend."
+            )
+        if batch_meta["model_batched"]:
+            raise NotImplementedError(
+                f"compute_mode={compute_mode!r} does not yet support batched models."
+            )
+        if forward_callback is not None or backward_callback is not None:
+            raise NotImplementedError(
+                f"compute_mode={compute_mode!r} does not yet support callbacks."
+            )
 
     model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
         model_gradient_sampling_interval
@@ -730,6 +781,7 @@ def maxwelltm(
         storage_chunk_steps,
         n_threads,
         dispersion,
+        compute_mode=compute_mode,
     )
 
     (

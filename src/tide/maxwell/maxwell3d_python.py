@@ -93,6 +93,7 @@ def maxwell3d_python(
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
     *,
+    compute_mode: str = "native",
     validate_material_inputs: bool = True,
 ):
     """3D Python backend propagation with autograd support."""
@@ -108,6 +109,7 @@ def maxwell3d_python(
         storage_bytes_limit_device,
         storage_bytes_limit_host,
         storage_chunk_steps,
+        compute_mode,
         n_threads,
     )
     if epsilon.ndim == 4:

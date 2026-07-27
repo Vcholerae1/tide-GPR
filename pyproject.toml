@@ -58,6 +58,7 @@ docs = [
     "pymdown-extensions>=10.0",
 ]
 experiments = [
+    "geomloss>=0.2.6",
     "pyyaml>=6.0",
 ]
 
