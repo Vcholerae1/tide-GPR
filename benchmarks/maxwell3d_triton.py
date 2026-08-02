@@ -108,30 +108,42 @@ def _h_kernel(
     pz = (z < pml_z0) | (z >= pml_z1 - 1)
     py = (y < pml_y0) | (y >= pml_y1 - 1)
     px = (x < pml_x0) | (x >= pml_x1 - 1)
-    mz0 = tl.load(m_ey_z + q)
-    mz1 = tl.load(m_ex_z + q)
-    my0 = tl.load(m_ez_y + q)
-    my1 = tl.load(m_ex_y + q)
-    mx0 = tl.load(m_ez_x + q)
-    mx1 = tl.load(m_ey_x + q)
-    nmz0 = tl.load(bzh + zs) * mz0 + tl.load(azh + zs) * dey_z
-    nmz1 = tl.load(bzh + zs) * mz1 + tl.load(azh + zs) * dex_z
-    nmy0 = tl.load(byh + ys) * my0 + tl.load(ayh + ys) * dez_y
-    nmy1 = tl.load(byh + ys) * my1 + tl.load(ayh + ys) * dex_y
-    nmx0 = tl.load(bxh + xs) * mx0 + tl.load(axh + xs) * dez_x
-    nmx1 = tl.load(bxh + xs) * mx1 + tl.load(axh + xs) * dey_x
-    tl.store(m_ey_z + i, nmz0, mask=vz & pz)
-    tl.store(m_ex_z + i, nmz1, mask=vz & pz)
-    tl.store(m_ez_y + i, nmy0, mask=vy & py)
-    tl.store(m_ex_y + i, nmy1, mask=vy & py)
-    tl.store(m_ez_x + i, nmx0, mask=vx & px)
-    tl.store(m_ey_x + i, nmx1, mask=vx & px)
-    dey_z = tl.where(vz & pz, dey_z / tl.load(kzh + zs) + nmz0, dey_z)
-    dex_z = tl.where(vz & pz, dex_z / tl.load(kzh + zs) + nmz1, dex_z)
-    dez_y = tl.where(vy & py, dez_y / tl.load(kyh + ys) + nmy0, dez_y)
-    dex_y = tl.where(vy & py, dex_y / tl.load(kyh + ys) + nmy1, dex_y)
-    dez_x = tl.where(vx & px, dez_x / tl.load(kxh + xs) + nmx0, dez_x)
-    dey_x = tl.where(vx & px, dey_x / tl.load(kxh + xs) + nmx1, dey_x)
+    pz = vz & pz
+    py = vy & py
+    px = vx & px
+    mz0 = tl.load(m_ey_z + q, mask=pz, other=0.0)
+    mz1 = tl.load(m_ex_z + q, mask=pz, other=0.0)
+    my0 = tl.load(m_ez_y + q, mask=py, other=0.0)
+    my1 = tl.load(m_ex_y + q, mask=py, other=0.0)
+    mx0 = tl.load(m_ez_x + q, mask=px, other=0.0)
+    mx1 = tl.load(m_ey_x + q, mask=px, other=0.0)
+    bzhv = tl.load(bzh + zs, mask=pz, other=0.0)
+    azhv = tl.load(azh + zs, mask=pz, other=0.0)
+    byhv = tl.load(byh + ys, mask=py, other=0.0)
+    ayhv = tl.load(ayh + ys, mask=py, other=0.0)
+    bxhv = tl.load(bxh + xs, mask=px, other=0.0)
+    axhv = tl.load(axh + xs, mask=px, other=0.0)
+    nmz0 = bzhv * mz0 + azhv * dey_z
+    nmz1 = bzhv * mz1 + azhv * dex_z
+    nmy0 = byhv * my0 + ayhv * dez_y
+    nmy1 = byhv * my1 + ayhv * dex_y
+    nmx0 = bxhv * mx0 + axhv * dez_x
+    nmx1 = bxhv * mx1 + axhv * dey_x
+    tl.store(m_ey_z + i, nmz0, mask=pz)
+    tl.store(m_ex_z + i, nmz1, mask=pz)
+    tl.store(m_ez_y + i, nmy0, mask=py)
+    tl.store(m_ex_y + i, nmy1, mask=py)
+    tl.store(m_ez_x + i, nmx0, mask=px)
+    tl.store(m_ey_x + i, nmx1, mask=px)
+    kzhv = tl.load(kzh + zs, mask=pz, other=1.0)
+    kyhv = tl.load(kyh + ys, mask=py, other=1.0)
+    kxhv = tl.load(kxh + xs, mask=px, other=1.0)
+    dey_z = tl.where(pz, dey_z / kzhv + nmz0, dey_z)
+    dex_z = tl.where(pz, dex_z / kzhv + nmz1, dex_z)
+    dez_y = tl.where(py, dez_y / kyhv + nmy0, dez_y)
+    dex_y = tl.where(py, dex_y / kyhv + nmy1, dex_y)
+    dez_x = tl.where(px, dez_x / kxhv + nmx0, dez_x)
+    dey_x = tl.where(px, dey_x / kxhv + nmx1, dey_x)
     cv = tl.load(cq + j)
     tl.store(hx + i, tl.load(hx + q) - cv * (dey_z - dez_y), mask=active)
     tl.store(hy + i, tl.load(hy + q) - cv * (dez_x - dex_z), mask=active)
@@ -205,30 +217,42 @@ def _e_kernel(
     pz = (z < pml_z0) | (z >= pml_z1)
     py = (y < pml_y0) | (y >= pml_y1)
     px = (x < pml_x0) | (x >= pml_x1)
-    mz0 = tl.load(m_hy_z + q)
-    mz1 = tl.load(m_hx_z + q)
-    my0 = tl.load(m_hz_y + q)
-    my1 = tl.load(m_hx_y + q)
-    mx0 = tl.load(m_hz_x + q)
-    mx1 = tl.load(m_hy_x + q)
-    nmz0 = tl.load(bz + zs) * mz0 + tl.load(az + zs) * dhy_z
-    nmz1 = tl.load(bz + zs) * mz1 + tl.load(az + zs) * dhx_z
-    nmy0 = tl.load(by + ys) * my0 + tl.load(ay + ys) * dhz_y
-    nmy1 = tl.load(by + ys) * my1 + tl.load(ay + ys) * dhx_y
-    nmx0 = tl.load(bx + xs) * mx0 + tl.load(ax + xs) * dhz_x
-    nmx1 = tl.load(bx + xs) * mx1 + tl.load(ax + xs) * dhy_x
-    tl.store(m_hy_z + i, nmz0, mask=active & pz)
-    tl.store(m_hx_z + i, nmz1, mask=active & pz)
-    tl.store(m_hz_y + i, nmy0, mask=active & py)
-    tl.store(m_hx_y + i, nmy1, mask=active & py)
-    tl.store(m_hz_x + i, nmx0, mask=active & px)
-    tl.store(m_hy_x + i, nmx1, mask=active & px)
-    dhy_z = tl.where(pz, dhy_z / tl.load(kz + zs) + nmz0, dhy_z)
-    dhx_z = tl.where(pz, dhx_z / tl.load(kz + zs) + nmz1, dhx_z)
-    dhz_y = tl.where(py, dhz_y / tl.load(ky + ys) + nmy0, dhz_y)
-    dhx_y = tl.where(py, dhx_y / tl.load(ky + ys) + nmy1, dhx_y)
-    dhz_x = tl.where(px, dhz_x / tl.load(kx + xs) + nmx0, dhz_x)
-    dhy_x = tl.where(px, dhy_x / tl.load(kx + xs) + nmx1, dhy_x)
+    pz = active & pz
+    py = active & py
+    px = active & px
+    mz0 = tl.load(m_hy_z + q, mask=pz, other=0.0)
+    mz1 = tl.load(m_hx_z + q, mask=pz, other=0.0)
+    my0 = tl.load(m_hz_y + q, mask=py, other=0.0)
+    my1 = tl.load(m_hx_y + q, mask=py, other=0.0)
+    mx0 = tl.load(m_hz_x + q, mask=px, other=0.0)
+    mx1 = tl.load(m_hy_x + q, mask=px, other=0.0)
+    bzv = tl.load(bz + zs, mask=pz, other=0.0)
+    azv = tl.load(az + zs, mask=pz, other=0.0)
+    byv = tl.load(by + ys, mask=py, other=0.0)
+    ayv = tl.load(ay + ys, mask=py, other=0.0)
+    bxv = tl.load(bx + xs, mask=px, other=0.0)
+    axv = tl.load(ax + xs, mask=px, other=0.0)
+    nmz0 = bzv * mz0 + azv * dhy_z
+    nmz1 = bzv * mz1 + azv * dhx_z
+    nmy0 = byv * my0 + ayv * dhz_y
+    nmy1 = byv * my1 + ayv * dhx_y
+    nmx0 = bxv * mx0 + axv * dhz_x
+    nmx1 = bxv * mx1 + axv * dhy_x
+    tl.store(m_hy_z + i, nmz0, mask=pz)
+    tl.store(m_hx_z + i, nmz1, mask=pz)
+    tl.store(m_hz_y + i, nmy0, mask=py)
+    tl.store(m_hx_y + i, nmy1, mask=py)
+    tl.store(m_hz_x + i, nmx0, mask=px)
+    tl.store(m_hy_x + i, nmx1, mask=px)
+    kzv = tl.load(kz + zs, mask=pz, other=1.0)
+    kyv = tl.load(ky + ys, mask=py, other=1.0)
+    kxv = tl.load(kx + xs, mask=px, other=1.0)
+    dhy_z = tl.where(pz, dhy_z / kzv + nmz0, dhy_z)
+    dhx_z = tl.where(pz, dhx_z / kzv + nmz1, dhx_z)
+    dhz_y = tl.where(py, dhz_y / kyv + nmy0, dhz_y)
+    dhx_y = tl.where(py, dhx_y / kyv + nmy1, dhx_y)
+    dhz_x = tl.where(px, dhz_x / kxv + nmx0, dhz_x)
+    dhy_x = tl.where(px, dhy_x / kxv + nmx1, dhy_x)
     av = tl.load(ca + q)
     bv = tl.load(cb + q)
     tl.store(ex + i, av * tl.load(ex + q) + bv * (dhy_z - dhz_y), mask=active)
