@@ -1,10 +1,10 @@
-import warnings
 from collections.abc import Sequence
 from typing import Literal
 
 import torch
 
 from ..cfl import cfl_condition
+from ..core import BackendPreference, compile_simulation_plan, select_backend
 from ..resampling import downsample_and_movedim, upsample
 from ..typing import (
     Field2DLike,
@@ -16,25 +16,14 @@ from ..typing import (
 )
 from ..utils import C0
 from ..validation import validate_model_gradient_sampling_interval
+from .module_utils import (
+    _register_maxwell_model,
+    _register_optional_parameter,
+    _same_receiver_locations,
+    _validate_born_parameterization,
+)
 from .tm2d_born_cuda import borntm_c_cuda
 from .tm2d_born_python import borntm_python
-from .validation_internal import _validate_optional_bool, _validate_tensor_arg
-
-
-def _register_optional_born_parameter(
-    module: torch.nn.Module,
-    name: str,
-    value: torch.Tensor | None,
-    requires_grad: bool | None,
-) -> None:
-    _validate_optional_bool(f"{name}_requires_grad", requires_grad)
-    if value is None:
-        module.register_parameter(name, None)
-        return
-    _validate_tensor_arg(name, value)
-    if requires_grad is None:
-        requires_grad = value.requires_grad
-    module.register_parameter(name, torch.nn.Parameter(value, requires_grad=requires_grad))
 
 
 class BornTM(torch.nn.Module):
@@ -68,31 +57,21 @@ class BornTM(torch.nn.Module):
         linearize_source: bool = True,
     ) -> None:
         super().__init__()
-        _validate_optional_bool("epsilon_requires_grad", epsilon_requires_grad)
-        _validate_optional_bool("sigma_requires_grad", sigma_requires_grad)
-        _validate_tensor_arg("epsilon", epsilon)
-        _validate_tensor_arg("sigma", sigma)
-        _validate_tensor_arg("mu", mu)
-
-        if epsilon_requires_grad is None:
-            epsilon_requires_grad = epsilon.requires_grad
-        if sigma_requires_grad is None:
-            sigma_requires_grad = sigma.requires_grad
-        if parameterization not in {"epsilon_sigma", "ca_cb"}:
-            raise ValueError(
-                "parameterization must be 'epsilon_sigma' or 'ca_cb', "
-                f"got {parameterization!r}."
-            )
-
-        self.epsilon = torch.nn.Parameter(epsilon, requires_grad=epsilon_requires_grad)
-        self.sigma = torch.nn.Parameter(sigma, requires_grad=sigma_requires_grad)
-        self.register_buffer("mu", mu)
-        _register_optional_born_parameter(
+        _register_maxwell_model(
+            self,
+            epsilon,
+            sigma,
+            mu,
+            epsilon_requires_grad=epsilon_requires_grad,
+            sigma_requires_grad=sigma_requires_grad,
+        )
+        parameterization = _validate_born_parameterization(parameterization)
+        _register_optional_parameter(
             self, "depsilon", depsilon, depsilon_requires_grad
         )
-        _register_optional_born_parameter(self, "dsigma", dsigma, dsigma_requires_grad)
-        _register_optional_born_parameter(self, "dca", dca, dca_requires_grad)
-        _register_optional_born_parameter(self, "dcb", dcb, dcb_requires_grad)
+        _register_optional_parameter(self, "dsigma", dsigma, dsigma_requires_grad)
+        _register_optional_parameter(self, "dca", dca, dca_requires_grad)
+        _register_optional_parameter(self, "dcb", dcb, dcb_requires_grad)
         self.grid_spacing = grid_spacing
         self.parameterization = parameterization
         self.linearize_source = linearize_source
@@ -241,6 +220,7 @@ def borntm(
     storage_bytes_limit_device: int | None = None,
     storage_bytes_limit_host: int | None = None,
     n_threads: int | None = None,
+    fallback: Literal["reference", "error"] = "reference",
 ) -> tuple[torch.Tensor, ...]:
     """2D TM Born propagator with background and scattered wavefields.
 
@@ -260,18 +240,34 @@ def borntm(
     """
     if epsilon.ndim != 2:
         raise NotImplementedError("borntm currently supports a single 2D model only.")
+    plan = compile_simulation_plan(
+        operation="born",
+        dimension="tm2d",
+        epsilon=epsilon,
+        sigma=sigma,
+        mu=mu,
+        python_backend=python_backend,
+        storage_mode=storage_mode,
+        storage_path=storage_path,
+        storage_compression=storage_compression,
+        storage_bytes_limit_device=storage_bytes_limit_device,
+        storage_bytes_limit_host=storage_bytes_limit_host,
+        fallback=fallback,
+        n_threads=n_threads,
+        model_gradient_sampling_interval=model_gradient_sampling_interval,
+    )
+    storage_mode = plan.storage.mode.value
     model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
         model_gradient_sampling_interval
     )
 
-    if isinstance(python_backend, bool):
-        use_python = python_backend
-    elif isinstance(python_backend, str):
-        use_python = True
-    else:
-        raise TypeError(
-            f"python_backend must be bool or str, but got {type(python_backend).__name__}"
-        )
+    from .. import backend_utils
+
+    decision = select_backend(
+        plan,
+        native_available=backend_utils.is_backend_available(),
+    )
+    use_python = decision.selected is BackendPreference.PYTHON
 
     if max_vel is None:
         max_vel_computed = float((1.0 / torch.sqrt(epsilon * mu)).max().item()) * C0
@@ -296,27 +292,7 @@ def borntm(
     elif source_amplitude_internal is not None:
         nt_internal = int(source_amplitude_internal.shape[-1])
 
-    if not use_python:
-        device_type = epsilon.device.type
-        if device_type not in {"cpu", "cuda"}:
-            use_python = True
-        else:
-            try:
-                from .. import backend_utils
-
-                if not backend_utils.is_backend_available():
-                    warnings.warn(
-                        "C/CUDA backend not available, falling back to Python born backend.",
-                        RuntimeWarning,
-                    )
-                    use_python = True
-            except ImportError:
-                warnings.warn(
-                    "backend_utils not available, falling back to Python born backend.",
-                    RuntimeWarning,
-                )
-                use_python = True
-
+    capture_native_background = False
     if use_python:
         result = borntm_python(
             epsilon,
@@ -354,6 +330,9 @@ def borntm(
             linearize_source=linearize_source,
         )
     else:
+        capture_native_background = _same_receiver_locations(
+            bg_receiver_location, receiver_location
+        )
         result = borntm_c_cuda(
             epsilon,
             sigma,
@@ -394,9 +373,14 @@ def borntm(
             storage_bytes_limit_device=storage_bytes_limit_device,
             storage_bytes_limit_host=storage_bytes_limit_host,
             n_threads=n_threads,
+            return_background_receiver_amplitudes=capture_native_background,
         )
         bg_result = None
-        if bg_receiver_location is not None and bg_receiver_location.numel() > 0:
+        if (
+            bg_receiver_location is not None
+            and bg_receiver_location.numel() > 0
+            and not capture_native_background
+        ):
             from .tm2d import maxwelltm
 
             bg_result = maxwelltm(
@@ -436,6 +420,8 @@ def borntm(
 
     if use_python:
         *state_outputs, bg_receiver_amplitudes, receiver_amplitudes = result
+    elif capture_native_background:
+        *state_outputs, receiver_amplitudes, bg_receiver_amplitudes = result
     else:
         *state_outputs, receiver_amplitudes = result
         if bg_result is None:
@@ -445,7 +431,11 @@ def borntm(
         else:
             bg_receiver_amplitudes = bg_result[-1]
 
-    if use_python and step_ratio > 1 and bg_receiver_amplitudes.numel() > 0:
+    if (
+        (use_python or capture_native_background)
+        and step_ratio > 1
+        and bg_receiver_amplitudes.numel() > 0
+    ):
         bg_receiver_amplitudes = downsample_and_movedim(
             bg_receiver_amplitudes,
             step_ratio,

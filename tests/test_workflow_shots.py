@@ -391,16 +391,30 @@ def test_curvature_preconditioner_diagonal_normalizes_clips_and_masks() -> None:
     torch.testing.assert_close(diagonal[inactive], torch.zeros_like(diagonal[inactive]))
 
 
+def test_curvature_preconditioner_diagonal_preserves_float64_dynamic_range() -> None:
+    curvature = torch.tensor([1e40, 1e41], dtype=torch.float64)
+
+    diagonal = curvature_preconditioner_diagonal(
+        curvature,
+        damping=0.0,
+        power=0.5,
+    )
+
+    assert diagonal.dtype == torch.float64
+    assert torch.all(torch.isfinite(diagonal))
+    assert torch.all(diagonal > 0)
+    assert diagonal[0] > diagonal[1]
+
+
 def test_diagonal_preconditioner_matches_tide_optim_callback_contract() -> None:
     diagonal = torch.tensor([2.0, 0.5], dtype=torch.float32)
     preconditioner = diagonal_preconditioner(diagonal)
-    x = torch.zeros(2).numpy()
-    vector = torch.tensor([3.0, 4.0], dtype=torch.float32).numpy()
-    out = torch.empty(2, dtype=torch.float32).numpy()
+    x = torch.zeros(2)
+    vector = torch.tensor([3.0, 4.0], dtype=torch.float32)
 
-    preconditioner(x, vector, out)
+    out = preconditioner(x, vector)
 
-    torch.testing.assert_close(torch.from_numpy(out), torch.tensor([6.0, 2.0]))
+    torch.testing.assert_close(out, torch.tensor([6.0, 2.0]))
 
 
 def test_curvature_preconditioner_block_normalizes_clips_and_masks() -> None:
@@ -446,14 +460,13 @@ def test_block_preconditioner_matches_tide_optim_callback_contract() -> None:
         diag22=torch.tensor([4.0, 5.0]),
     )
     preconditioner = block_preconditioner(block)
-    x = torch.zeros(4).numpy()
-    vector = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32).numpy()
-    out = torch.empty(4, dtype=torch.float32).numpy()
+    x = torch.zeros(4)
+    vector = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32)
 
-    preconditioner(x, vector, out)
+    out = preconditioner(x, vector)
 
     torch.testing.assert_close(
-        torch.from_numpy(out),
+        out,
         torch.tensor([3.5, 2.0, 12.5, 18.0]),
     )
 

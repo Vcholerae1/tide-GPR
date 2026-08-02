@@ -149,6 +149,9 @@ class _Born3DNativeAutogradFallbackFunc(torch.autograd.Function):
             storage_bytes_limit_device=meta["storage_bytes_limit_device"],
             storage_bytes_limit_host=meta["storage_bytes_limit_host"],
             n_threads=meta["n_threads"],
+            return_background_receiver_amplitudes=meta.get(
+                "return_background_receiver_amplitudes", False
+            ),
             _force_no_gradient_fallback=True,
         )
         return tuple(outputs)
@@ -192,7 +195,11 @@ class _Born3DNativeAutogradFallbackFunc(torch.autograd.Function):
                 ref_values["source_amplitude"],
                 ref_values["source_location"],
                 ref_values["receiver_location"],
-                None,
+                (
+                    ref_values["receiver_location"]
+                    if meta.get("return_background_receiver_amplitudes", False)
+                    else None
+                ),
                 stencil=meta["stencil"],
                 pml_width=meta["pml_width"],
                 max_vel=meta["max_vel"],
@@ -238,7 +245,12 @@ class _Born3DNativeAutogradFallbackFunc(torch.autograd.Function):
                 source_component=meta["source_component"],
                 receiver_component=meta["receiver_component"],
             )
-            ref_outputs = (*ref_outputs[:-2], ref_outputs[-1])
+            ref_outputs = _to_native_output_layout(
+                ref_outputs,
+                return_background_receiver_amplitudes=meta.get(
+                    "return_background_receiver_amplitudes", False
+                ),
+            )
             active_outputs: list[torch.Tensor] = []
             active_grad_outputs: list[torch.Tensor] = []
             for out, grad in zip(ref_outputs, grad_outputs, strict=True):
@@ -265,8 +277,12 @@ class _Born3DNativeAutogradFallbackFunc(torch.autograd.Function):
 
 def _to_native_output_layout(
     result: tuple[torch.Tensor, ...],
+    *,
+    return_background_receiver_amplitudes: bool = False,
 ) -> tuple[torch.Tensor, ...]:
-    """Drop the Python-only background receiver output from Born fallback results."""
+    """Match the native state layout while optionally retaining background data."""
+    if return_background_receiver_amplitudes:
+        return result
     return (*result[:-2], result[-1])
 
 
@@ -385,6 +401,7 @@ def born3d_c_cuda(
     storage_bytes_limit_device: int | None = None,
     storage_bytes_limit_host: int | None = None,
     n_threads: int | None = None,
+    return_background_receiver_amplitudes: bool = False,
     _force_no_gradient_fallback: bool = False,
 ):
     from .. import backend_utils
@@ -468,6 +485,9 @@ def born3d_c_cuda(
             "storage_bytes_limit_device": storage_bytes_limit_device,
             "storage_bytes_limit_host": storage_bytes_limit_host,
             "n_threads": n_threads,
+            "return_background_receiver_amplitudes": (
+                return_background_receiver_amplitudes
+            ),
         }
         return _Born3DNativeAutogradFallbackFunc.apply(
             epsilon,
@@ -1155,6 +1175,11 @@ def born3d_c_cuda(
                 source_amplitude,
                 source_location,
                 receiver_location,
+                (
+                    receiver_location
+                    if return_background_receiver_amplitudes
+                    else None
+                ),
                 stencil=stencil,
                 pml_width=pml_width,
                 max_vel=max_vel,
@@ -1181,7 +1206,10 @@ def born3d_c_cuda(
                 linearize_source=linearize_source,
                 source_component=source_component,
                 receiver_component=receiver_component,
-            )
+            ),
+            return_background_receiver_amplitudes=(
+                return_background_receiver_amplitudes
+            ),
         )
     if needs_storage and storage_mode_str == "none":
         raise ValueError(
@@ -1240,6 +1268,11 @@ def born3d_c_cuda(
                 source_amplitude,
                 source_location,
                 receiver_location,
+                (
+                    receiver_location
+                    if return_background_receiver_amplitudes
+                    else None
+                ),
                 stencil=stencil,
                 pml_width=pml_width,
                 max_vel=max_vel,
@@ -1266,7 +1299,10 @@ def born3d_c_cuda(
                 linearize_source=linearize_source,
                 source_component=source_component,
                 receiver_component=receiver_component,
-            )
+            ),
+            return_background_receiver_amplitudes=(
+                return_background_receiver_amplitudes
+            ),
         )
 
     if needs_autograd:
@@ -1295,6 +1331,9 @@ def born3d_c_cuda(
             "rdx": 1.0 / dx,
             "backend_device": backend_device,
             "storage_compression": storage_compression,
+            "return_background_receiver_amplitudes": (
+                return_background_receiver_amplitudes
+            ),
         }
         outputs = Born3DForwardFunc.apply(
             dca_native,
@@ -1368,6 +1407,7 @@ def born3d_c_cuda(
             dm_ex_y_out,
             dm_ey_x_out,
             receiver_amplitudes,
+            background_receiver_amplitudes,
         ) = outputs
     else:
         forward_func = backend_utils.get_backend_function(
@@ -1381,8 +1421,16 @@ def born3d_c_cuda(
             receiver_amplitudes = torch.zeros(
                 nt_steps, n_shots, n_receivers, device=device, dtype=dtype
             )
+            background_receiver_amplitudes = (
+                torch.zeros_like(receiver_amplitudes)
+                if return_background_receiver_amplitudes
+                else torch.empty(0, device=device, dtype=dtype)
+            )
         else:
             receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
+            background_receiver_amplitudes = torch.empty(
+                0, device=device, dtype=dtype
+            )
 
         compute_stream_handle = 0
         if device.type == "cuda":
@@ -1438,6 +1486,7 @@ def born3d_c_cuda(
             backend_utils.tensor_to_ptr(dm_ex_y),
             backend_utils.tensor_to_ptr(dm_ey_x),
             backend_utils.tensor_to_ptr(receiver_amplitudes),
+            backend_utils.tensor_to_ptr(background_receiver_amplitudes),
             *(backend_utils.tensor_to_ptr(p) for p in profiles),
             backend_utils.tensor_to_ptr(sources_i),
             backend_utils.tensor_to_ptr(receivers_i),
@@ -1522,7 +1571,7 @@ def born3d_c_cuda(
             fd_pad_list[4], padded_nx - fd_pad_list[5] if fd_pad_list[5] > 0 else None
         ),
     )
-    return (
+    outputs = (
         Ex[s],
         Ey[s],
         Ez[s],
@@ -1561,6 +1610,9 @@ def born3d_c_cuda(
         dm_ey_x_out[s],
         receiver_amplitudes,
     )
+    if return_background_receiver_amplitudes:
+        return outputs + (background_receiver_amplitudes,)
+    return outputs
 
 
 __all__ = ["born3d_c_cuda"]

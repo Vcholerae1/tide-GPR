@@ -137,15 +137,16 @@ Use `receiver_gsot_loss_shard` when observed receiver data is rank-sharded.
 
 ## With `tide.optim`
 
-For optimizer-driven inversion, keep model packing and constraints in the
-optimizer objective, and let `backward_shot_batches` own the repeated
-mini-batch backward pass:
+Optimizer state, gradients, bounds, and preconditioners remain as Torch tensors
+on the model device. Let `backward_shot_batches` own the repeated mini-batch
+backward pass:
 
 ```python
 shot_batches = tide.workflow.split_shots(n_shots, batch_size, device)
 
-def objective(x: np.ndarray, grad_out: np.ndarray) -> float:
-    unpack_model(x, epsilon, sigma)
+def objective(x: torch.Tensor) -> tuple[float, torch.Tensor]:
+    model = x.detach().clone().requires_grad_(True)
+    epsilon, sigma = unpack_model(model)
 
     def batch_loss(shot_indices: torch.Tensor) -> torch.Tensor:
         batch = tide.workflow.take_shot_batch(
@@ -178,13 +179,16 @@ def objective(x: np.ndarray, grad_out: np.ndarray) -> float:
         zero_grad=clear_model_grads,
     )
 
-    grad_out[:] = pack_model_grads(epsilon, sigma)
-    return total_loss
+    if model.grad is None:
+        raise RuntimeError("objective did not produce a gradient")
+    return total_loss, model.grad.detach()
 
 result = tide.optim.lbfgs_minimize(
     objective,
     x0,
-    options=tide.optim.LBFGSOptions(max_iter=10),
+    options=tide.optim.LBFGSOptions(
+        stopping=tide.optim.StoppingCriteria(max_iter=10),
+    ),
 )
 ```
 
@@ -227,7 +231,9 @@ result = tide.optim.lbfgs_minimize(
     objective,
     x0,
     preconditioner=preconditioner,
-    options=tide.optim.LBFGSOptions(max_iter=10),
+    options=tide.optim.LBFGSOptions(
+        stopping=tide.optim.StoppingCriteria(max_iter=10),
+    ),
 )
 ```
 

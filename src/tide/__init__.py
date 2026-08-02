@@ -3,14 +3,10 @@
 A PyTorch-based library for electromagnetic wave propagation and inversion.
 """
 
-# Handle OpenMP runtime conflicts (common on Windows with Intel libraries)
-import os
-
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-
 from . import (
     callbacks,
     cfl,
+    core,
     maxwell,
     optim,
     padding,
@@ -23,6 +19,19 @@ from . import (
 )
 from .callbacks import Callback, CallbackState, create_callback_state
 from .cfl import cfl_condition
+from .core import (
+    BackendPreference,
+    ComputeMode,
+    Dimension,
+    FallbackPolicy,
+    RuntimeOptions,
+    SimulationPlan,
+    StorageMode,
+    StorageOptions,
+    compile_simulation_plan,
+    normalize_backend_request,
+    select_backend,
+)
 from .dispersion import DebyeDispersion
 from .maxwell import (
     Born3D,
@@ -72,6 +81,7 @@ __all__ = [
     # Modules
     "callbacks",
     "cfl",
+    "core",
     "maxwell",
     "optim",
     "padding",
@@ -89,6 +99,14 @@ __all__ = [
     "Maxwell3D",
     "CallbackState",
     "DebyeDispersion",
+    "BackendPreference",
+    "ComputeMode",
+    "Dimension",
+    "FallbackPolicy",
+    "RuntimeOptions",
+    "SimulationPlan",
+    "StorageMode",
+    "StorageOptions",
     # Type aliases
     "BatchedModel2D",
     "BatchedModel3D",
@@ -118,6 +136,9 @@ __all__ = [
     "born3d",
     "borntm",
     "create_callback_state",
+    "compile_simulation_plan",
+    "normalize_backend_request",
+    "select_backend",
     # Signal processing
     "upsample",
     "downsample",

@@ -1,260 +1,165 @@
-"""Steepest descent and nonlinear conjugate-gradient optimizers."""
+"""Torch-native steepest descent and nonlinear conjugate gradient."""
 
 from __future__ import annotations
 
-from time import perf_counter
+from math import isfinite
 
-import numpy as np
-from numpy.typing import ArrayLike, NDArray
+import torch
+from torch import Tensor
 
-from .array_utils import _apply_preconditioner, _evaluate_objective
+from .array_utils import (
+    _dot,
+    _feasible_direction,
+)
 from .common import (
-    _converged,
-    _line_search_max_trials,
-    _line_search_step,
-    _nonfinite_result,
+    _OptimizerRun,
+    _TraceRecorder,
+    _apply_preconditioner,
     _prepare_initial_state,
 )
-from .line_search import _LineSearchState
+from .line_search import _line_search
 from .types import (
     Callback,
-    FLAG_CONV,
-    FLAG_FAIL,
-    FLAG_NSTE,
     NLCGOptions,
     Objective,
+    OptimizerEventType,
     OptimizerOptions,
     OptimizerResult,
-    OptimizerTraceEntry,
+    OptimizerStatus,
     Preconditioner,
-    STATUS_CONVERGED,
-    STATUS_LINE_SEARCH_FAILED,
-    STATUS_MAX_EVALUATIONS,
-    STATUS_MAX_ITER,
-    STATUS_NONFINITE,
     SteepestDescentOptions,
-    TASK_NEW_STEP,
-    _make_trace,
 )
-
-
-def _make_descent_result(
-    *,
-    x: NDArray[np.float32],
-    f: float,
-    grad: NDArray[np.float32],
-    status: str,
-    flag: int,
-    n_iter: int,
-    n_eval: int,
-    n_prec: int,
-    trace: list[OptimizerTraceEntry],
-    start: float,
-) -> OptimizerResult:
-    return OptimizerResult(
-        x=x.copy(),
-        f=f,
-        grad=grad.copy(),
-        status=status,
-        flag=flag,
-        success=flag == FLAG_CONV,
-        n_iter=n_iter,
-        n_eval=n_eval,
-        n_prec=n_prec,
-        n_hess=0,
-        elapsed_s=perf_counter() - start,
-        trace=trace,
-    )
 
 
 def _minimize_first_order(
     objective: Objective,
-    x0: ArrayLike,
+    x0: Tensor,
     *,
     preconditioner: Preconditioner | None,
     options: OptimizerOptions,
-    lower_bounds: ArrayLike | None,
-    upper_bounds: ArrayLike | None,
+    lower_bounds: Tensor | float | None,
+    upper_bounds: Tensor | float | None,
     callback: Callback | None,
     method: str,
-    beta_abs_max: float | None,
+    beta_max: float | None,
 ) -> OptimizerResult:
-    start, x, lb, ub = _prepare_initial_state(
-        x0, lower_bounds, upper_bounds, options
-    )
-    grad = np.empty_like(x)
-    grad_preco = np.empty_like(x)
-    descent = np.empty_like(x)
-    descent_prev = np.empty_like(x)
-    grad_prev = np.empty_like(x)
-    xk = np.empty_like(x)
-    ls = _LineSearchState(alpha=options.initial_step)
-    trace: list[OptimizerTraceEntry] = []
-    emit_trace = options.record_trace or callback is not None
+    state = _prepare_initial_state(objective, x0, lower_bounds, upper_bounds, options)
+    run = _OptimizerRun(state, _TraceRecorder(options.trace, callback), method)
+    status = run.initial_status(options.stopping)
+    if status is not None:
+        return run.finish(status, 0)
 
-    f = _evaluate_objective(objective, x, grad)
-    n_eval = 1
-    n_prec = 0
-    if _apply_preconditioner(preconditioner, x, grad, grad_preco):
-        n_prec += 1
-    if not np.isfinite(f) or not np.all(np.isfinite(grad)):
-        return _nonfinite_result(
-            x, f, grad, n_eval=n_eval, n_prec=n_prec, n_hess=0, start=start
+    z = _apply_preconditioner(preconditioner, state.x, state.grad, state.budget)
+    if not torch.isfinite(z).all() or _dot(state.grad, z) <= 0.0:
+        return run.finish(OptimizerStatus.INVALID_PRECONDITIONER, 0)
+    direction = -z
+    previous_grad = state.grad.clone()
+    previous_z = z.clone()
+
+    for iteration in range(1, options.stopping.max_iter + 1):
+        direction = _feasible_direction(state.x, direction, state.lower, state.upper)
+        if _dot(state.grad, direction) >= 0.0 or not torch.isfinite(direction).all():
+            direction = _feasible_direction(state.x, -z, state.lower, state.upper)
+        if _dot(state.grad, direction) >= 0.0 or not torch.any(direction):
+            return run.finish(OptimizerStatus.BREAKDOWN, iteration - 1)
+
+        previous_x = state.x
+        previous_f = state.f
+        result = _line_search(
+            state.evaluator,
+            state.x,
+            state.f,
+            state.grad,
+            direction,
+            state.lower,
+            state.upper,
+            options.line_search,
         )
-
-    f0 = f
-    n_iter = 0
-    status = "running"
-    flag = FLAG_NSTE
-    descent[:] = -grad_preco
-    grad_prev[:] = grad
-
-    while flag not in (FLAG_CONV, FLAG_FAIL):
-        if float(np.dot(grad, descent)) >= 0.0:
-            descent[:] = -grad_preco
-
-        max_trials = _line_search_max_trials(options, n_eval)
-        if max_trials is not None and max_trials <= 0:
-            flag = FLAG_FAIL
-            status = STATUS_MAX_EVALUATIONS
-            break
-
-        result = _line_search_step(
-            objective,
-            options,
-            x,
-            xk,
-            descent,
-            f,
-            grad,
-            ls,
-            lb,
-            ub,
-            max_trials,
-        )
-        n_eval += result.line_search_iter
-        if result.task != TASK_NEW_STEP:
-            flag = FLAG_FAIL
-            status = STATUS_LINE_SEARCH_FAILED
-            break
-
-        f = result.f
-        if not np.isfinite(f) or not np.all(np.isfinite(grad)):
-            flag = FLAG_FAIL
-            status = STATUS_NONFINITE
-            break
-
-        n_iter += 1
-        if emit_trace:
-            entry = _make_trace(
-                flag=FLAG_NSTE,
-                iteration=n_iter,
-                evaluations=n_eval,
-                f=f,
-                alpha=result.alpha,
-                line_search_iter=result.line_search_iter,
-                accepted=True,
-                task=result.task,
-                x=x,
-                grad=grad,
-                q0=result.q0,
-                q=result.q,
-                metadata={"method": method, "line_search": options.line_search},
+        if not result.success:
+            return run.finish(
+                result.status or OptimizerStatus.LINE_SEARCH_FAILED, iteration - 1
             )
-            if options.record_trace:
-                trace.append(entry)
-            if callback is not None:
-                callback(entry)
+        state.x, state.f, state.grad = result.x, result.f, result.grad
+        run.emit(
+            OptimizerEventType.STEP,
+            iteration,
+            alpha=result.alpha,
+            line_search_iter=result.evaluations,
+        )
+        status = run.step_status(options.stopping, iteration, previous_x, previous_f)
+        if status is not None:
+            return run.finish(status, iteration)
 
-        if _converged(f, f0, n_iter, options):
-            flag = FLAG_CONV
-            status = STATUS_MAX_ITER if n_iter >= options.max_iter else STATUS_CONVERGED
-            break
-
-        descent_prev[:] = descent
-        if _apply_preconditioner(preconditioner, x, grad, grad_preco):
-            n_prec += 1
-        if beta_abs_max is None:
-            descent[:] = -grad_preco
+        z = _apply_preconditioner(preconditioner, state.x, state.grad, state.budget)
+        if not torch.isfinite(z).all() or _dot(state.grad, z) <= 0.0:
+            return run.finish(OptimizerStatus.INVALID_PRECONDITIONER, iteration)
+        if beta_max is None:
+            direction = -z
         else:
-            y = grad - grad_prev
-            denom = float(np.dot(y, descent_prev))
-            numer = float(np.dot(grad, grad_preco))
-            beta = numer / denom if denom != 0.0 else 0.0
-            if not np.isfinite(beta) or abs(beta) >= beta_abs_max:
+            denominator = _dot(previous_grad, previous_z)
+            beta = (
+                _dot(state.grad, z - previous_z) / denominator
+                if denominator > 0.0
+                else 0.0
+            )
+            beta = max(0.0, beta)
+            if not isfinite(beta) or beta > beta_max:
                 beta = 0.0
-            descent[:] = -grad_preco + np.float32(beta) * descent_prev
-            if float(np.dot(grad, descent)) >= 0.0:
-                beta = 0.0
-                descent[:] = -grad_preco
-            grad_prev[:] = grad
-        flag = FLAG_NSTE
+            direction = -z + beta * direction
+            previous_grad = state.grad.clone()
+            previous_z = z.clone()
 
-    return _make_descent_result(
-        x=x,
-        f=f,
-        grad=grad,
-        status=status,
-        flag=flag,
-        n_iter=n_iter,
-        n_eval=n_eval,
-        n_prec=n_prec,
-        trace=trace,
-        start=start,
-    )
+    return run.finish(OptimizerStatus.MAX_ITERATIONS, options.stopping.max_iter)
 
 
 def steepest_descent_minimize(
     objective: Objective,
-    x0: ArrayLike,
+    x0: Tensor,
     *,
     preconditioner: Preconditioner | None = None,
     options: SteepestDescentOptions | None = None,
-    lower_bounds: ArrayLike | None = None,
-    upper_bounds: ArrayLike | None = None,
+    lower_bounds: Tensor | float | None = None,
+    upper_bounds: Tensor | float | None = None,
     callback: Callback | None = None,
 ) -> OptimizerResult:
-    """Minimize with steepest descent, optionally using a preconditioner."""
+    """Minimize an objective with torch-native steepest descent."""
 
-    if options is None:
-        options = SteepestDescentOptions()
     return _minimize_first_order(
         objective,
         x0,
         preconditioner=preconditioner,
-        options=options,
+        options=options or SteepestDescentOptions(),
         lower_bounds=lower_bounds,
         upper_bounds=upper_bounds,
         callback=callback,
         method="steepest_descent",
-        beta_abs_max=None,
+        beta_max=None,
     )
 
 
 def nlcg_minimize(
     objective: Objective,
-    x0: ArrayLike,
+    x0: Tensor,
     *,
     preconditioner: Preconditioner | None = None,
     options: NLCGOptions | None = None,
-    lower_bounds: ArrayLike | None = None,
-    upper_bounds: ArrayLike | None = None,
+    lower_bounds: Tensor | float | None = None,
+    upper_bounds: Tensor | float | None = None,
     callback: Callback | None = None,
 ) -> OptimizerResult:
-    """Minimize with nonlinear conjugate gradient, optionally preconditioned."""
+    """Minimize an objective with preconditioned Polak-Ribiere+ NLCG."""
 
-    if options is None:
-        options = NLCGOptions()
+    resolved = options or NLCGOptions()
     return _minimize_first_order(
         objective,
         x0,
         preconditioner=preconditioner,
-        options=options,
+        options=resolved,
         lower_bounds=lower_bounds,
         upper_bounds=upper_bounds,
         callback=callback,
         method="nlcg",
-        beta_abs_max=options.beta_abs_max,
+        beta_max=resolved.beta_max,
     )
 
 

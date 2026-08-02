@@ -4,18 +4,16 @@ from typing import Any
 import torch
 
 from ..storage import (
-    _CPU_STORAGE_BUFFERS,
-    STORAGE_CPU,
     STORAGE_DEVICE,
     STORAGE_DISK,
     STORAGE_NONE,
-    TemporaryStorage,
-    storage_mode_to_int,
+    SnapshotAllocator,
+    resolve_snapshot_storage,
 )
 from ..validation import validate_model_gradient_sampling_interval
 from .common import _get_ctx_handle, _register_ctx_handle, _release_ctx_handle
 from .common import _clone_param, _directional_receiver_hvp, ReceiverMisfit
-from .tm2d_helpers import _make_tm_storage_streams, _resolve_tm2d_storage_spec
+from .tm2d_helpers import _make_tm_storage_streams
 
 
 def _alloc_tm2d_field(
@@ -108,6 +106,7 @@ class BornTMForwardFunc(torch.autograd.Function):
         cached_lambda_store: torch.Tensor | None = None,
         capture_background_adjoint: bool = False,
         background_n_shots: int = 0,
+        enable_second_order: bool = True,
     ) -> tuple[Any, ...]:
         from .. import backend_utils
 
@@ -168,146 +167,64 @@ class BornTMForwardFunc(torch.autograd.Function):
         shot_bytes_uncomp = 0
         store_dtype = coeff_dtype
         stream_keepalive: tuple[Any, ...] = ()
-        direct_snapshot_tensors = (
-            torch.empty(0, device=device, dtype=store_dtype),
-            torch.empty(0, device=device, dtype=store_dtype),
+        storage_spec = resolve_snapshot_storage(
+            storage_mode=storage_mode_str,
+            storage_compression=storage_compression if needs_storage else False,
+            dtype=coeff_dtype,
+            device=device,
+            nt=nt,
+            step_ratio=step_ratio,
+            shot_shape=(n_shots, ny, nx),
+            enabled=needs_storage,
         )
-        lambda_store = torch.empty(0, device=device, dtype=store_dtype)
+        snapshot_allocator = SnapshotAllocator(
+            storage_spec,
+            device,
+            storage_path,
+            host_flatten_spatial=True,
+        )
+        direct_snapshot_tensors = snapshot_allocator.group(2, False)
+        lambda_store = snapshot_allocator.empty()
 
         if needs_storage:
-            import ctypes
-
-            if str(device) == "cpu" and storage_mode_str == "cpu":
-                storage_mode_str = "device"
-            storage_mode = storage_mode_to_int(storage_mode_str)
+            storage_mode = storage_spec.mode
+            store_dtype = storage_spec.dtype
             compute_stream_handle, storage_stream_handle, stream_keepalive = (
                 _make_tm_storage_streams(device, storage_mode)
             )
-
-            num_elements_per_shot = ny * nx
-            _, store_dtype, _, resolved_storage_format = _resolve_tm2d_storage_spec(
-                storage_compression=storage_compression,
-                dtype=coeff_dtype,
-                device=device,
-                context="storage_compression",
-            )
-            if resolved_storage_format != storage_format:
+            if storage_spec.format != storage_format:
                 raise RuntimeError("Mismatched TM2D Born storage format resolution.")
-
-            shot_bytes_uncomp = num_elements_per_shot * store_dtype.itemsize
-            num_steps_stored = (nt + step_ratio - 1) // step_ratio
-            if background_grad_possible:
-                direct_snapshot_tensors = (
-                    torch.empty(
-                        num_steps_stored,
-                        n_shots,
-                        ny,
-                        nx,
-                        device=device,
-                        dtype=store_dtype,
-                    ),
-                    torch.empty(
-                        num_steps_stored,
-                        n_shots,
-                        ny,
-                        nx,
-                        device=device,
-                        dtype=store_dtype,
-                    ),
-                )
-
-            char_ptr_type = ctypes.c_char_p
-            is_cuda = device.type == "cuda"
-
-            def alloc_storage(requires_grad_cond: bool):
-                store_1 = torch.empty(0, device=device, dtype=store_dtype)
-                store_3 = torch.empty(0, device=device, dtype=store_dtype)
-                filenames_arr = (char_ptr_type * 0)()
-
-                if requires_grad_cond and storage_mode != STORAGE_NONE:
-                    if storage_mode == STORAGE_DEVICE:
-                        store_1 = torch.empty(
-                            num_steps_stored,
-                            n_shots,
-                            ny,
-                            nx,
-                            device=device,
-                            dtype=store_dtype,
-                        )
-                    elif storage_mode == STORAGE_CPU:
-                        store_1 = torch.empty(
-                            _CPU_STORAGE_BUFFERS,
-                            n_shots,
-                            ny,
-                            nx,
-                            device=device,
-                            dtype=store_dtype,
-                        )
-                        store_3 = torch.empty(
-                            num_steps_stored,
-                            n_shots,
-                            shot_bytes_uncomp // store_dtype.itemsize,
-                            device="cpu",
-                            pin_memory=True,
-                            dtype=store_dtype,
-                        )
-                    elif storage_mode == STORAGE_DISK:
-                        storage_obj = TemporaryStorage(
-                            storage_path, 1 if is_cuda else n_shots
-                        )
-                        backward_storage_objects.append(storage_obj)
-                        filenames_list = [
-                            f.encode("utf-8") for f in storage_obj.get_filenames()
-                        ]
-                        filenames_arr = (char_ptr_type * len(filenames_list))()
-                        for i_file, f_name in enumerate(filenames_list):
-                            filenames_arr[i_file] = ctypes.cast(
-                                ctypes.create_string_buffer(f_name), char_ptr_type
-                            )
-
-                        if is_cuda:
-                            store_1 = torch.empty(
-                                _CPU_STORAGE_BUFFERS,
-                                n_shots,
-                                ny,
-                                nx,
-                                device=device,
-                                dtype=store_dtype,
-                            )
-                            store_3 = torch.empty(
-                                _CPU_STORAGE_BUFFERS,
-                                n_shots,
-                                shot_bytes_uncomp // store_dtype.itemsize,
-                                device="cpu",
-                                pin_memory=True,
-                                dtype=store_dtype,
-                            )
-                        else:
-                            store_1 = torch.empty(
-                                n_shots, ny, nx, device=device, dtype=store_dtype
-                            )
-
-                backward_storage_tensors.extend([store_1, store_3])
-                backward_storage_filename_arrays.append(filenames_arr)
-
-                filenames_ptr = (
-                    ctypes.cast(filenames_arr, ctypes.c_void_p)
-                    if storage_mode == STORAGE_DISK
-                    else 0
-                )
-                return store_1, store_3, filenames_ptr
-
-            ey_store_1, ey_store_3, ey_filenames_ptr = alloc_storage(
+            shot_bytes_uncomp = storage_spec.shot_bytes
+            # The scattered-field history is needed only by the nonlinear
+            # physics correction.  A Gauss-Newton HVP differentiates the
+            # background receiver output only and must not pay this cost.
+            direct_snapshot_tensors = snapshot_allocator.group(
+                2, background_grad_possible and enable_second_order
+            )
+            ey_storage = snapshot_allocator.allocate(
                 store_ey_needed and not reuse_background
             )
-            curl_store_1, curl_store_3, curl_filenames_ptr = alloc_storage(
+            curl_storage = snapshot_allocator.allocate(
                 store_curl_needed and not reuse_background
             )
+            ey_store_1, ey_store_3, ey_filenames_ptr = (
+                ey_storage.device,
+                ey_storage.host,
+                ey_storage.filenames_ptr,
+            )
+            curl_store_1, curl_store_3, curl_filenames_ptr = (
+                curl_storage.device,
+                curl_storage.host,
+                curl_storage.filenames_ptr,
+            )
+            backward_storage_tensors = snapshot_allocator.tensors[-4:]
+            backward_storage_objects = snapshot_allocator.storage_objects
+            backward_storage_filename_arrays = snapshot_allocator.filename_arrays
             if reuse_background:
                 ey_store_1 = cached_ey_store
                 curl_store_1 = cached_curl_store
-                ey_store_3 = torch.empty(0, device=device, dtype=store_dtype)
-                curl_store_3 = torch.empty(0, device=device, dtype=store_dtype)
+                ey_store_3 = snapshot_allocator.empty()
+                curl_store_3 = snapshot_allocator.empty()
                 backward_storage_tensors = [
                     ey_store_1,
                     ey_store_3,
@@ -329,14 +246,7 @@ class BornTMForwardFunc(torch.autograd.Function):
                     raise NotImplementedError(
                         "Reusable TM2D background adjoints require device storage."
                     )
-                lambda_store = torch.empty(
-                    num_steps_stored,
-                    n_shots,
-                    ny,
-                    nx,
-                    device=device,
-                    dtype=store_dtype,
-                )
+                lambda_store = snapshot_allocator.direct(True)
             elif reuse_background and cached_lambda_store.numel() > 0:
                 lambda_store = cached_lambda_store
 
@@ -586,8 +496,10 @@ class BornTMForwardFunc(torch.autograd.Function):
             "reuse_background_adjoint": (
                 reuse_background and cached_lambda_store.numel() > 0
             ),
+            "enable_second_order": enable_second_order,
             "background_n_shots": background_n_shots,
             "stream_keepalive": stream_keepalive,
+            "snapshot_allocator": snapshot_allocator,
         }
         ctx_handle = _register_ctx_handle(ctx_data)
         return (
@@ -646,6 +558,7 @@ class BornTMForwardFunc(torch.autograd.Function):
             ctx_data["lambda_store"],
         )
         ctx.stream_keepalive = ctx_data["stream_keepalive"]
+        ctx.snapshot_allocator = ctx_data["snapshot_allocator"]
         ctx.rdy = inputs[21]
         ctx.rdx = inputs[22]
         ctx.dt = inputs[23]
@@ -673,6 +586,7 @@ class BornTMForwardFunc(torch.autograd.Function):
         ctx.capture_background_adjoint = ctx_data["capture_background_adjoint"]
         ctx.reuse_background = ctx_data["reuse_background"]
         ctx.reuse_background_adjoint = ctx_data["reuse_background_adjoint"]
+        ctx.enable_second_order = ctx_data["enable_second_order"]
         ctx.background_n_shots = ctx_data["background_n_shots"]
         ctx.background_grad_required = any(ctx.needs_input_grad[i] for i in (2, 3, 5))
         ctx.n_threads = inputs[57]
@@ -800,19 +714,16 @@ class BornTMForwardFunc(torch.autograd.Function):
         else:
             grad_background_r = torch.empty(0, device=device, dtype=coeff_dtype)
 
-        # A direction-batched Gauss-Newton VJP differentiates only the
-        # background receiver output, but its cached background snapshots may
-        # have fewer shots than the flattened direction-by-shot execution
-        # batch. The standard background adjoint assumes one stored snapshot
-        # per execution shot. The bggrad kernel is modulo-aware through
-        # ``background_n_shots`` and, with a zero Born receiver gradient,
-        # reduces exactly to the required background ``J.T @ w`` operation.
-        needs_cached_batched_background_vjp = (
-            background_receiver_grad_needed and ctx.reuse_background and ctx.ca_batched
-        )
-        needs_bggrad = model_grad_requested and (
-            receiver_grad_needed or needs_cached_batched_background_vjp
-        )
+        # Only differentiation of the Born receiver output requires the
+        # nonlinear-physics correction.  In particular, a Gauss-Newton VJP
+        # differentiates the background receiver output and is always handled
+        # by the ordinary background adjoint, including direction batches.
+        needs_bggrad = model_grad_requested and receiver_grad_needed
+        if needs_bggrad and not ctx.enable_second_order:
+            raise RuntimeError(
+                "The nonlinear-physics VJP was requested from a "
+                "Gauss-Newton-only Born execution."
+            )
         needs_born_backward = (
             receiver_grad_needed
             and not needs_bggrad
@@ -967,10 +878,13 @@ class BornTMForwardFunc(torch.autograd.Function):
                 _zero_tensors_(grad_cb_shot)
             background_backward_func = backend_utils.get_backend_function(
                 "maxwell_tm",
-                "backward",
+                ("background_vjp_reuse" if ctx.reuse_background else "backward"),
                 ctx.accuracy,
                 coeff_dtype,
                 ctx.backend_device,
+            )
+            background_shot_args = (
+                (ctx.background_n_shots,) if ctx.reuse_background else ()
             )
             background_backward_func(
                 backend_utils.tensor_to_ptr(ca),
@@ -1022,6 +936,7 @@ class BornTMForwardFunc(torch.autograd.Function):
                 ctx.storage_mode,
                 ctx.storage_format,
                 ctx.shot_bytes_uncomp,
+                *background_shot_args,
                 bg_ca_requires_grad,
                 bg_cb_requires_grad,
                 ctx.ca_batched,
@@ -1037,6 +952,14 @@ class BornTMForwardFunc(torch.autograd.Function):
                 compute_stream_handle,
                 storage_stream_handle,
             )
+            # The native backward accumulates per-shot coefficient gradients
+            # into the ``*_shot`` outputs.  Unbatched coefficients are reduced
+            # by the kernel; batched coefficients must expose those per-shot
+            # buffers directly to autograd.
+            if ctx.ca_batched and bg_ca_requires_grad:
+                grad_ca = grad_ca_shot
+            if ctx.cb_batched and bg_cb_requires_grad:
+                grad_cb = grad_cb_shot
 
         if needs_bggrad:
             bg_eta_ey = torch.empty_like(lambda_ey)
@@ -1058,14 +981,14 @@ class BornTMForwardFunc(torch.autograd.Function):
                 _zero_tensors_(grad_ca_shot, grad_dca_shot)
             if not ctx.cb_batched:
                 _zero_tensors_(grad_cb_shot, grad_dcb_shot)
-            bggrad_func = backend_utils.get_backend_function(
-                "maxwell_tm",
-                "born_backward_bggrad",
-                ctx.accuracy,
-                coeff_dtype,
-                ctx.backend_device,
+            full_hvp_incremental_adjoint_func = (
+                backend_utils.get_tm2d_full_hvp_incremental_adjoint_function(
+                    ctx.accuracy,
+                    coeff_dtype,
+                    ctx.backend_device,
+                )
             )
-            bggrad_func(
+            full_hvp_incremental_adjoint_func(
                 backend_utils.tensor_to_ptr(ca),
                 backend_utils.tensor_to_ptr(cb),
                 backend_utils.tensor_to_ptr(cq),
@@ -1308,7 +1231,6 @@ def tm2d_receiver_hvp_naive(
             "model_gradient_sampling_interval in {0, 1}."
         )
 
-    from .tm2d import maxwelltm
     from .tm2d_born import borntm
 
     epsilon_req = _clone_param(epsilon)
@@ -1319,7 +1241,7 @@ def tm2d_receiver_hvp_naive(
     if vsigma is None:
         vsigma = torch.zeros_like(sigma_req)
 
-    predicted_data = maxwelltm(
+    born_outputs = borntm(
         epsilon_req,
         sigma_req,
         mu_fixed,
@@ -1328,22 +1250,7 @@ def tm2d_receiver_hvp_naive(
         source_amplitude=source_amplitude,
         source_location=source_location,
         receiver_location=receiver_location,
-        stencil=stencil,
-        pml_width=pml_width,
-        max_vel=max_vel,
-        nt=nt,
-        model_gradient_sampling_interval=model_gradient_sampling_interval,
-        python_backend=True,
-    )[-1]
-    delta_predicted_data = borntm(
-        epsilon_req,
-        sigma_req,
-        mu_fixed,
-        grid_spacing=grid_spacing,
-        dt=dt,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
+        bg_receiver_location=receiver_location,
         depsilon=vepsilon,
         dsigma=vsigma,
         stencil=stencil,
@@ -1352,7 +1259,9 @@ def tm2d_receiver_hvp_naive(
         nt=nt,
         linearize_source=linearize_source,
         python_backend=True,
-    )[-1]
+    )
+    predicted_data = born_outputs[-2]
+    delta_predicted_data = born_outputs[-1]
     hvp_epsilon, hvp_sigma = _directional_receiver_hvp(
         params=(epsilon_req, sigma_req),
         observed_data=observed_data,
@@ -1385,6 +1294,7 @@ def tm2d_receiver_hvp_native(
     model_gradient_sampling_interval: int = 1,
     linearize_source: bool = True,
     hessian_mode: str = "full",
+    data_gradient: torch.Tensor | None = None,
     storage_mode: str = "device",
     storage_compression: bool | str | None = None,
     background_cache: dict[str, Any] | None = None,
@@ -1393,8 +1303,11 @@ def tm2d_receiver_hvp_native(
     tuple[torch.Tensor, torch.Tensor]
     | tuple[torch.Tensor, torch.Tensor, dict[str, Any]]
 ):
-    """TM2D native receiver-space HVP via the native Born bggrad path."""
-    from .. import backend_utils
+    """Apply a native TM2D receiver-space HVP.
+
+    Gauss-Newton uses only the tangent forward and ordinary background
+    adjoint.  Full mode enables the fused incremental-adjoint correction.
+    """
     from ..grid_utils import _normalize_pml_width_2d
     from .tm2d_born_cuda import borntm_c_cuda
 
@@ -1403,8 +1316,6 @@ def tm2d_receiver_hvp_native(
     model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
         model_gradient_sampling_interval
     )
-    if not backend_utils.is_backend_available():
-        raise RuntimeError("Native TM2D HVP requires the compiled backend.")
     if epsilon.device.type not in {"cpu", "cuda"}:
         raise NotImplementedError(
             "Native TM2D HVP currently supports cpu and cuda devices only."
@@ -1415,7 +1326,12 @@ def tm2d_receiver_hvp_native(
             "model_gradient_sampling_interval in {0, 1}."
         )
     _normalize_pml_width_2d(pml_width)
-    if hessian_mode == "full" and storage_mode != "device":
+    if hessian_mode not in {"full", "gauss_newton", "second_order"}:
+        raise ValueError(
+            "hessian_mode must be 'full', 'gauss_newton', or "
+            f"'second_order', but got {hessian_mode!r}."
+        )
+    if hessian_mode in {"full", "second_order"} and storage_mode != "device":
         raise NotImplementedError(
             "Native TM2D full HVP currently requires storage_mode='device'."
         )
@@ -1474,8 +1390,9 @@ def tm2d_receiver_hvp_native(
         background_cache=background_cache,
         capture_background_cache=capture_background_cache,
         capture_background_adjoint=(
-            capture_background_cache and hessian_mode == "full"
+            capture_background_cache and hessian_mode in {"full", "second_order"}
         ),
+        enable_second_order=hessian_mode in {"full", "second_order"},
     )
     captured_cache = born_outputs[-1] if capture_background_cache else None
     data_offset = 1 if capture_background_cache else 0
@@ -1488,6 +1405,7 @@ def tm2d_receiver_hvp_native(
         predicted_data=predicted_data,
         delta_predicted_data=delta_predicted_data,
         hessian_mode=hessian_mode,
+        data_gradient=data_gradient,
     )
     if capture_background_cache:
         if not isinstance(captured_cache, dict):
@@ -1496,8 +1414,66 @@ def tm2d_receiver_hvp_native(
     return hvp_epsilon, hvp_sigma
 
 
+def tm2d_receiver_gn_hvp_native(
+    *args: Any,
+    **kwargs: Any,
+) -> (
+    tuple[torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, dict[str, Any]]
+):
+    """Apply ``J.T @ Phi'' @ J`` through the GN-only native path."""
+    kwargs["hessian_mode"] = "gauss_newton"
+    return tm2d_receiver_hvp_native(*args, **kwargs)
+
+
+def tm2d_receiver_full_hvp_native(
+    *args: Any,
+    **kwargs: Any,
+) -> (
+    tuple[torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, dict[str, Any]]
+):
+    """Apply the full HVP through the fused incremental-adjoint path."""
+    kwargs["hessian_mode"] = "full"
+    return tm2d_receiver_hvp_native(*args, **kwargs)
+
+
+def tm2d_receiver_second_order_vjp_native(
+    *args: Any,
+    data_gradient: torch.Tensor,
+    **kwargs: Any,
+) -> (
+    tuple[torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, dict[str, Any]]
+):
+    """Apply only ``(D J[v]).T @ data_gradient``.
+
+    This uses the same incremental-adjoint kernel as full HVP but bypasses the
+    receiver data-Hessian term.
+    """
+    if not isinstance(data_gradient, torch.Tensor):
+        raise TypeError("data_gradient must be a torch.Tensor.")
+
+    kwargs["observed_data"] = torch.empty(
+        0,
+        device=data_gradient.device,
+        dtype=data_gradient.dtype,
+    )
+    kwargs["misfit_fn"] = lambda *_args: torch.empty(
+        0,
+        device=data_gradient.device,
+        dtype=data_gradient.dtype,
+    )
+    kwargs["hessian_mode"] = "second_order"
+    kwargs["data_gradient"] = data_gradient
+    return tm2d_receiver_hvp_native(*args, **kwargs)
+
+
 __all__ = [
     "BornTMForwardFunc",
     "tm2d_receiver_hvp_naive",
+    "tm2d_receiver_full_hvp_native",
+    "tm2d_receiver_gn_hvp_native",
     "tm2d_receiver_hvp_native",
+    "tm2d_receiver_second_order_vjp_native",
 ]

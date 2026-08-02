@@ -1,108 +1,61 @@
-"""L-BFGS history and two-loop recursion helpers."""
+"""Limited-memory BFGS history."""
 
 from __future__ import annotations
 
-import numpy as np
-from numpy.typing import NDArray
+from collections import deque
+
+from torch import Tensor
+
+from .array_utils import _dot
+from .common import _EvaluationBudget, _apply_preconditioner
+from .types import Preconditioner
 
 
-def _save_lbfgs(
-    x: NDArray[np.float32],
-    grad: NDArray[np.float32],
-    sk: NDArray[np.float32],
-    yk: NDArray[np.float32],
-    cpt_lbfgs: int,
-) -> None:
-    history_size = sk.shape[0]
-    if cpt_lbfgs <= history_size:
-        idx = cpt_lbfgs - 1
-        sk[idx] = x
-        yk[idx] = grad
-    else:
-        sk[:-1] = sk[1:]
-        yk[:-1] = yk[1:]
-        sk[-1] = x
-        yk[-1] = grad
+class _LBFGSHistory:
+    def __init__(self, size: int, curvature_tolerance: float) -> None:
+        self.s: deque[Tensor] = deque(maxlen=size)
+        self.y: deque[Tensor] = deque(maxlen=size)
+        self.curvature_tolerance = curvature_tolerance
 
+    def clear(self) -> None:
+        self.s.clear()
+        self.y.clear()
 
-def _update_lbfgs(
-    x: NDArray[np.float32],
-    grad: NDArray[np.float32],
-    sk: NDArray[np.float32],
-    yk: NDArray[np.float32],
-    cpt_lbfgs: int,
-) -> int:
-    history_size = sk.shape[0]
-    idx = cpt_lbfgs - 1 if cpt_lbfgs <= history_size else history_size - 1
-    sk_candidate = x - sk[idx]
-    yk_candidate = grad - yk[idx]
-    sy = float(np.dot(sk_candidate, yk_candidate))
-    yy = float(np.dot(yk_candidate, yk_candidate))
-    # The L-BFGS update assumes positive curvature; projected no-op steps can break that.
-    if sy <= 0.0 or yy <= 0.0 or not np.isfinite(sy) or not np.isfinite(yy):
-        return 1
-    sk[idx] = sk_candidate
-    yk[idx] = yk_candidate
-    if cpt_lbfgs <= history_size:
-        return cpt_lbfgs + 1
-    return cpt_lbfgs
+    def update(self, step: Tensor, grad_delta: Tensor) -> bool:
+        sy = _dot(step, grad_delta)
+        scale = float(step.norm().item()) * float(grad_delta.norm().item())
+        if sy <= self.curvature_tolerance * max(1.0, scale):
+            return False
+        self.s.append(step.detach().clone())
+        self.y.append(grad_delta.detach().clone())
+        return True
 
-
-def _history_bounds(cpt_lbfgs: int, history_size: int) -> tuple[int, int]:
-    count = min(max(cpt_lbfgs - 1, 0), history_size)
-    return 0, count
-
-
-def _descent1_lbfgs(
-    grad: NDArray[np.float32],
-    sk: NDArray[np.float32],
-    yk: NDArray[np.float32],
-    cpt_lbfgs: int,
-    q_lbfgs: NDArray[np.float32],
-    alpha_lbfgs: NDArray[np.float32],
-    rho_lbfgs: NDArray[np.float32],
-    scratch: NDArray[np.float32],
-) -> int:
-    history_size = sk.shape[0]
-    _, borne = _history_bounds(cpt_lbfgs, history_size)
-    q_lbfgs[:] = grad
-    for offset in range(borne - 1, -1, -1):
-        idx = offset
-        sy = float(np.dot(yk[idx], sk[idx]))
-        rho = 1.0 / sy
-        rho_lbfgs[idx] = np.float32(rho)
-        alpha = rho * float(np.dot(sk[idx], q_lbfgs))
-        alpha_lbfgs[idx] = alpha
-        np.multiply(yk[idx], np.float32(alpha), out=scratch)
-        q_lbfgs -= scratch
-    return borne
-
-
-def _descent2_lbfgs(
-    sk: NDArray[np.float32],
-    yk: NDArray[np.float32],
-    cpt_lbfgs: int,
-    q_lbfgs: NDArray[np.float32],
-    descent: NDArray[np.float32],
-    alpha_lbfgs: NDArray[np.float32],
-    rho_lbfgs: NDArray[np.float32],
-    gamma_lbfgs: NDArray[np.float32],
-    scratch: NDArray[np.float32],
-) -> None:
-    history_size = sk.shape[0]
-    _, borne = _history_bounds(cpt_lbfgs, history_size)
-    if borne == 0:
-        descent[:] = -q_lbfgs
-        return
-    last = borne - 1
-    sy = float(np.dot(sk[last], yk[last]))
-    yy = float(np.dot(yk[last], yk[last]))
-    gamma = sy / yy
-    gamma_lbfgs[last] = np.float32(gamma)
-    descent[:] = np.float32(gamma) * q_lbfgs
-    for offset in range(borne):
-        idx = offset
-        beta = rho_lbfgs[idx] * float(np.dot(yk[idx], descent))
-        np.multiply(sk[idx], np.float32(alpha_lbfgs[idx] - beta), out=scratch)
-        descent += scratch
-    descent[:] = -descent
+    def direction(
+        self,
+        x: Tensor,
+        grad: Tensor,
+        preconditioner: Preconditioner | None,
+        budget: _EvaluationBudget,
+    ) -> Tensor:
+        if not self.s:
+            return -_apply_preconditioner(preconditioner, x, grad, budget)
+        q = grad.clone()
+        alphas: list[float] = []
+        rhos: list[float] = []
+        for s, y in zip(reversed(self.s), reversed(self.y), strict=True):
+            rho = 1.0 / _dot(y, s)
+            alpha = rho * _dot(s, q)
+            q = q - alpha * y
+            alphas.append(alpha)
+            rhos.append(rho)
+        r = _apply_preconditioner(preconditioner, x, q, budget)
+        if preconditioner is None:
+            last_s = self.s[-1]
+            last_y = self.y[-1]
+            r = (_dot(last_s, last_y) / _dot(last_y, last_y)) * r
+        for s, y, alpha, rho in zip(
+            self.s, self.y, reversed(alphas), reversed(rhos), strict=True
+        ):
+            beta = rho * _dot(y, r)
+            r = r + (alpha - beta) * s
+        return -r

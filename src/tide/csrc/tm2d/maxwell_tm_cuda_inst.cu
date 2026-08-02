@@ -3568,6 +3568,14 @@ extern "C" void FUNC(born_tangent_forward_with_storage)(
         bxh, ky, kyh, kx, kxh);
     int64_t const store_idx = t;
     if (storage_bf16_h) {
+      __nv_bfloat16 *const dey_store_t =
+          dey_store != nullptr
+              ? (__nv_bfloat16 *)dey_store + store_idx * store_size
+              : nullptr;
+      __nv_bfloat16 *const dcurl_store_t =
+          dcurl_store != nullptr
+              ? (__nv_bfloat16 *)dcurl_store + store_idx * store_size
+              : nullptr;
       born_tangent_kernel_e_from_snapshots<__nv_bfloat16>
           <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
               ca, cb, dca, dcb, dhx, dhz, dey, dm_hx_z, dm_hz_x,
@@ -3575,11 +3583,18 @@ extern "C" void FUNC(born_tangent_forward_with_storage)(
                   store_idx * background_store_size,
               (const __nv_bfloat16 *)curl_store +
                   store_idx * background_store_size,
-              (__nv_bfloat16 *)dey_store + store_idx * store_size,
-              (__nv_bfloat16 *)dcurl_store + store_idx * store_size, ay, ayh,
-              ax, axh, by, byh, bx, bxh, ky, kyh, kx, kxh,
+              dey_store_t, dcurl_store_t, ay, ayh, ax, axh, by, byh, bx, bxh,
+              ky, kyh, kx, kxh,
               background_n_shots_h);
     } else {
+      TIDE_DTYPE *const dey_store_t =
+          dey_store != nullptr
+              ? (TIDE_DTYPE *)dey_store + store_idx * store_size
+              : nullptr;
+      TIDE_DTYPE *const dcurl_store_t =
+          dcurl_store != nullptr
+              ? (TIDE_DTYPE *)dcurl_store + store_idx * store_size
+              : nullptr;
       born_tangent_kernel_e_from_snapshots<TIDE_DTYPE>
           <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
               ca, cb, dca, dcb, dhx, dhz, dey, dm_hx_z, dm_hz_x,
@@ -3587,9 +3602,8 @@ extern "C" void FUNC(born_tangent_forward_with_storage)(
                   store_idx * background_store_size,
               (const TIDE_DTYPE *)curl_store +
                   store_idx * background_store_size,
-              (TIDE_DTYPE *)dey_store + store_idx * store_size,
-              (TIDE_DTYPE *)dcurl_store + store_idx * store_size, ay, ayh, ax,
-              axh, by, byh, bx, bxh, ky, kyh, kx, kxh,
+              dey_store_t, dcurl_store_t, ay, ayh, ax, axh, by, byh, bx, bxh,
+              ky, kyh, kx, kxh,
               background_n_shots_h);
     }
     if (n_sources_per_shot_h > 0) {
@@ -3924,7 +3938,7 @@ extern "C" void FUNC(born_backward)(
   tide::cuda_check_or_abort(cudaPeekAtLastError(), __FILE__, __LINE__);
 }
 
-extern "C" void FUNC(backward)(
+extern "C" void FUNC(background_vjp_reuse)(
     TIDE_DTYPE const *const ca, TIDE_DTYPE const *const cb,
     TIDE_DTYPE const *const cq, TIDE_DTYPE const *const grad_r,
     TIDE_DTYPE *const lambda_ey, TIDE_DTYPE *const lambda_hx,
@@ -3953,6 +3967,7 @@ extern "C" void FUNC(backward)(
     int64_t const n_receivers_per_shot_h, int64_t const step_ratio_h,
     int64_t const storage_mode_h, int64_t const storage_format_h,
     int64_t const shot_bytes_uncomp_h,
+    int64_t const background_n_shots_h,
     bool const ca_requires_grad, bool const cb_requires_grad,
     bool const ca_batched_h, bool const cb_batched_h, bool const cq_batched_h,
     int64_t const start_t, int64_t const pml_y0_h, int64_t const pml_x0_h,
@@ -3969,8 +3984,14 @@ extern "C" void FUNC(backward)(
       resolve_cuda_stream(storage_stream_handle);
 
   int64_t const shot_numel_h = ny_h * nx_h;
+  if (background_n_shots_h <= 0 || n_shots_h % background_n_shots_h != 0) {
+    fprintf(stderr,
+            "TM2D backward requires execution shots to be a positive multiple "
+            "of background shots.\n");
+    abort();
+  }
   size_t const bytes_per_step_store =
-      (size_t)shot_bytes_uncomp_h * (size_t)n_shots_h;
+      (size_t)shot_bytes_uncomp_h * (size_t)background_n_shots_h;
   bool const storage_bf16_h =
       (!kFieldIsHalf) && (storage_format_h == STORAGE_FORMAT_BF16);
   bool const use_storage_pipeline =
@@ -4158,14 +4179,14 @@ extern "C" void FUNC(backward)(
             grad_ey ? (__nv_bfloat16 const *)ey_store_1_t : nullptr,
             grad_curl ? (__nv_bfloat16 const *)curl_store_1_t : nullptr,
             grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h,
-            n_shots_h);
+            background_n_shots_h, background_n_shots_h != n_shots_h);
       } else {
         launch_coeff_grad_kernel<TIDE_DTYPE>(
             launch_cfg, stream_compute, lambda_ey,
             grad_ey ? (TIDE_DTYPE const *)ey_store_1_t : nullptr,
             grad_curl ? (TIDE_DTYPE const *)curl_store_1_t : nullptr,
             grad_ca_shot, grad_cb_shot, grad_ey, grad_curl, step_ratio_h,
-            n_shots_h);
+            background_n_shots_h, background_n_shots_h != n_shots_h);
       }
     }
 
@@ -4229,6 +4250,53 @@ extern "C" void FUNC(backward)(
   }
 
   tide::cuda_check_or_abort(cudaPeekAtLastError(), __FILE__, __LINE__);
+}
+
+// Preserve the historical background backward ABI. Reusable linearizations
+// use the dedicated background_vjp_reuse symbol above, while ordinary forward
+// autograd callers continue to resolve this unchanged entry point.
+extern "C" void FUNC(backward)(
+    TIDE_DTYPE const *const ca, TIDE_DTYPE const *const cb,
+    TIDE_DTYPE const *const cq, TIDE_DTYPE const *const grad_r,
+    TIDE_DTYPE *const lambda_ey, TIDE_DTYPE *const lambda_hx,
+    TIDE_DTYPE *const lambda_hz, TIDE_DTYPE *const m_lambda_ey_x,
+    TIDE_DTYPE *const m_lambda_ey_z, TIDE_DTYPE *const m_lambda_hx_z,
+    TIDE_DTYPE *const m_lambda_hz_x, void *const ey_store_1,
+    void *const ey_store_3, char const *const *const ey_filenames,
+    void *const curl_store_1, void *const curl_store_3,
+    char const *const *const curl_filenames, TIDE_DTYPE *const grad_f,
+    TIDE_DTYPE *const grad_ca, TIDE_DTYPE *const grad_cb,
+    TIDE_DTYPE *const grad_ca_shot, TIDE_DTYPE *const grad_cb_shot,
+    TIDE_DTYPE const *const ay, TIDE_DTYPE const *const by,
+    TIDE_DTYPE const *const ayh, TIDE_DTYPE const *const byh,
+    TIDE_DTYPE const *const ax, TIDE_DTYPE const *const bx,
+    TIDE_DTYPE const *const axh, TIDE_DTYPE const *const bxh,
+    TIDE_DTYPE const *const ky, TIDE_DTYPE const *const kyh,
+    TIDE_DTYPE const *const kx, TIDE_DTYPE const *const kxh,
+    int64_t const *const sources_i, int64_t const *const receivers_i,
+    tide_scalar_t const rdy_h, tide_scalar_t const rdx_h,
+    tide_scalar_t const dt_h, int64_t const nt, int64_t const n_shots_h,
+    int64_t const ny_h, int64_t const nx_h, int64_t const n_sources_per_shot_h,
+    int64_t const n_receivers_per_shot_h, int64_t const step_ratio_h,
+    int64_t const storage_mode_h, int64_t const storage_format_h,
+    int64_t const shot_bytes_uncomp_h, bool const ca_requires_grad,
+    bool const cb_requires_grad, bool const ca_batched_h,
+    bool const cb_batched_h, bool const cq_batched_h, int64_t const start_t,
+    int64_t const pml_y0_h, int64_t const pml_x0_h,
+    int64_t const pml_y1_h, int64_t const pml_x1_h, int64_t const n_threads,
+    int64_t const device, void *const compute_stream_handle,
+    void *const storage_stream_handle) {
+  FUNC(background_vjp_reuse)(
+      ca, cb, cq, grad_r, lambda_ey, lambda_hx, lambda_hz, m_lambda_ey_x,
+      m_lambda_ey_z, m_lambda_hx_z, m_lambda_hz_x, ey_store_1, ey_store_3,
+      ey_filenames, curl_store_1, curl_store_3, curl_filenames, grad_f, grad_ca,
+      grad_cb, grad_ca_shot, grad_cb_shot, ay, by, ayh, byh, ax, bx, axh, bxh,
+      ky, kyh, kx, kxh, sources_i, receivers_i, rdy_h, rdx_h, dt_h, nt,
+      n_shots_h, ny_h, nx_h, n_sources_per_shot_h, n_receivers_per_shot_h,
+      step_ratio_h, storage_mode_h, storage_format_h, shot_bytes_uncomp_h,
+      n_shots_h, ca_requires_grad, cb_requires_grad, ca_batched_h, cb_batched_h,
+      cq_batched_h, start_t, pml_y0_h, pml_x0_h, pml_y1_h, pml_x1_h,
+      n_threads, device, compute_stream_handle, storage_stream_handle);
 }
 
 extern "C" void FUNC(born_backward_bggrad)(

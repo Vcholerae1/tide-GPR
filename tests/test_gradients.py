@@ -548,6 +548,153 @@ class TestGradientBackendConsistency:
         assert cos_sig > 0.999, f"sigma gradient cosine too low: {cos_sig:.6f}"
         assert cos_src > 0.999, f"source gradient cosine too low: {cos_src:.6f}"
 
+    @pytest.mark.parametrize("device_type", ["cpu", "cuda"])
+    def test_eager_vs_native_source_only_gradient_without_snapshots(
+        self, device_type: str
+    ):
+        try:
+            from tide import backend_utils
+        except Exception:  # pragma: no cover
+            pytest.skip("backend_utils unavailable")
+
+        if not backend_utils.is_backend_available():
+            pytest.skip("native backend unavailable")
+        if device_type == "cuda" and not torch.cuda.is_available():
+            pytest.skip("CUDA unavailable")
+
+        device = torch.device(device_type)
+        dtype = torch.float64
+        ny, nx = 8, 9
+        nt = 12
+        epsilon = torch.full((ny, nx), 4.0, device=device, dtype=dtype)
+        sigma = torch.full((ny, nx), 5e-4, device=device, dtype=dtype)
+        mu = torch.ones_like(epsilon)
+        source_location = torch.tensor(
+            [[[ny // 2, nx // 3]]], dtype=torch.long, device=device
+        )
+        receiver_location = torch.tensor(
+            [[[ny // 2, nx // 2], [ny // 2, nx // 2 + 1]]],
+            dtype=torch.long,
+            device=device,
+        )
+        source_wavelet = tide.ricker(
+            90e6,
+            nt,
+            4e-11,
+            peak_time=1.0 / 90e6,
+            dtype=dtype,
+            device=device,
+        ).view(1, 1, nt)
+
+        def source_gradient(backend: bool | str) -> torch.Tensor:
+            source = source_wavelet.clone().detach().requires_grad_(True)
+            receiver = tide.maxwelltm(
+                epsilon,
+                sigma,
+                mu,
+                grid_spacing=0.02,
+                dt=4e-11,
+                source_amplitude=source,
+                source_location=source_location,
+                receiver_location=receiver_location,
+                pml_width=0,
+                stencil=2,
+                python_backend=backend,
+                storage_mode="none",
+            )[-1]
+            assert receiver.requires_grad
+            weight = torch.linspace(
+                0.5,
+                1.5,
+                receiver.numel(),
+                device=device,
+                dtype=dtype,
+            ).reshape_as(receiver)
+            (receiver * weight).sum().backward()
+            assert source.grad is not None
+            return source.grad.detach().clone()
+
+        grad_reference = source_gradient("eager")
+        grad_native = source_gradient(False)
+        torch.testing.assert_close(
+            grad_native,
+            grad_reference,
+            rtol=1e-10 if device_type == "cpu" else 1e-8,
+            atol=1e-10 if device_type == "cpu" else 1e-8,
+        )
+
+    @pytest.mark.parametrize("device_type", ["cpu", "cuda"])
+    def test_maxwell3d_eager_vs_native_source_only_gradient_without_snapshots(
+        self, device_type: str
+    ):
+        try:
+            from tide import backend_utils
+        except Exception:  # pragma: no cover
+            pytest.skip("backend_utils unavailable")
+
+        if not backend_utils.is_backend_available():
+            pytest.skip("native backend unavailable")
+        if device_type == "cuda" and not torch.cuda.is_available():
+            pytest.skip("CUDA unavailable")
+
+        device = torch.device(device_type)
+        dtype = torch.float32
+        nz, ny, nx = 6, 6, 7
+        nt = 10
+        epsilon = torch.full((nz, ny, nx), 4.0, device=device, dtype=dtype)
+        sigma = torch.full_like(epsilon, 1e-4)
+        mu = torch.ones_like(epsilon)
+        source_location = torch.tensor(
+            [[[2, 2, 2]]], dtype=torch.long, device=device
+        )
+        receiver_location = torch.tensor(
+            [[[2, 2, 4]]], dtype=torch.long, device=device
+        )
+        source_wavelet = tide.ricker(
+            90e6,
+            nt,
+            4e-11,
+            peak_time=1.0 / 90e6,
+            dtype=dtype,
+            device=device,
+        ).view(1, 1, nt)
+
+        def source_gradient(python_backend: bool) -> torch.Tensor:
+            source = source_wavelet.clone().detach().requires_grad_(True)
+            receiver = tide.maxwell3d(
+                epsilon,
+                sigma,
+                mu,
+                grid_spacing=0.02,
+                dt=4e-11,
+                source_amplitude=source,
+                source_location=source_location,
+                receiver_location=receiver_location,
+                pml_width=2,
+                python_backend=python_backend,
+                storage_mode="none",
+            )[-1]
+            assert receiver.requires_grad
+            weight = torch.linspace(
+                0.5,
+                1.5,
+                receiver.numel(),
+                device=device,
+                dtype=dtype,
+            ).reshape_as(receiver)
+            (receiver * weight).sum().backward()
+            assert source.grad is not None
+            return source.grad.detach().clone()
+
+        grad_reference = source_gradient(True)
+        grad_native = source_gradient(False)
+        torch.testing.assert_close(
+            grad_native,
+            grad_reference,
+            rtol=2e-4,
+            atol=1e-3,
+        )
+
     def test_eager_vs_native_gradients_cpu(self):
         try:
             from tide import backend_utils

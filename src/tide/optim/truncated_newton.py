@@ -1,296 +1,175 @@
-"""Truncated Newton optimizer."""
+"""Torch-native truncated-Newton optimizer."""
 
 from __future__ import annotations
 
-from time import perf_counter
+from dataclasses import dataclass
+from math import isfinite
 
-import numpy as np
-from numpy.typing import ArrayLike, NDArray
+import torch
+from torch import Tensor
 
-from .array_utils import _apply_preconditioner, _evaluate_objective
+from .array_utils import (
+    _dot,
+    _feasible_direction,
+    _validate_operator_output,
+)
 from .common import (
-    _converged,
-    _line_search_max_trials,
-    _line_search_step,
-    _nonfinite_result,
+    _EvaluationBudget,
+    _OptimizerRun,
+    _TraceRecorder,
+    _apply_preconditioner,
     _prepare_initial_state,
 )
-from .line_search import _LineSearchState
+from .line_search import _line_search
 from .types import (
     Callback,
-    FLAG_CONV,
-    FLAG_FAIL,
-    FLAG_NSTE,
     HessianVectorProduct,
     Objective,
+    OptimizerEventType,
     OptimizerResult,
-    OptimizerTraceEntry,
+    OptimizerStatus,
     Preconditioner,
-    STATUS_CONVERGED,
-    STATUS_INNER_CG_FAILED,
-    STATUS_LINE_SEARCH_FAILED,
-    STATUS_MAX_EVALUATIONS,
-    STATUS_MAX_ITER,
-    STATUS_NONFINITE,
-    TASK_NEW_STEP,
     TruncatedNewtonOptions,
-    _make_trace,
 )
 
 
-def _forcing_term(
-    eta: float,
-    grad: NDArray[np.float32],
-    residual: NDArray[np.float32],
-    previous_grad_norm: float,
-) -> float:
-    if previous_grad_norm <= 0.0:
-        return 0.9
-    next_eta = float(np.linalg.norm(grad - residual)) / previous_grad_norm
-    eta_power = eta ** ((1.0 + np.sqrt(5.0)) / 2.0)
-    if eta_power > 0.1:
-        next_eta = max(next_eta, eta_power)
-    if next_eta > 1.0:
-        next_eta = 0.9
-    return float(next_eta)
+@dataclass(slots=True)
+class _CGDirection:
+    direction: Tensor | None
+    iterations: int
+    status: OptimizerStatus | None
 
 
-def _newton_descent(
+def _newton_direction(
     hessian_vector: HessianVectorProduct,
     preconditioner: Preconditioner | None,
-    x: NDArray[np.float32],
-    grad: NDArray[np.float32],
-    grad_preco: NDArray[np.float32],
-    residual: NDArray[np.float32],
-    residual_preco: NDArray[np.float32],
-    descent: NDArray[np.float32],
-    descent_prev: NDArray[np.float32],
-    d: NDArray[np.float32],
-    hd: NDArray[np.float32],
+    x: Tensor,
+    grad: Tensor,
     options: TruncatedNewtonOptions,
     eta: float,
-    grad_norm: float,
-) -> tuple[int, int, int]:
-    residual[:] = grad
-    descent.fill(0.0)
-    hd.fill(0.0)
-    n_prec = 0
-    n_hess = 0
-    if _apply_preconditioner(preconditioner, x, grad, grad_preco):
-        n_prec += 1
-    residual_preco[:] = grad_preco
-    d[:] = -residual_preco
+    budget: _EvaluationBudget,
+) -> _CGDirection:
+    residual = grad.clone()
+    z = _apply_preconditioner(preconditioner, x, residual, budget)
+    if not torch.isfinite(z).all():
+        return _CGDirection(None, 0, OptimizerStatus.INVALID_PRECONDITIONER)
+    rz = _dot(residual, z)
+    if rz <= 0.0:
+        return _CGDirection(None, 0, OptimizerStatus.INVALID_PRECONDITIONER)
+    search = -z
+    direction = torch.zeros_like(grad)
+    target = eta * float(torch.linalg.vector_norm(grad).item())
 
-    residual_norm = float(np.linalg.norm(residual))
-    res_dot_preco = float(np.dot(residual, residual_preco))
-    if not np.isfinite(residual_norm) or not np.isfinite(res_dot_preco):
-        return 0, n_prec, n_hess
-
-    cg_iter = 0
-    while cg_iter < options.max_cg_iter:
-        hessian_vector(x, d, hd)
-        n_hess += 1
-        d_hd = float(np.dot(d, hd))
-        if not np.isfinite(d_hd):
-            break
-        if d_hd < 0.0:
-            if cg_iter == 0:
-                descent[:] = d
-            break
-        if d_hd == 0.0:
-            break
-
-        if preconditioner is None:
-            alpha = (residual_norm * residual_norm) / d_hd
-            descent_prev[:] = descent
-            descent += np.float32(alpha) * d
-            residual += np.float32(alpha) * hd
-            previous_norm = residual_norm
-            residual_norm = float(np.linalg.norm(residual))
-            cg_iter += 1
-            if (
-                residual_norm <= eta * grad_norm
-                or cg_iter >= options.max_cg_iter
-            ):
-                break
-            beta = (residual_norm * residual_norm) / (previous_norm * previous_norm)
-            d[:] = -residual + np.float32(beta) * d
-        else:
-            alpha = res_dot_preco / d_hd
-            descent_prev[:] = descent
-            descent += np.float32(alpha) * d
-            residual += np.float32(alpha) * hd
-            if _apply_preconditioner(preconditioner, x, residual, residual_preco):
-                n_prec += 1
-            previous_dot = res_dot_preco
-            res_dot_preco = float(np.dot(residual, residual_preco))
-            residual_norm = float(np.linalg.norm(residual))
-            cg_iter += 1
-            if (
-                residual_norm <= eta * grad_norm
-                or cg_iter >= options.max_cg_iter
-            ):
-                break
-            beta = res_dot_preco / previous_dot if previous_dot != 0.0 else 0.0
-            d[:] = -residual_preco + np.float32(beta) * d
-
-    return cg_iter, n_prec, n_hess
+    for iteration in range(1, options.max_cg_iter + 1):
+        h_search = _validate_operator_output(
+            "hessian_vector",
+            hessian_vector(x.detach(), search.detach()),
+            search,
+        )
+        budget.hessian += 1
+        curvature = _dot(search, h_search)
+        if not torch.isfinite(h_search).all() or not isfinite(curvature):
+            return _CGDirection(None, iteration - 1, OptimizerStatus.NONFINITE)
+        if curvature <= 0.0:
+            if iteration == 1:
+                direction = search
+            return _CGDirection(direction, iteration - 1, None)
+        alpha = rz / curvature
+        direction = direction + alpha * search
+        residual = residual + alpha * h_search
+        if float(torch.linalg.vector_norm(residual).item()) <= target:
+            return _CGDirection(direction, iteration, None)
+        z_new = _apply_preconditioner(preconditioner, x, residual, budget)
+        if not torch.isfinite(z_new).all():
+            return _CGDirection(None, iteration, OptimizerStatus.INVALID_PRECONDITIONER)
+        rz_new = _dot(residual, z_new)
+        if rz_new <= 0.0:
+            return _CGDirection(None, iteration, OptimizerStatus.INVALID_PRECONDITIONER)
+        beta = rz_new / rz
+        search = -z_new + beta * search
+        z = z_new
+        rz = rz_new
+    return _CGDirection(direction, options.max_cg_iter, None)
 
 
 def truncated_newton_minimize(
     objective: Objective,
     hessian_vector: HessianVectorProduct,
-    x0: ArrayLike,
+    x0: Tensor,
     *,
     preconditioner: Preconditioner | None = None,
     options: TruncatedNewtonOptions | None = None,
-    lower_bounds: ArrayLike | None = None,
-    upper_bounds: ArrayLike | None = None,
+    lower_bounds: Tensor | float | None = None,
+    upper_bounds: Tensor | float | None = None,
     callback: Callback | None = None,
 ) -> OptimizerResult:
-    """Minimize with truncated Newton, optionally using a preconditioner."""
+    """Minimize an objective with a Hessian-free truncated-Newton method."""
 
-    if options is None:
-        options = TruncatedNewtonOptions()
-    start, x, lb, ub = _prepare_initial_state(
-        x0, lower_bounds, upper_bounds, options
+    resolved = options or TruncatedNewtonOptions()
+    state = _prepare_initial_state(objective, x0, lower_bounds, upper_bounds, resolved)
+    run = _OptimizerRun(
+        state, _TraceRecorder(resolved.trace, callback), method="truncated_newton"
     )
-    grad = np.empty_like(x)
-    grad_preco = np.empty_like(x)
-    residual = np.empty_like(x)
-    residual_preco = np.empty_like(x)
-    descent = np.empty_like(x)
-    descent_prev = np.empty_like(x)
-    d = np.empty_like(x)
-    hd = np.empty_like(x)
-    xk = np.empty_like(x)
-    ls = _LineSearchState(alpha=options.initial_step)
-    trace: list[OptimizerTraceEntry] = []
-    emit_trace = options.record_trace or callback is not None
+    eta = resolved.eta_initial
+    status = run.initial_status(resolved.stopping)
+    if status is not None:
+        return run.finish(status, 0)
 
-    f = _evaluate_objective(objective, x, grad)
-    n_eval = 1
-    n_prec = 0
-    n_hess = 0
-    if not np.isfinite(f) or not np.all(np.isfinite(grad)):
-        return _nonfinite_result(
-            x, f, grad, n_eval=n_eval, n_prec=n_prec, n_hess=n_hess, start=start
-        )
-
-    f0 = f
-    eta = options.eta_initial
-    grad_norm = float(np.linalg.norm(grad))
-    previous_grad_norm = grad_norm
-    n_iter = 0
-    flag = FLAG_NSTE
-    status = "running"
-
-    while flag not in (FLAG_CONV, FLAG_FAIL):
-        cg_iter, cg_prec, cg_hess = _newton_descent(
+    for iteration in range(1, resolved.stopping.max_iter + 1):
+        cg = _newton_direction(
             hessian_vector,
             preconditioner,
-            x,
-            grad,
-            grad_preco,
-            residual,
-            residual_preco,
-            descent,
-            descent_prev,
-            d,
-            hd,
-            options,
+            state.x,
+            state.grad,
+            resolved,
             eta,
-            grad_norm,
+            state.budget,
         )
-        n_prec += cg_prec
-        n_hess += cg_hess
-        if cg_iter == 0 and float(np.dot(grad, descent)) >= 0.0:
-            descent[:] = -grad_preco
-        if float(np.dot(grad, descent)) >= 0.0 or not np.all(np.isfinite(descent)):
-            flag = FLAG_FAIL
-            status = STATUS_INNER_CG_FAILED
-            break
-
-        max_trials = _line_search_max_trials(options, n_eval)
-        if max_trials is not None and max_trials <= 0:
-            flag = FLAG_FAIL
-            status = STATUS_MAX_EVALUATIONS
-            break
-        result = _line_search_step(
-            objective,
-            options,
-            x,
-            xk,
-            descent,
-            f,
-            grad,
-            ls,
-            lb,
-            ub,
-            max_trials,
-        )
-        n_eval += result.line_search_iter
-        if result.task != TASK_NEW_STEP:
-            flag = FLAG_FAIL
-            status = STATUS_LINE_SEARCH_FAILED
-            break
-
-        f = result.f
-        if not np.isfinite(f) or not np.all(np.isfinite(grad)):
-            flag = FLAG_FAIL
-            status = STATUS_NONFINITE
-            break
-
-        n_iter += 1
-        previous_grad_norm = grad_norm
-        grad_norm = float(np.linalg.norm(grad))
-        if emit_trace:
-            entry = _make_trace(
-                flag=FLAG_NSTE,
-                iteration=n_iter,
-                evaluations=n_eval,
-                f=f,
-                alpha=result.alpha,
-                line_search_iter=result.line_search_iter,
-                accepted=True,
-                task=result.task,
-                x=x,
-                grad=grad,
-                q0=result.q0,
-                q=result.q,
-                metadata={
-                    "method": "truncated_newton",
-                    "line_search": options.line_search,
-                    "cg_iter": cg_iter,
-                    "eta": eta,
-                },
+        if cg.status is not None:
+            return run.finish(cg.status, iteration - 1)
+        if cg.direction is None:
+            return run.finish(OptimizerStatus.BREAKDOWN, iteration - 1)
+        direction = _feasible_direction(state.x, cg.direction, state.lower, state.upper)
+        if _dot(state.grad, direction) >= 0.0 or not torch.any(direction):
+            direction = _feasible_direction(
+                state.x, -state.grad, state.lower, state.upper
             )
-            if options.record_trace:
-                trace.append(entry)
-            if callback is not None:
-                callback(entry)
+        if _dot(state.grad, direction) >= 0.0 or not torch.any(direction):
+            return run.finish(OptimizerStatus.BREAKDOWN, iteration - 1)
 
-        if _converged(f, f0, n_iter, options):
-            flag = FLAG_CONV
-            status = STATUS_MAX_ITER if n_iter >= options.max_iter else STATUS_CONVERGED
-            break
-        eta = _forcing_term(eta, grad, residual, previous_grad_norm)
-        flag = FLAG_NSTE
+        previous_x = state.x
+        previous_f = state.f
+        previous_grad_norm = max(run.grad_norm(), torch.finfo(state.x.dtype).eps)
+        result = _line_search(
+            state.evaluator,
+            state.x,
+            state.f,
+            state.grad,
+            direction,
+            state.lower,
+            state.upper,
+            resolved.line_search,
+        )
+        if not result.success:
+            return run.finish(
+                result.status or OptimizerStatus.LINE_SEARCH_FAILED, iteration - 1
+            )
+        state.x, state.f, state.grad = result.x, result.f, result.grad
+        run.emit(
+            OptimizerEventType.STEP,
+            iteration,
+            alpha=result.alpha,
+            line_search_iter=result.evaluations,
+            cg_iter=cg.iterations,
+            eta=eta,
+        )
+        status = run.step_status(resolved.stopping, iteration, previous_x, previous_f)
+        if status is not None:
+            return run.finish(status, iteration)
+        ratio = run.grad_norm() / previous_grad_norm
+        eta = min(0.9, max(0.05, ratio**0.5))
 
-    return OptimizerResult(
-        x=x.copy(),
-        f=f,
-        grad=grad.copy(),
-        status=status,
-        flag=flag,
-        success=flag == FLAG_CONV,
-        n_iter=n_iter,
-        n_eval=n_eval,
-        n_prec=n_prec,
-        n_hess=n_hess,
-        elapsed_s=perf_counter() - start,
-        trace=trace,
-    )
+    return run.finish(OptimizerStatus.MAX_ITERATIONS, resolved.stopping.max_iter)
 
 
 __all__ = ["truncated_newton_minimize"]

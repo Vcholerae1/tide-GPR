@@ -24,6 +24,7 @@ Start here if you already know which workflow you want:
 - tide.staggered
 - tide.utils
 - tide.storage
+- tide.core
 
 ## Internal Modules
 - tide.backend_utils

@@ -9,6 +9,7 @@ This module is mostly internal and used by tide.maxwell to resolve native symbol
 - get_library_path
 - cuda_build_arches
 - get_backend_function
+- backend_signature
 - tensor_to_ptr
 - ensure_contiguous
 
@@ -18,7 +19,8 @@ The module defines declarative ctypes signature templates for:
 - maxwell_tm forward, forward_with_storage, backward
 - maxwell_3d forward, forward_with_storage, backward
 
-These templates are cached and assigned lazily by get_backend_function.
+These templates are validated once, exposed by `backend_signature`, and assigned
+lazily by `get_backend_function`.
 
 ## Typical Internal Flow
 

@@ -5,7 +5,6 @@ from typing import Any
 import torch
 
 from ..padding import create_or_pad
-from ..storage import _resolve_storage_compression
 from ..utils import EP0, MU0
 from .common import _make_storage_streams
 
@@ -44,22 +43,6 @@ def _init_tm_wavefield(
     else:
         wavefield = torch.zeros(size_with_batch, device=device, dtype=dtype)
     return wavefield.contiguous() if contiguous else wavefield
-
-
-def _resolve_tm2d_storage_spec(
-    *,
-    storage_compression: bool | str | None,
-    dtype: torch.dtype,
-    device: torch.device,
-    context: str,
-) -> tuple[str, torch.dtype, int, int]:
-    storage_kind, store_dtype, itemsize, storage_format = _resolve_storage_compression(
-        storage_compression,
-        dtype,
-        device,
-        context=context,
-    )
-    return storage_kind, store_dtype, itemsize, storage_format
 
 
 def _prepare_tm2d_source_injection(
@@ -230,6 +213,5 @@ __all__ = [
     "_physical_tm2d_adjoint_callback_wavefields",
     "_physical_tm2d_callback_wavefields",
     "_prepare_tm2d_source_injection",
-    "_resolve_tm2d_storage_spec",
     "_unscale_tm2d_outputs",
 ]

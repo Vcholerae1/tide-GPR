@@ -1142,6 +1142,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(born_forward)(
     TIDE_DTYPE *__restrict const dm_ex_y,
     TIDE_DTYPE *__restrict const dm_ey_x,
     TIDE_DTYPE *__restrict const r,
+    TIDE_DTYPE *__restrict const background_r,
     TIDE_DTYPE const *__restrict const az,
     TIDE_DTYPE const *__restrict const bz,
     TIDE_DTYPE const *__restrict const azh,
@@ -1504,6 +1505,18 @@ TIDE_OMP_PARALLEL_FOR
             r, dey, receivers_i, recv_time_offset, n_shots, shot_numel, n_receivers_per_shot);
       }
     }
+    if (n_receivers_per_shot > 0 && background_r != NULL && receivers_i != NULL) {
+      if (receiver_component == 0) {
+        record_receivers_component(background_r, ex, receivers_i, recv_time_offset,
+                                   n_shots, shot_numel, n_receivers_per_shot);
+      } else if (receiver_component == 2) {
+        record_receivers_component(background_r, ez, receivers_i, recv_time_offset,
+                                   n_shots, shot_numel, n_receivers_per_shot);
+      } else {
+        record_receivers_component(background_r, ey, receivers_i, recv_time_offset,
+                                   n_shots, shot_numel, n_receivers_per_shot);
+      }
+    }
   }
 
 #ifdef _OPENMP
@@ -1558,6 +1571,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(born_forward_with_storage)(
     TIDE_DTYPE *__restrict const dm_ex_y,
     TIDE_DTYPE *__restrict const dm_ey_x,
     TIDE_DTYPE *__restrict const r,
+    TIDE_DTYPE *__restrict const background_r,
     TIDE_DTYPE *__restrict const store_1,
     TIDE_DTYPE *__restrict const store_2,
     char **store_filenames_1,
@@ -2026,6 +2040,18 @@ TIDE_OMP_PARALLEL_FOR
       } else {
         record_receivers_component(
             r, dey, receivers_i, recv_time_offset, n_shots, shot_numel, n_receivers_per_shot);
+      }
+    }
+    if (n_receivers_per_shot > 0 && background_r != NULL && receivers_i != NULL) {
+      if (receiver_component == 0) {
+        record_receivers_component(background_r, ex, receivers_i, recv_time_offset,
+                                   n_shots, shot_numel, n_receivers_per_shot);
+      } else if (receiver_component == 2) {
+        record_receivers_component(background_r, ez, receivers_i, recv_time_offset,
+                                   n_shots, shot_numel, n_receivers_per_shot);
+      } else {
+        record_receivers_component(background_r, ey, receivers_i, recv_time_offset,
+                                   n_shots, shot_numel, n_receivers_per_shot);
       }
     }
   }

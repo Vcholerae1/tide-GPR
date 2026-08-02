@@ -15,6 +15,7 @@ from .common import (
     _pad_dispersion_for_model,
 )
 
+
 def _select_e_component(
     component: str,
     ex: torch.Tensor,
@@ -95,6 +96,7 @@ def maxwell3d_python(
     *,
     compute_mode: str = "native",
     validate_material_inputs: bool = True,
+    fallback: str = "reference",
 ):
     """3D Python backend propagation with autograd support."""
     del (
@@ -111,6 +113,7 @@ def maxwell3d_python(
         storage_chunk_steps,
         compute_mode,
         n_threads,
+        fallback,
     )
     if epsilon.ndim == 4:
         raise NotImplementedError(
@@ -472,7 +475,12 @@ def maxwell3d_python(
         Ex = ca * Ex + cb * (dHy_dz_pml - dHz_dy_pml)
         Ey = ca * Ey + cb * (dHz_dx_pml - dHx_dz_pml)
         Ez = ca * Ez + cb * (dHx_dy_pml - dHy_dx_pml)
-        if pol_ex is not None and pol_ey is not None and pol_ez is not None and debye is not None:
+        if (
+            pol_ex is not None
+            and pol_ey is not None
+            and pol_ez is not None
+            and debye is not None
+        ):
             Ex = Ex + _debye_polarization_term(debye["cp"], pol_ex)
             Ey = Ey + _debye_polarization_term(debye["cp"], pol_ey)
             Ez = Ez + _debye_polarization_term(debye["cp"], pol_ez)
@@ -496,7 +504,12 @@ def maxwell3d_python(
                 Ez = _inject_component(
                     Ez, flat_model_shape, sources_i, scaled_src, size_with_batch
                 )
-        if pol_ex is not None and pol_ey is not None and pol_ez is not None and debye is not None:
+        if (
+            pol_ex is not None
+            and pol_ey is not None
+            and pol_ez is not None
+            and debye is not None
+        ):
             a = debye["a"].unsqueeze(0)
             b = debye["b"].unsqueeze(0)
             pol_ex = a * pol_ex + b * (Ex + ex_prev).unsqueeze(1)
@@ -549,5 +562,6 @@ def maxwell3d_python(
         receiver_amplitudes,
     )
     return outputs
+
 
 __all__ = ["maxwell3d_python"]

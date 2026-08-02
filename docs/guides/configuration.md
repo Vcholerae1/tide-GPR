@@ -15,10 +15,14 @@ Use `storage_mode="device"` first for speed, then step down to `cpu`, `disk`, or
 ## Backend Controls
 
 - `python_backend=False` for the native path when available
-- string backend modes where supported on the Python path
+- `python_backend=True`, `"eager"`, `"jit"`, or `"compile"` for the reference path
+- `python_backend="native"` to require the native path
+- `fallback="reference"` (default) or `fallback="error"`
 - `tide.backend_utils.is_backend_available()` to check native backend visibility
 
-If the native backend is unavailable, TIDE can still use supported Python fallback paths, but performance and feature coverage may differ.
+Every public Maxwell entry point first compiles a shared `SimulationPlan`. The
+plan makes backend selection and fallback explicit; `fallback="error"` prevents
+an unavailable native library from silently switching to Python.
 
 ## Callback Controls
 

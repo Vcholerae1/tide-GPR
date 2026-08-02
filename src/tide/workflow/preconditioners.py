@@ -19,15 +19,18 @@ class BlockPreconditioner:
     diag22: torch.Tensor
 
 
-def _as_bool_mask(mask: torch.Tensor | np.ndarray, *, device: torch.device) -> torch.Tensor:
+def _as_bool_mask(
+    mask: torch.Tensor | np.ndarray, *, device: torch.device
+) -> torch.Tensor:
     if isinstance(mask, torch.Tensor):
         return mask.to(device=device, dtype=torch.bool)
     return torch.as_tensor(mask, device=device, dtype=torch.bool)
 
 
 def _finite_nonnegative_values(values: torch.Tensor) -> torch.Tensor:
+    compute_dtype = torch.float64 if values.dtype == torch.float64 else torch.float32
     return torch.nan_to_num(
-        values.detach().to(dtype=torch.float32),
+        values.detach().to(dtype=compute_dtype),
         nan=0.0,
         posinf=0.0,
         neginf=0.0,
@@ -38,7 +41,7 @@ def _smooth(values: torch.Tensor, sigma: float) -> torch.Tensor:
     if sigma <= 0.0:
         return values
     smoothed = gaussian_filter(values.cpu().numpy(), sigma=float(sigma))
-    return torch.as_tensor(smoothed, device=values.device, dtype=torch.float32)
+    return torch.as_tensor(smoothed, device=values.device, dtype=values.dtype)
 
 
 def _active_mask(
@@ -179,7 +182,7 @@ def curvature_preconditioner_block(
         h12 = torch.zeros_like(h11)
     else:
         h12 = torch.nan_to_num(
-            curvature_12.detach().to(device=device, dtype=torch.float32),
+            curvature_12.detach().to(device=device, dtype=h11.dtype),
             nan=0.0,
             posinf=0.0,
             neginf=0.0,
@@ -252,63 +255,62 @@ def curvature_preconditioner_block(
 
 
 def diagonal_preconditioner(
-    diagonal: torch.Tensor | np.ndarray,
-) -> Callable[[np.ndarray, np.ndarray, np.ndarray], None]:
-    """Return a ``tide.optim``-style preconditioner callback."""
+    diagonal: torch.Tensor,
+) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """Return a torch-native diagonal preconditioner callback."""
 
-    if isinstance(diagonal, torch.Tensor):
-        diagonal_np = diagonal.detach().cpu().numpy()
-    else:
-        diagonal_np = np.asarray(diagonal)
-    flat = diagonal_np.reshape(-1).astype(np.float32, copy=True)
-    flat[~np.isfinite(flat)] = 0.0
+    if not isinstance(diagonal, torch.Tensor):
+        raise TypeError("diagonal must be a torch.Tensor.")
+    factors = torch.nan_to_num(
+        diagonal.detach().clone(), nan=0.0, posinf=0.0, neginf=0.0
+    )
 
-    def apply_diagonal(_: np.ndarray, vector: np.ndarray, out: np.ndarray) -> None:
-        if vector.shape != flat.shape or out.shape != flat.shape:
+    def apply_diagonal(_: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
+        if vector.shape != factors.shape:
             raise ValueError(
-                f"vector and out must have shape {flat.shape}, got {vector.shape} and {out.shape}."
+                f"vector must have shape {tuple(factors.shape)}, "
+                f"got {tuple(vector.shape)}."
             )
-        out[:] = flat * vector
+        if vector.device != factors.device or vector.dtype != factors.dtype:
+            raise ValueError("vector and diagonal must share device and dtype.")
+        return factors * vector
 
     return apply_diagonal
 
 
 def block_preconditioner(
     block: BlockPreconditioner,
-) -> Callable[[np.ndarray, np.ndarray, np.ndarray], None]:
-    """Return a ``tide.optim`` callback for a symmetric 2x2 block preconditioner."""
+) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """Return a torch-native symmetric 2x2 block preconditioner."""
 
-    diag11 = block.diag11.detach().cpu().numpy().reshape(-1).astype(np.float32, copy=True)
-    offdiag12 = (
-        block.offdiag12.detach().cpu().numpy().reshape(-1).astype(np.float32, copy=True)
-    )
-    diag22 = block.diag22.detach().cpu().numpy().reshape(-1).astype(np.float32, copy=True)
+    diag11 = block.diag11.detach().reshape(-1).clone()
+    offdiag12 = block.offdiag12.detach().reshape(-1).clone()
+    diag22 = block.diag22.detach().reshape(-1).clone()
     if not (diag11.shape == offdiag12.shape == diag22.shape):
         raise ValueError("block factors must have matching flattened shapes.")
-    n = int(diag11.size)
+    n = int(diag11.numel())
     flat_shape = (2 * n,)
-    tmp = np.empty(n, dtype=np.float32)
 
-    for arr in (diag11, offdiag12, diag22):
-        arr[~np.isfinite(arr)] = 0.0
+    diag11 = torch.nan_to_num(diag11, nan=0.0, posinf=0.0, neginf=0.0)
+    offdiag12 = torch.nan_to_num(offdiag12, nan=0.0, posinf=0.0, neginf=0.0)
+    diag22 = torch.nan_to_num(diag22, nan=0.0, posinf=0.0, neginf=0.0)
 
-    def apply_block(_: np.ndarray, vector: np.ndarray, out: np.ndarray) -> None:
-        if vector.shape != flat_shape or out.shape != flat_shape:
+    def apply_block(_: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
+        if vector.shape != flat_shape:
             raise ValueError(
-                f"vector and out must have shape {flat_shape}, got "
-                f"{vector.shape} and {out.shape}."
+                f"vector must have shape {flat_shape}, got {tuple(vector.shape)}."
             )
-        vector_1 = vector[:n]
-        vector_2 = vector[n:]
-        out_1 = out[:n]
-        out_2 = out[n:]
-        np.multiply(diag11, vector_1, out=out_1)
-        np.multiply(offdiag12, vector_2, out=tmp)
-        out_1 += tmp
-        np.multiply(offdiag12, vector_1, out=out_2)
-        np.multiply(diag22, vector_2, out=tmp)
-        out_2 += tmp
-        out[~np.isfinite(out)] = 0.0
+        if any(
+            factor.device != vector.device or factor.dtype != vector.dtype
+            for factor in (diag11, offdiag12, diag22)
+        ):
+            raise ValueError("vector and block factors must share device and dtype.")
+        vector_1, vector_2 = vector[:n], vector[n:]
+        out_1 = diag11 * vector_1 + offdiag12 * vector_2
+        out_2 = offdiag12 * vector_1 + diag22 * vector_2
+        return torch.nan_to_num(
+            torch.cat((out_1, out_2)), nan=0.0, posinf=0.0, neginf=0.0
+        )
 
     return apply_block
 

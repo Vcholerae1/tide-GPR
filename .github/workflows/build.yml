@@ -45,8 +45,8 @@ jobs:
           # Use uv as build frontend for faster builds
           CIBW_BUILD_FRONTEND: "build[uv]"
 
-          # Only build for Python 3.10-3.12
-          CIBW_BUILD: "cp310-* cp311-* cp312-*"
+          # Match the package's supported interpreter range.
+          CIBW_BUILD: "cp312-*"
 
           # Linux: Install CUDA and GCC 13
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
@@ -88,7 +88,7 @@ jobs:
           # macOS: CPU-only build
           CIBW_ENVIRONMENT_MACOS: CMAKE_ARGS="-DTIDE_ENABLE_CUDA=OFF"
 
-          CIBW_TEST_SKIP: "*"
+          CIBW_TEST_COMMAND: "python -c \"import tide; print(tide.__version__)\""
 
       - uses: actions/upload-artifact@v7
         with:

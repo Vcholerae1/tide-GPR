@@ -5,6 +5,7 @@ import torch
 
 from ..callbacks import Callback
 from ..cfl import cfl_condition
+from ..core import BackendPreference, compile_simulation_plan, select_backend
 from ..dispersion import DebyeDispersion
 from ..grid_utils import _normalize_grid_spacing_2d
 from ..resampling import downsample_and_movedim, upsample
@@ -32,6 +33,7 @@ from .common import (
     _structured_vmap_state_in_dim,
     _wrap_structured_callback,
 )
+from .module_utils import _register_maxwell_model
 from .tm2d_python import maxwell_func
 from .validation_internal import (
     _validate_dispersion_time_step,
@@ -66,20 +68,14 @@ class MaxwellTM(torch.nn.Module):
         sigma_requires_grad: bool | None = None,
     ) -> None:
         super().__init__()
-        _validate_optional_bool("epsilon_requires_grad", epsilon_requires_grad)
-        _validate_optional_bool("sigma_requires_grad", sigma_requires_grad)
-        _validate_tensor_arg("epsilon", epsilon)
-        _validate_tensor_arg("sigma", sigma)
-        _validate_tensor_arg("mu", mu)
-
-        if epsilon_requires_grad is None:
-            epsilon_requires_grad = epsilon.requires_grad
-        if sigma_requires_grad is None:
-            sigma_requires_grad = sigma.requires_grad
-
-        self.epsilon = torch.nn.Parameter(epsilon, requires_grad=epsilon_requires_grad)
-        self.sigma = torch.nn.Parameter(sigma, requires_grad=sigma_requires_grad)
-        self.register_buffer("mu", mu)
+        _register_maxwell_model(
+            self,
+            epsilon,
+            sigma,
+            mu,
+            epsilon_requires_grad=epsilon_requires_grad,
+            sigma_requires_grad=sigma_requires_grad,
+        )
         self.grid_spacing = grid_spacing
 
     @runtime_typecheck
@@ -116,9 +112,7 @@ class MaxwellTM(torch.nn.Module):
         storage_bytes_limit_host: int | None = None,
         storage_chunk_steps: int = 0,
         dispersion: DebyeDispersion | None = None,
-        compute_mode: Literal[
-            "native", "fp16_io"
-        ] = "native",
+        compute_mode: Literal["native", "fp16_io"] = "native",
     ):
         assert isinstance(self.epsilon, torch.Tensor)
         assert isinstance(self.sigma, torch.Tensor)
@@ -250,8 +244,9 @@ def maxwelltm_hvp(
 
     ``hessian_mode="gauss_newton"`` evaluates only ``J.T @ Phi'' @ Jv``.
     The Python path (`python_backend=True`) is the reference implementation.
-    The native path (`python_backend=False`) uses the native TM2D forward solver
-    together with the native Born background-gradient path.
+    The native Gauss-Newton path composes a tangent forward with the ordinary
+    background adjoint. The native full path adds the nonlinear-physics
+    correction through a fused incremental adjoint.
 
     `model_gradient_sampling_interval` follows `maxwelltm` semantics on the
     native HVP path. The Python HVP path and the native CPU HVP path currently
@@ -264,8 +259,7 @@ def maxwelltm_hvp(
     _validate_tensor_arg("observed_data", observed_data)
     if hessian_mode not in {"full", "gauss_newton"}:
         raise ValueError(
-            "hessian_mode must be 'full' or 'gauss_newton', "
-            f"but got {hessian_mode!r}."
+            f"hessian_mode must be 'full' or 'gauss_newton', but got {hessian_mode!r}."
         )
     if storage_mode not in {"device", "cpu", "disk"}:
         raise ValueError(
@@ -292,7 +286,27 @@ def maxwelltm_hvp(
     if not callable(misfit_fn):
         raise TypeError("misfit must be callable when provided.")
 
-    if python_backend:
+    plan = compile_simulation_plan(
+        operation="hvp",
+        dimension="tm2d",
+        epsilon=epsilon,
+        sigma=sigma,
+        mu=mu,
+        python_backend=python_backend,
+        storage_mode=storage_mode,
+        storage_compression=storage_compression or False,
+        model_gradient_sampling_interval=model_gradient_sampling_interval,
+        hessian_mode=hessian_mode,
+        requires_gradients=True,
+    )
+    from .. import backend_utils
+
+    decision = select_backend(
+        plan,
+        native_available=backend_utils.is_backend_available(),
+    )
+
+    if decision.selected is BackendPreference.PYTHON:
         from .tm2d_born_autograd import tm2d_receiver_hvp_naive
 
         return tm2d_receiver_hvp_naive(
@@ -317,9 +331,17 @@ def maxwelltm_hvp(
             hessian_mode=hessian_mode,
         )
 
-    from .tm2d_born_autograd import tm2d_receiver_hvp_native
+    from .tm2d_born_autograd import (
+        tm2d_receiver_full_hvp_native,
+        tm2d_receiver_gn_hvp_native,
+    )
 
-    return tm2d_receiver_hvp_native(
+    native_hvp = (
+        tm2d_receiver_gn_hvp_native
+        if hessian_mode == "gauss_newton"
+        else tm2d_receiver_full_hvp_native
+    )
+    return native_hvp(
         epsilon,
         sigma,
         mu,
@@ -338,7 +360,6 @@ def maxwelltm_hvp(
         nt=nt,
         model_gradient_sampling_interval=model_gradient_sampling_interval,
         linearize_source=linearize_source,
-        hessian_mode=hessian_mode,
         storage_mode=storage_mode,
         storage_compression=storage_compression,
     )
@@ -382,9 +403,8 @@ def maxwelltm(
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
-    compute_mode: Literal[
-        "native", "fp16_io"
-    ] = "native",
+    compute_mode: Literal["native", "fp16_io"] = "native",
+    fallback: Literal["reference", "error"] = "reference",
 ):
     """2D TM mode Maxwell equations solver.
 
@@ -413,9 +433,7 @@ def maxwelltm(
         "native",
         "fp16_io",
     }:
-        raise ValueError(
-            "compute_mode must be 'native' or 'fp16_io'."
-        )
+        raise ValueError("compute_mode must be 'native' or 'fp16_io'.")
 
     epsilon_input = epsilon
     sigma_input = sigma
@@ -465,14 +483,36 @@ def maxwelltm(
     m_Hx_z = batch_meta["state_tensors"]["m_Hx_z"]
     m_Hz_x = batch_meta["state_tensors"]["m_Hz_x"]
 
-    if isinstance(python_backend, bool):
-        use_python = python_backend
-    elif isinstance(python_backend, str):
-        use_python = True
-    else:
-        raise TypeError(
-            f"python_backend must be bool or str, but got {type(python_backend).__name__}"
-        )
+    plan = compile_simulation_plan(
+        operation="forward",
+        dimension="tm2d",
+        epsilon=epsilon,
+        sigma=sigma,
+        mu=mu,
+        python_backend=python_backend,
+        compute_mode=compute_mode,
+        storage_mode=storage_mode,
+        storage_path=storage_path,
+        storage_compression=storage_compression,
+        storage_bytes_limit_device=storage_bytes_limit_device,
+        storage_bytes_limit_host=storage_bytes_limit_host,
+        storage_chunk_steps=storage_chunk_steps,
+        n_threads=n_threads,
+        fallback=fallback,
+        has_callbacks=forward_callback is not None or backward_callback is not None,
+        model_gradient_sampling_interval=model_gradient_sampling_interval,
+    )
+    compute_mode = plan.compute_mode.value
+    storage_mode = plan.storage.mode.value
+
+    from .. import backend_utils
+
+    decision = select_backend(
+        plan,
+        native_available=backend_utils.is_backend_available(),
+    )
+    use_python = decision.selected is BackendPreference.PYTHON
+    dispatch_backend = python_backend if use_python else False
 
     if compute_mode == "fp16_io":
         if use_python:
@@ -641,7 +681,7 @@ def maxwelltm(
             m_Hz_x_i: torch.Tensor | None,
         ):
             return maxwell_func(
-                python_backend,
+                dispatch_backend,
                 epsilon_i,
                 sigma_i,
                 mu_i,
@@ -768,7 +808,7 @@ def maxwelltm(
     )
 
     result = maxwell_func(
-        python_backend,
+        dispatch_backend,
         epsilon,
         sigma,
         mu,

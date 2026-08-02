@@ -73,6 +73,108 @@ def _clone_param(param: torch.Tensor) -> torch.Tensor:
     return param.detach().clone().requires_grad_(True)
 
 
+def _receiver_data_gradient(
+    *,
+    observed_data: torch.Tensor,
+    misfit_fn: ReceiverMisfit,
+    predicted_data: torch.Tensor,
+    create_graph: bool,
+) -> torch.Tensor:
+    """Return the receiver-space objective gradient at ``predicted_data``."""
+    loss = misfit_fn(predicted_data, observed_data)
+    return torch.autograd.grad(
+        loss,
+        predicted_data,
+        create_graph=create_graph,
+    )[0]
+
+
+def _receiver_data_hvp(
+    *,
+    data_gradient: torch.Tensor,
+    predicted_data: torch.Tensor,
+    delta_predicted_data: torch.Tensor,
+    retain_graph: bool = False,
+) -> torch.Tensor:
+    """Apply the receiver-space objective Hessian to ``delta_predicted_data``."""
+    return torch.autograd.grad(
+        data_gradient,
+        predicted_data,
+        grad_outputs=delta_predicted_data,
+        retain_graph=retain_graph,
+    )[0]
+
+
+def _gauss_newton_receiver_hvp(
+    *,
+    params: tuple[torch.Tensor, ...],
+    observed_data: torch.Tensor,
+    misfit_fn: ReceiverMisfit,
+    predicted_data: torch.Tensor,
+    delta_predicted_data: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Apply ``J.T @ Phi'' @ J`` without differentiating the Born operator."""
+    data_gradient = _receiver_data_gradient(
+        observed_data=observed_data,
+        misfit_fn=misfit_fn,
+        predicted_data=predicted_data,
+        create_graph=True,
+    )
+    data_hvp = _receiver_data_hvp(
+        data_gradient=data_gradient,
+        predicted_data=predicted_data,
+        delta_predicted_data=delta_predicted_data,
+    )
+    return torch.autograd.grad(
+        predicted_data,
+        params,
+        grad_outputs=data_hvp,
+    )
+
+
+def _second_order_receiver_vjp(
+    *,
+    params: tuple[torch.Tensor, ...],
+    data_gradient: torch.Tensor,
+    delta_predicted_data: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Apply the nonlinear-physics correction ``(D J[v]).T @ data_gradient``.
+
+    ``data_gradient`` is detached deliberately: differentiating it would add
+    the Gauss-Newton term, which belongs to :func:`_gauss_newton_receiver_hvp`.
+    """
+    return torch.autograd.grad(
+        delta_predicted_data,
+        params,
+        grad_outputs=data_gradient.detach(),
+    )
+
+
+def _full_receiver_hvp_incremental_adjoint(
+    *,
+    params: tuple[torch.Tensor, ...],
+    observed_data: torch.Tensor,
+    misfit_fn: ReceiverMisfit,
+    predicted_data: torch.Tensor,
+    delta_predicted_data: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Apply the full HVP with one fused differentiated-adjoint traversal.
+
+    Differentiating ``<Phi'(F(m)), J(m)v>`` produces both
+    ``J.T @ Phi'' @ Jv`` and ``(D J[v]).T @ Phi'``.  The native Born backward
+    implements the corresponding incremental-adjoint propagation and fuses
+    both correlations into one reverse traversal.
+    """
+    data_gradient = _receiver_data_gradient(
+        observed_data=observed_data,
+        misfit_fn=misfit_fn,
+        predicted_data=predicted_data,
+        create_graph=True,
+    )
+    directional_objective = (data_gradient * delta_predicted_data).sum()
+    return torch.autograd.grad(directional_objective, params)
+
+
 def _directional_receiver_hvp(
     *,
     params: tuple[torch.Tensor, ...],
@@ -81,33 +183,85 @@ def _directional_receiver_hvp(
     predicted_data: torch.Tensor,
     delta_predicted_data: torch.Tensor,
     hessian_mode: str = "full",
+    data_gradient: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, ...]:
-    """Apply a full or Gauss-Newton receiver Hessian to a fixed direction."""
-    loss = misfit_fn(predicted_data, observed_data)
-    grad_data = torch.autograd.grad(
-        loss,
-        predicted_data,
-        create_graph=True,
-    )[0]
+    """Compatibility dispatcher for receiver-space Hessian products."""
+    if hessian_mode == "second_order":
+        if data_gradient is None:
+            raise ValueError(
+                "data_gradient is required for hessian_mode='second_order'."
+            )
+        return _second_order_receiver_vjp(
+            params=params,
+            data_gradient=data_gradient,
+            delta_predicted_data=delta_predicted_data,
+        )
     if hessian_mode == "gauss_newton":
-        data_hvp = torch.autograd.grad(
-            grad_data,
-            predicted_data,
-            grad_outputs=delta_predicted_data,
-            retain_graph=True,
-        )[0]
-        return torch.autograd.grad(
-            predicted_data,
-            params,
-            grad_outputs=data_hvp,
+        return _gauss_newton_receiver_hvp(
+            params=params,
+            observed_data=observed_data,
+            misfit_fn=misfit_fn,
+            predicted_data=predicted_data,
+            delta_predicted_data=delta_predicted_data,
         )
     if hessian_mode != "full":
+        raise ValueError(
+            "hessian_mode must be 'full', 'gauss_newton', or "
+            f"'second_order', but got {hessian_mode!r}."
+        )
+    return _full_receiver_hvp_incremental_adjoint(
+        params=params,
+        observed_data=observed_data,
+        misfit_fn=misfit_fn,
+        predicted_data=predicted_data,
+        delta_predicted_data=delta_predicted_data,
+    )
+
+
+def _directional_receiver_hvp_from_born(
+    *,
+    params: tuple[torch.Tensor, ...],
+    direction_params: tuple[torch.Tensor, ...],
+    observed_data: torch.Tensor,
+    misfit_fn: ReceiverMisfit,
+    predicted_data: torch.Tensor,
+    delta_predicted_data: torch.Tensor,
+    hessian_mode: str = "full",
+) -> tuple[torch.Tensor, ...]:
+    """Apply an HVP through the background and direction VJPs of one Born run."""
+    if hessian_mode not in {"full", "gauss_newton"}:
         raise ValueError(
             "hessian_mode must be 'full' or 'gauss_newton', "
             f"but got {hessian_mode!r}."
         )
-    directional_objective = (grad_data * delta_predicted_data).sum()
-    return torch.autograd.grad(directional_objective, params)
+
+    data_variable = predicted_data.detach().requires_grad_(True)
+    data_gradient = _receiver_data_gradient(
+        observed_data=observed_data,
+        misfit_fn=misfit_fn,
+        predicted_data=data_variable,
+        create_graph=True,
+    )
+    data_hvp = _receiver_data_hvp(
+        data_gradient=data_gradient,
+        predicted_data=data_variable,
+        delta_predicted_data=delta_predicted_data.detach(),
+    )
+    gauss_newton = torch.autograd.grad(
+        delta_predicted_data,
+        direction_params,
+        grad_outputs=data_hvp,
+        retain_graph=hessian_mode == "full",
+    )
+    if hessian_mode == "gauss_newton":
+        return gauss_newton
+
+    correction = torch.autograd.grad(
+        delta_predicted_data,
+        params,
+        grad_outputs=data_gradient.detach(),
+    )
+    return tuple(gn + second for gn, second in zip(gauss_newton, correction))
 
 
 def _init_polarization_state(
@@ -121,7 +275,9 @@ def _init_polarization_state(
     return torch.zeros((n_shots, n_poles, *spatial_shape), device=device, dtype=dtype)
 
 
-def _debye_polarization_term(cp: torch.Tensor, polarization: torch.Tensor) -> torch.Tensor:
+def _debye_polarization_term(
+    cp: torch.Tensor, polarization: torch.Tensor
+) -> torch.Tensor:
     cp_view = cp.unsqueeze(0)
     return (cp_view * polarization).sum(dim=1)
 

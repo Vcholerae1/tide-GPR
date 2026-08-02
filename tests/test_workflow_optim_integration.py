@@ -1,10 +1,19 @@
-import numpy as np
 import torch
 
 import tide
 
 
-def test_workflow_shot_batches_drive_tide_optim_objective() -> None:
+def _stopping(max_iter: int, max_evaluations: int) -> tide.optim.StoppingCriteria:
+    return tide.optim.StoppingCriteria(
+        max_iter=max_iter,
+        max_evaluations=max_evaluations,
+        gtol=1e-6,
+        ftol=1e-12,
+        xtol=1e-12,
+    )
+
+
+def test_workflow_shot_batches_drive_torch_native_objective() -> None:
     n_shots = 5
     nt = 4
     batch_size = 2
@@ -36,8 +45,8 @@ def test_workflow_shot_batches_drive_tide_optim_objective() -> None:
         receiver_location=receiver_location,
     )
 
-    def objective(x: np.ndarray, grad_out: np.ndarray) -> float:
-        scale = torch.tensor(float(x[0]), dtype=torch.float32, requires_grad=True)
+    def objective(x: torch.Tensor) -> tuple[float, torch.Tensor]:
+        scale = x.detach().clone().requires_grad_(True)
 
         def batch_loss(shot_indices: torch.Tensor) -> torch.Tensor:
             batch = tide.workflow.take_shot_batch(
@@ -60,42 +69,36 @@ def test_workflow_shot_batches_drive_tide_optim_objective() -> None:
             )
 
         total_loss = tide.workflow.backward_shot_batches(batch_loss, shot_batches)
-
         assert scale.grad is not None
-        grad_out[0] = float(scale.grad.detach())
-        return total_loss
+        return total_loss, scale.grad.detach()
 
     result = tide.optim.lbfgs_minimize(
         objective,
-        np.array([0.25], dtype=np.float32),
-        options=tide.optim.LBFGSOptions(
-            max_iter=20,
-            tolerance=1e-8,
-            max_evaluations=80,
-        ),
+        torch.tensor([0.25], dtype=torch.float32),
+        options=tide.optim.LBFGSOptions(stopping=_stopping(20, 80)),
     )
 
     assert result.success, result.status
-    np.testing.assert_allclose(result.x, np.array([1.5], dtype=np.float32), atol=1e-4)
+    torch.testing.assert_close(result.x, torch.tensor([1.5]), atol=1e-4, rtol=1e-4)
 
 
 def test_workflow_diagonal_preconditioner_drives_tide_optim() -> None:
-    target = np.array([1.0, -2.0], dtype=np.float32)
-    hessian_diag = np.array([10.0, 0.25], dtype=np.float32)
+    target = torch.tensor([1.0, -2.0])
+    hessian_diag = torch.tensor([10.0, 0.25])
 
-    def objective(x: np.ndarray, grad_out: np.ndarray) -> float:
+    def objective(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         residual = x - target
-        grad_out[:] = hessian_diag * residual
-        return float(0.5 * np.dot(residual, grad_out))
+        grad = hessian_diag * residual
+        return 0.5 * torch.dot(residual, grad), grad
 
     preconditioner = tide.workflow.diagonal_preconditioner(1.0 / hessian_diag)
     result = tide.optim.lbfgs_minimize(
         objective,
-        np.array([8.0, 8.0], dtype=np.float32),
+        torch.tensor([8.0, 8.0]),
         preconditioner=preconditioner,
-        options=tide.optim.LBFGSOptions(max_iter=10, max_evaluations=40),
+        options=tide.optim.LBFGSOptions(stopping=_stopping(10, 40)),
     )
 
     assert result.success, result.status
     assert result.n_prec > 0
-    np.testing.assert_allclose(result.x, target, atol=1e-4)
+    torch.testing.assert_close(result.x, target, atol=1e-4, rtol=1e-4)

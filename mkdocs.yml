@@ -121,6 +121,7 @@ nav:
   - API:
       - Index: api/index.md
       - Top-level Module: api/tide.md
+      - Core Execution Contracts: api/core.md
       - Maxwell: api/maxwell.md
       - Workflow: api/workflow.md
       - Wavelets: api/wavelets.md

@@ -3,12 +3,13 @@ from typing import Any
 
 import torch
 
-from ..storage import STORAGE_DEVICE, STORAGE_NONE, _resolve_storage_compression
+from ..storage import SnapshotAllocator, resolve_snapshot_storage
 from ..validation import validate_model_gradient_sampling_interval
 from .common import (
     ReceiverMisfit,
     _clone_param,
     _directional_receiver_hvp,
+    _directional_receiver_hvp_from_born,
     _make_storage_streams,
 )
 
@@ -144,61 +145,59 @@ class Born3DForwardFunc(torch.autograd.Function):
             receiver_amplitudes = torch.zeros(
                 nt, n_shots, n_receivers, device=device, dtype=dtype
             )
+            background_receiver_amplitudes = (
+                torch.zeros_like(receiver_amplitudes)
+                if meta.get("return_background_receiver_amplitudes", False)
+                else torch.empty(0, device=device, dtype=dtype)
+            )
         else:
             receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
+            background_receiver_amplitudes = torch.empty(
+                0, device=device, dtype=dtype
+            )
 
         device_idx = (
             device.index if device.type == "cuda" and device.index is not None else 0
         )
 
+        storage_spec = resolve_snapshot_storage(
+            storage_mode="device",
+            storage_compression=(
+                meta.get("storage_compression", False) if needs_storage else False
+            ),
+            dtype=dtype,
+            device=device,
+            nt=nt,
+            step_ratio=step_ratio,
+            shot_shape=(n_shots, nz, ny, nx),
+            enabled=needs_storage,
+        )
+        snapshot_allocator = SnapshotAllocator(storage_spec, device)
+        storage_mode = storage_spec.mode
+        storage_format = storage_spec.format
+        shot_bytes_uncomp = storage_spec.shot_bytes if needs_storage else 0
+
         if needs_storage:
-            storage_mode = STORAGE_DEVICE
-            _, store_dtype, _, storage_format = _resolve_storage_compression(
-                meta.get("storage_compression", False),
-                dtype,
-                device,
-                context="storage_compression",
-            )
             if storage_format != 0 and device.type != "cuda":
                 raise NotImplementedError(
                     "3D Born BF16 snapshot storage is currently supported only on CUDA."
                 )
-            shot_bytes_uncomp = nz * ny * nx * store_dtype.itemsize
-            num_steps_stored = (nt + step_ratio - 1) // step_ratio
             compute_stream_handle, storage_stream_handle, stream_keepalive = (
                 _make_storage_streams(device, storage_mode)
             )
-            store_shape = (num_steps_stored, n_shots, nz, ny, nx)
-            empty_store = torch.empty(0, device=device, dtype=store_dtype)
-            store_ex = (
-                torch.empty(store_shape, device=device, dtype=store_dtype)
-                if store_e_needed
-                else empty_store
+            store_ex, store_ey, store_ez = snapshot_allocator.group(
+                3, store_e_needed
             )
-            store_ey = torch.empty_like(store_ex)
-            store_ez = torch.empty_like(store_ex)
-            store_curl_x = (
-                torch.empty(store_shape, device=device, dtype=store_dtype)
-                if store_curl_needed
-                else empty_store
+            store_curl_x, store_curl_y, store_curl_z = snapshot_allocator.group(
+                3, store_curl_needed
             )
-            store_curl_y = torch.empty_like(store_curl_x)
-            store_curl_z = torch.empty_like(store_curl_x)
-            store_dex = (
-                torch.empty(store_shape, device=device, dtype=store_dtype)
-                if ca_requires_grad
-                else empty_store
+            store_dex, store_dey, store_dez = snapshot_allocator.group(
+                3, ca_requires_grad
             )
-            store_dey = torch.empty_like(store_dex)
-            store_dez = torch.empty_like(store_dex)
-            store_dcurl_x = (
-                torch.empty(store_shape, device=device, dtype=store_dtype)
-                if cb_requires_grad
-                else empty_store
+            store_dcurl_x, store_dcurl_y, store_dcurl_z = snapshot_allocator.group(
+                3, cb_requires_grad
             )
-            store_dcurl_y = torch.empty_like(store_dcurl_x)
-            store_dcurl_z = torch.empty_like(store_dcurl_x)
-            empty_host = torch.empty(0, device=device, dtype=store_dtype)
+            empty_host = snapshot_allocator.empty()
 
             forward_func = backend_utils.get_backend_function(
                 "maxwell_3d",
@@ -252,6 +251,7 @@ class Born3DForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(dm_ex_y),
                 backend_utils.tensor_to_ptr(dm_ey_x),
                 backend_utils.tensor_to_ptr(receiver_amplitudes),
+                backend_utils.tensor_to_ptr(background_receiver_amplitudes),
                 backend_utils.tensor_to_ptr(store_ex),
                 backend_utils.tensor_to_ptr(empty_host),
                 0,
@@ -332,24 +332,23 @@ class Born3DForwardFunc(torch.autograd.Function):
                 storage_stream_handle,
             )
         else:
-            storage_mode = STORAGE_NONE
-            storage_format = 0
-            shot_bytes_uncomp = 0
             compute_stream_handle, _, stream_keepalive = _make_storage_streams(
                 device, storage_mode
             )
-            store_ex = torch.empty(0, device=device, dtype=dtype)
-            store_ey = torch.empty(0, device=device, dtype=dtype)
-            store_ez = torch.empty(0, device=device, dtype=dtype)
-            store_curl_x = torch.empty(0, device=device, dtype=dtype)
-            store_curl_y = torch.empty(0, device=device, dtype=dtype)
-            store_curl_z = torch.empty(0, device=device, dtype=dtype)
-            store_dex = torch.empty(0, device=device, dtype=dtype)
-            store_dey = torch.empty(0, device=device, dtype=dtype)
-            store_dez = torch.empty(0, device=device, dtype=dtype)
-            store_dcurl_x = torch.empty(0, device=device, dtype=dtype)
-            store_dcurl_y = torch.empty(0, device=device, dtype=dtype)
-            store_dcurl_z = torch.empty(0, device=device, dtype=dtype)
+            (
+                store_ex,
+                store_ey,
+                store_ez,
+                store_curl_x,
+                store_curl_y,
+                store_curl_z,
+                store_dex,
+                store_dey,
+                store_dez,
+                store_dcurl_x,
+                store_dcurl_y,
+                store_dcurl_z,
+            ) = snapshot_allocator.group(12, False)
 
             forward_func = backend_utils.get_backend_function(
                 "maxwell_3d",
@@ -403,6 +402,7 @@ class Born3DForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(dm_ex_y),
                 backend_utils.tensor_to_ptr(dm_ey_x),
                 backend_utils.tensor_to_ptr(receiver_amplitudes),
+                backend_utils.tensor_to_ptr(background_receiver_amplitudes),
                 backend_utils.tensor_to_ptr(az),
                 backend_utils.tensor_to_ptr(bz),
                 backend_utils.tensor_to_ptr(az_h),
@@ -530,6 +530,11 @@ class Born3DForwardFunc(torch.autograd.Function):
             "backend_device": backend_device,
         }
         ctx.stream_keepalive = stream_keepalive
+        ctx.snapshot_allocator = snapshot_allocator
+        # Tests may call ``forward`` with a lightweight context rather than an
+        # autograd FunctionCtx.  Real autograd contexts expose this method.
+        if hasattr(ctx, "mark_non_differentiable"):
+            ctx.mark_non_differentiable(background_receiver_amplitudes)
 
         return (
             dEx,
@@ -551,6 +556,7 @@ class Born3DForwardFunc(torch.autograd.Function):
             dm_ex_y,
             dm_ey_x,
             receiver_amplitudes,
+            background_receiver_amplitudes,
         )
 
     @staticmethod
@@ -605,7 +611,7 @@ class Born3DForwardFunc(torch.autograd.Function):
         device = ca.device
         dtype = ca.dtype
 
-        grad_r = grad_outputs[-1]
+        grad_r = grad_outputs[-2]
         if grad_r is None or grad_r.numel() == 0:
             grad_r = torch.zeros(
                 meta["nt"],
@@ -1113,6 +1119,7 @@ def maxwell3d_receiver_hvp_naive(
     linearize_source: bool = True,
     source_component: str = "ey",
     receiver_component: str = "ey",
+    hessian_mode: str = "full",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reference 3D receiver-space HVP on the Python Maxwell/Born path."""
     if vepsilon is None and vsigma is None:
@@ -1125,7 +1132,6 @@ def maxwell3d_receiver_hvp_naive(
             "Python 3D HVP currently requires model_gradient_sampling_interval in {0, 1}."
         )
 
-    from .maxwell3d import maxwell3d
     from .maxwell3d_born import born3d
 
     epsilon_req = _clone_param(epsilon)
@@ -1136,7 +1142,7 @@ def maxwell3d_receiver_hvp_naive(
     if vsigma is None:
         vsigma = torch.zeros_like(sigma_req)
 
-    predicted_data = maxwell3d(
+    born_outputs = born3d(
         epsilon_req,
         sigma_req,
         mu_fixed,
@@ -1145,24 +1151,7 @@ def maxwell3d_receiver_hvp_naive(
         source_amplitude=source_amplitude,
         source_location=source_location,
         receiver_location=receiver_location,
-        stencil=stencil,
-        pml_width=pml_width,
-        max_vel=max_vel,
-        nt=nt,
-        model_gradient_sampling_interval=model_gradient_sampling_interval,
-        source_component=source_component,
-        receiver_component=receiver_component,
-        python_backend=True,
-    )[-1]
-    delta_predicted_data = born3d(
-        epsilon_req,
-        sigma_req,
-        mu_fixed,
-        grid_spacing=grid_spacing,
-        dt=dt,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
+        bg_receiver_location=receiver_location,
         depsilon=vepsilon,
         dsigma=vsigma,
         stencil=stencil,
@@ -1173,13 +1162,16 @@ def maxwell3d_receiver_hvp_naive(
         source_component=source_component,
         receiver_component=receiver_component,
         python_backend=True,
-    )[-1]
+    )
+    predicted_data = born_outputs[-2]
+    delta_predicted_data = born_outputs[-1]
     hvp_epsilon, hvp_sigma = _directional_receiver_hvp(
         params=(epsilon_req, sigma_req),
         observed_data=observed_data,
         misfit_fn=misfit_fn,
         predicted_data=predicted_data,
         delta_predicted_data=delta_predicted_data,
+        hessian_mode=hessian_mode,
     )
     return hvp_epsilon, hvp_sigma
 
@@ -1206,37 +1198,35 @@ def maxwell3d_receiver_hvp_native(
     linearize_source: bool = True,
     source_component: str = "ey",
     receiver_component: str = "ey",
+    hessian_mode: str = "full",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """3D receiver-space HVP through the native Maxwell/Born forward paths."""
-    from .. import backend_utils
-
     if vepsilon is None and vsigma is None:
         raise ValueError("At least one of vepsilon or vsigma must be provided.")
     model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
         model_gradient_sampling_interval
     )
-    if not backend_utils.is_backend_available():
-        raise RuntimeError("Native 3D HVP requires the compiled backend.")
     if epsilon.device.type not in {"cpu", "cuda"}:
         raise NotImplementedError("Native 3D HVP currently supports CPU and CUDA only.")
 
-    from .maxwell3d import maxwell3d
     from .maxwell3d_born import born3d
 
     epsilon_req = _clone_param(epsilon)
     sigma_req = _clone_param(sigma)
     mu_fixed = mu.detach()
-    if vepsilon is None:
-        vepsilon = torch.zeros_like(epsilon_req)
-    if vsigma is None:
-        vsigma = torch.zeros_like(sigma_req)
+    vepsilon_req = _clone_param(
+        torch.zeros_like(epsilon_req) if vepsilon is None else vepsilon
+    )
+    vsigma_req = _clone_param(
+        torch.zeros_like(sigma_req) if vsigma is None else vsigma
+    )
     storage_compression = (
         "bf16"
         if epsilon_req.device.type == "cuda" and epsilon_req.dtype == torch.float32
         else False
     )
 
-    predicted_data = maxwell3d(
+    born_outputs = born3d(
         epsilon_req,
         sigma_req,
         mu_fixed,
@@ -1245,27 +1235,9 @@ def maxwell3d_receiver_hvp_native(
         source_amplitude=source_amplitude,
         source_location=source_location,
         receiver_location=receiver_location,
-        stencil=stencil,
-        pml_width=pml_width,
-        max_vel=max_vel,
-        nt=nt,
-        model_gradient_sampling_interval=model_gradient_sampling_interval,
-        source_component=source_component,
-        receiver_component=receiver_component,
-        python_backend=False,
-        storage_compression=storage_compression,
-    )[-1]
-    delta_predicted_data = born3d(
-        epsilon_req,
-        sigma_req,
-        mu_fixed,
-        grid_spacing=grid_spacing,
-        dt=dt,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        depsilon=vepsilon,
-        dsigma=vsigma,
+        bg_receiver_location=receiver_location,
+        depsilon=vepsilon_req,
+        dsigma=vsigma_req,
         stencil=stencil,
         pml_width=pml_width,
         max_vel=max_vel,
@@ -1277,13 +1249,17 @@ def maxwell3d_receiver_hvp_native(
         python_backend=False,
         storage_mode="device",
         storage_compression=storage_compression,
-    )[-1]
-    hvp_epsilon, hvp_sigma = _directional_receiver_hvp(
+    )
+    predicted_data = born_outputs[-2]
+    delta_predicted_data = born_outputs[-1]
+    hvp_epsilon, hvp_sigma = _directional_receiver_hvp_from_born(
         params=(epsilon_req, sigma_req),
+        direction_params=(vepsilon_req, vsigma_req),
         observed_data=observed_data,
         misfit_fn=misfit_fn,
         predicted_data=predicted_data,
         delta_predicted_data=delta_predicted_data,
+        hessian_mode=hessian_mode,
     )
     return hvp_epsilon, hvp_sigma
 

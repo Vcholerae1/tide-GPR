@@ -7,7 +7,7 @@ import torch
 from .. import staggered
 from ..grid_utils import _normalize_grid_spacing_2d, _normalize_pml_width_2d
 from ..padding import create_or_pad, zero_interior
-from ..storage import STORAGE_DEVICE
+from ..storage import STORAGE_DEVICE, _resolve_storage_compression
 from ..utils import (
     C0,
     EP0,
@@ -20,7 +20,6 @@ from .tm2d_born_python import borntm_python
 from .tm2d_helpers import (
     _init_tm_wavefield,
     _prepare_tm2d_source_injection,
-    _resolve_tm2d_storage_spec,
 )
 
 
@@ -68,6 +67,7 @@ def borntm_c_cuda(
     background_cache: dict[str, Any] | None = None,
     capture_background_cache: bool = False,
     capture_background_adjoint: bool = False,
+    enable_second_order: bool = True,
 ):
     from .. import backend_utils
 
@@ -573,10 +573,10 @@ def borntm_c_cuda(
             "Native TM2D Born model/background gradients on CPU currently require "
             "model_gradient_sampling_interval in {0, 1}."
         )
-    _, _, storage_bytes_per_elem, storage_format = _resolve_tm2d_storage_spec(
-        storage_compression=storage_compression,
-        dtype=dtype,
-        device=device,
+    _, _, storage_bytes_per_elem, storage_format = _resolve_storage_compression(
+        storage_compression,
+        dtype,
+        device,
         context="storage_compression",
     )
 
@@ -712,6 +712,7 @@ def borntm_c_cuda(
             cached_lambda_store,
             capture_background_adjoint,
             background_n_shots,
+            enable_second_order,
         )
         (
             dEy_out,
@@ -742,6 +743,11 @@ def borntm_c_cuda(
                 "storage_format": ctx_data["storage_format"],
                 "shot_bytes_uncomp": ctx_data["shot_bytes_uncomp"],
                 "n_shots": n_shots,
+                "second_order_enabled": bool(ctx_data["enable_second_order"]),
+                "scattered_history_bytes": sum(
+                    tensor.numel() * tensor.element_size()
+                    for tensor in ctx_data["direct_snapshot_tensors"]
+                ),
             }
     else:
         forward_func = backend_utils.get_backend_function(

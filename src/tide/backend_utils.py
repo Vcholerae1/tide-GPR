@@ -27,6 +27,7 @@ _SUPPORTED_PASSES = (
     "forward",
     "forward_with_storage",
     "backward",
+    "background_vjp_reuse",
     "born_forward",
     "born_forward_with_storage",
     "born_tangent_forward_with_storage",
@@ -151,6 +152,69 @@ _B = c_bool
 type _Spec = list[tuple[Any, int, str]]
 
 
+def _spec_names(spec: _Spec) -> tuple[str, ...]:
+    """Expand the human-readable field names in a signature specification."""
+
+    names: list[str] = []
+    for _, count, comment in spec:
+        field_names = [name.strip() for name in comment.split(",") if name.strip()]
+        if len(field_names) != count:
+            raise ValueError(
+                f"backend signature field declares {count} values but "
+                f"names {field_names!r}"
+            )
+        names.extend(field_names)
+    return tuple(names)
+
+
+def _validate_template_specs() -> None:
+    """Validate the declarative ABI before a shared-library call is made."""
+
+    global _TEMPLATE_SPECS_VALIDATED
+    if _TEMPLATE_SPECS_VALIDATED:
+        return
+    for template_name, spec in _TEMPLATE_SPECS.items():
+        if not spec:
+            raise ValueError(f"backend signature {template_name!r} is empty")
+        names: list[str] = []
+        for index, field in enumerate(spec):
+            if len(field) != 3:
+                raise ValueError(
+                    f"backend signature {template_name!r} field {index} "
+                    "must be (ctype, count, names)"
+                )
+            _, count, comment = field
+            if not isinstance(count, int) or count <= 0:
+                raise ValueError(
+                    f"backend signature {template_name!r} field {index} "
+                    "must have a positive integer count"
+                )
+            field_names = [name.strip() for name in comment.split(",") if name.strip()]
+            if len(field_names) != count:
+                raise ValueError(
+                    f"backend signature {template_name!r} field {index} declares "
+                    f"{count} values but names {field_names!r}"
+                )
+            names.extend(field_names)
+        if len(names) != len(set(names)):
+            raise ValueError(
+                f"backend signature {template_name!r} contains duplicate names"
+            )
+    _TEMPLATE_SPECS_VALIDATED = True
+
+
+def backend_signature(propagator: str, pass_name: str) -> tuple[str, ...]:
+    """Return the ordered logical argument names for a backend operation."""
+
+    template_name = _build_template_name(propagator, pass_name)
+    try:
+        spec = _TEMPLATE_SPECS[template_name]
+    except KeyError as exc:
+        raise KeyError(f"Unknown backend template {template_name!r}.") from exc
+    _validate_template_specs()
+    return _spec_names(spec)
+
+
 def _build(spec: _Spec) -> list[Any]:
     """Flatten a declarative spec into a flat ctypes argtypes list."""
     return [ctype for ctype, n, _ in spec for _ in range(n)]
@@ -238,6 +302,31 @@ _TM_BACKWARD_SPEC: _Spec = [
     *_TM_PML_PROFILES,
     *_TM_COMMON_TAIL,
     *_TM_STORAGE_TAIL,
+    *_TM_BATCHED_FLAGS,
+    (_P, 2, "compute_stream, storage_stream"),
+]
+
+_TM_BACKGROUND_VJP_REUSE_SPEC: _Spec = [
+    (_P, 3, "ca, cb, cq"),
+    (_P, 1, "grad_r"),
+    (_P, 3, "lambda_ey, lambda_hx, lambda_hz"),
+    (_P, 4, "m_lambda_ey_x, m_lambda_ey_z, m_lambda_hx_z, m_lambda_hz_x"),
+    (
+        _P,
+        6,
+        "ey_store_1, ey_store_3, ey_filenames, curl_store_1, curl_store_3, curl_filenames",
+    ),
+    (_P, 1, "grad_f"),
+    (_P, 2, "grad_ca, grad_cb"),
+    (_P, 2, "grad_ca_shot, grad_cb_shot"),
+    *_TM_PML_PROFILES,
+    *_TM_COMMON_TAIL,
+    (
+        _I,
+        4,
+        "storage_mode, storage_format, shot_bytes_uncomp, background_n_shots",
+    ),
+    (_B, 2, "ca_requires_grad, cb_requires_grad"),
     *_TM_BATCHED_FLAGS,
     (_P, 2, "compute_stream, storage_stream"),
 ]
@@ -476,7 +565,7 @@ _3D_BORN_FORWARD_SPEC: _Spec = [
         "dm_hz_y, dm_hy_z, dm_hx_z, dm_hz_x, dm_hy_x, dm_hx_y, "
         "dm_ey_z, dm_ez_y, dm_ez_x, dm_ex_z, dm_ex_y, dm_ey_x",
     ),
-    (_P, 1, "r"),
+    (_P, 2, "r, background_r"),
     *_3D_PML_PROFILES,
     *_3D_COMMON_TAIL,
     *_3D_BATCHED_FLAGS,
@@ -499,7 +588,7 @@ _3D_BORN_FORWARD_WITH_STORAGE_SPEC: _Spec = [
         "dm_hz_y, dm_hy_z, dm_hx_z, dm_hz_x, dm_hy_x, dm_hx_y, "
         "dm_ey_z, dm_ez_y, dm_ez_x, dm_ex_z, dm_ex_y, dm_ey_x",
     ),
-    (_P, 1, "r"),
+    (_P, 2, "r, background_r"),
     (
         _P,
         18,
@@ -580,6 +669,7 @@ _TEMPLATE_SPECS: dict[str, _Spec] = {
     "maxwell_tm_forward": _TM_FORWARD_SPEC,
     "maxwell_tm_forward_with_storage": _TM_FORWARD_WITH_STORAGE_SPEC,
     "maxwell_tm_backward": _TM_BACKWARD_SPEC,
+    "maxwell_tm_background_vjp_reuse": _TM_BACKGROUND_VJP_REUSE_SPEC,
     "maxwell_tm_born_forward": _TM_BORN_FORWARD_SPEC,
     "maxwell_tm_born_forward_with_storage": _TM_BORN_FORWARD_WITH_STORAGE_SPEC,
     "maxwell_tm_born_tangent_forward_with_storage": (
@@ -598,6 +688,7 @@ _TEMPLATE_SPECS: dict[str, _Spec] = {
 
 _ARGTYPES_CACHE: dict[tuple[str, str], list[Any]] = {}
 _ARGTYPES_INITIALIZED = False
+_TEMPLATE_SPECS_VALIDATED = False
 
 
 def _torch_dtype_to_backend_dtype(dtype: torch.dtype) -> str:
@@ -608,6 +699,7 @@ def _torch_dtype_to_backend_dtype(dtype: torch.dtype) -> str:
 
 
 def _template_argtypes(template_name: str, backend_dtype: str) -> list[Any]:
+    _validate_template_specs()
     cache_key = (template_name, backend_dtype)
     cached = _ARGTYPES_CACHE.get(cache_key)
     if cached is not None:
@@ -777,6 +869,27 @@ def get_backend_function(
     func.argtypes = _template_argtypes(template_name, dtype_str)
     func.restype = None
     return func
+
+
+def get_tm2d_full_hvp_incremental_adjoint_function(
+    accuracy: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> CFunctionPointer:
+    """Return the fused TM2D full-HVP incremental-adjoint backend.
+
+    The versioned native symbol retains its historical
+    ``born_backward_bggrad`` ABI name for binary compatibility.  New code uses
+    this semantic resolver so that the implementation detail cannot leak into
+    Gauss-Newton dispatch.
+    """
+    return get_backend_function(
+        "maxwell_tm",
+        "born_backward_bggrad",
+        accuracy,
+        dtype,
+        device,
+    )
 
 
 def tensor_to_ptr(tensor: torch.Tensor | None) -> int:

@@ -430,6 +430,77 @@ def test_maxwelltm_hvp_native_supports_nonzero_pml_cpu():
         torch.testing.assert_close(module_out, func_out)
 
 
+@pytest.mark.skipif(
+    not backend_utils.is_backend_available(), reason="native backend not available"
+)
+def test_tm2d_full_hvp_equals_gn_plus_second_order_vjp_cpu():
+    from tide.maxwell.tm2d_born_autograd import (
+        tm2d_receiver_second_order_vjp_native,
+    )
+
+    device = torch.device("cpu")
+    case = _build_tm_case(device)
+    observed_data = _tm_observed_data(case, device)
+    forward_outputs = tide.maxwelltm(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        grid_spacing=case["dx"],
+        dt=case["dt"],
+        source_amplitude=case["source_amplitude"],
+        source_location=case["source_location"],
+        receiver_location=case["receiver_location"],
+        stencil=2,
+        pml_width=1,
+    )
+    predicted_data = forward_outputs[-1]
+    data_gradient = predicted_data - observed_data + 0.01 * predicted_data.cos()
+    common = {
+        "grid_spacing": case["dx"],
+        "dt": case["dt"],
+        "source_amplitude": case["source_amplitude"],
+        "source_location": case["source_location"],
+        "receiver_location": case["receiver_location"],
+        "stencil": 2,
+        "pml_width": 1,
+    }
+    hvp_common = {
+        **common,
+        "observed_data": observed_data,
+        "vepsilon": case["depsilon"],
+        "misfit": _receiver_misfit,
+    }
+    full = tide.maxwelltm_hvp(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        hessian_mode="full",
+        **hvp_common,
+    )
+    gauss_newton = tide.maxwelltm_hvp(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        hessian_mode="gauss_newton",
+        **hvp_common,
+    )
+    correction = tm2d_receiver_second_order_vjp_native(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        vepsilon=case["depsilon"],
+        data_gradient=data_gradient,
+        **common,
+    )
+    for full_part, gn_part, correction_part in zip(full, gauss_newton, correction):
+        torch.testing.assert_close(
+            full_part,
+            gn_part + correction_part,
+            rtol=2e-4,
+            atol=2e-5,
+        )
+
+
 def test_maxwelltm_hvp_python_backend_rejects_gradient_sampling_interval_gt1():
     device = torch.device("cpu")
     case = _build_tm_case(device)
@@ -621,14 +692,25 @@ def test_tm2d_linearization_context_reuses_background_for_direction_batch():
     not backend_utils.is_backend_available() or not torch.cuda.is_available(),
     reason="native CUDA backend not available",
 )
-@pytest.mark.parametrize("block_size", [1, 2, 3])
+@pytest.mark.parametrize("block_size", [1, 2, 3, 4])
 @pytest.mark.parametrize(
     ("storage_compression", "relative_tolerance"),
     [(False, 5e-5), ("bf16", 1e-2)],
 )
 def test_tm2d_linearization_context_fuses_gauss_newton_directions(
-    block_size, storage_compression, relative_tolerance
+    block_size, storage_compression, relative_tolerance, monkeypatch
 ):
+    def reject_full_hvp_backend(*_args, **_kwargs):
+        raise AssertionError(
+            "Gauss-Newton HVP must not resolve the full-HVP "
+            "incremental-adjoint backend."
+        )
+
+    monkeypatch.setattr(
+        backend_utils,
+        "get_tm2d_full_hvp_incremental_adjoint_function",
+        reject_full_hvp_backend,
+    )
     device = torch.device("cuda")
     case = _build_tm_case(device)
     source_amplitude = torch.cat(
@@ -686,6 +768,7 @@ def test_tm2d_linearization_context_fuses_gauss_newton_directions(
         assert context.background_builds == 1
         assert context.reused_directions == 2
         assert context.batched_blocks == (2 + block_size - 1) // block_size
+        assert context.scattered_history_bytes == 0
 
     expected_parts = [
         tide.maxwelltm_hvp(

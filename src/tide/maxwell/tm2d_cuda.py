@@ -9,6 +9,7 @@ from ..callbacks import Callback, CallbackState
 from ..dispersion import DebyeDispersion
 from ..grid_utils import _normalize_grid_spacing_2d, _normalize_pml_width_2d
 from ..padding import create_or_pad, zero_interior
+from ..storage import _resolve_storage_compression
 from ..utils import C0, EP0, compile_material_coefficients
 from .common import (
     _init_polarization_state,
@@ -21,7 +22,6 @@ from .tm2d_helpers import (
     _init_tm_wavefield,
     _physical_tm2d_callback_wavefields,
     _prepare_tm2d_source_injection,
-    _resolve_tm2d_storage_spec,
     _set_tm2d_fp16_io_shot_scale,
     _unscale_tm2d_outputs,
 )
@@ -486,8 +486,12 @@ def maxwell_c_cuda(
     pml_x0 = fd_pad_list[2] + pml_width_list[2]
     pml_x1 = padded_nx - fd_pad_list[3] - pml_width_list[3]
 
-    requires_grad = epsilon.requires_grad or sigma.requires_grad
-    if has_dispersion and (requires_grad or (save_snapshots is True)):
+    model_requires_grad = epsilon.requires_grad or sigma.requires_grad
+    source_requires_grad = bool(
+        source_amplitude is not None and source_amplitude.requires_grad
+    )
+    autograd_required = model_requires_grad or source_requires_grad
+    if has_dispersion and (autograd_required or (save_snapshots is True)):
         warnings.warn(
             "Debye native backend currently supports forward inference only; "
             "falling back to the Python backend for gradients or snapshot storage.",
@@ -537,15 +541,17 @@ def maxwell_c_cuda(
             "torch.func transforms are not supported for the C/CUDA backend."
         )
 
-    _, _, storage_bytes_per_elem, storage_format = _resolve_tm2d_storage_spec(
-        storage_compression=storage_compression,
-        dtype=dtype,
-        device=device,
+    _, _, storage_bytes_per_elem, storage_format = _resolve_storage_compression(
+        storage_compression,
+        dtype,
+        device,
         context="storage_compression",
     )
 
-    do_save_snapshots = requires_grad if save_snapshots is None else save_snapshots
-    if requires_grad and save_snapshots is False:
+    do_save_snapshots = (
+        model_requires_grad if save_snapshots is None else save_snapshots
+    )
+    if model_requires_grad and save_snapshots is False:
         warnings.warn(
             "save_snapshots=False but model parameters require gradients. "
             "Backward pass will fail.",
@@ -561,7 +567,7 @@ def maxwell_c_cuda(
     if device.type == "cpu" and storage_mode_str == "cpu":
         storage_mode_str = "device"
 
-    needs_storage = do_save_snapshots and requires_grad
+    needs_storage = do_save_snapshots and model_requires_grad
     effective_storage_mode_str = storage_mode_str
     if not needs_storage:
         if effective_storage_mode_str == "auto":
@@ -614,7 +620,10 @@ def maxwell_c_cuda(
     if dispersion is not None:
         callback_models["dispersion"] = dispersion
 
-    if requires_grad and do_save_snapshots:
+    use_custom_autograd = autograd_required and (
+        not model_requires_grad or do_save_snapshots
+    )
+    if use_custom_autograd:
         result = MaxwellTMForwardFunc.apply(
             ca,
             cb,

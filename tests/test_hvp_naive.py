@@ -1,3 +1,5 @@
+import importlib
+
 import pytest
 import torch
 
@@ -36,6 +38,11 @@ def _assert_finite_nonzero_hvp(*parts: torch.Tensor) -> None:
     flat = torch.cat([part.reshape(-1).double().cpu() for part in parts])
     assert torch.isfinite(flat).all()
     assert flat.norm() > 0
+
+
+def _fail_if_separate_forward_is_called(*args, **kwargs):
+    del args, kwargs
+    raise AssertionError("HVP must obtain the background trace from its Born pass")
 
 
 def _tm2d_exact_hvp(
@@ -191,6 +198,35 @@ def test_tm2d_receiver_hvp_naive_matches_exact_nested_autodiff():
     _assert_relative_norm_close(hvp_sigma_proto, hvp_sigma_exact, rtol=1e-6)
 
 
+def test_tm2d_receiver_hvp_naive_does_not_run_a_separate_forward(monkeypatch):
+    case = _build_tm2d_native_case()
+    forward_module = importlib.import_module("tide.maxwell.tm2d")
+    monkeypatch.setattr(
+        forward_module,
+        "maxwelltm",
+        _fail_if_separate_forward_is_called,
+    )
+
+    result = tm2d_receiver_hvp_naive(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        vepsilon=case["vepsilon"],
+        vsigma=case["vsigma"],
+        grid_spacing=case["grid_spacing"],
+        dt=case["dt"],
+        source_amplitude=case["source_amplitude"],
+        source_location=case["source_location"],
+        receiver_location=case["receiver_location"],
+        observed_data=case["observed_data"],
+        misfit_fn=_nonlinear_receiver_misfit,
+        pml_width=2,
+        stencil=2,
+    )
+
+    _assert_finite_nonzero_hvp(*result)
+
+
 def test_tm2d_full_and_gauss_newton_hvp_match_at_zero_least_squares_residual():
     case = _build_tm2d_native_case()
     predicted = tide.maxwelltm(
@@ -312,6 +348,38 @@ def test_tm2d_receiver_hvp_native_returns_coeff_hvp_without_pml():
     )
 
     _assert_finite_nonzero_hvp(hvp_epsilon_native, hvp_sigma_native)
+
+
+@pytest.mark.skipif(
+    not backend_utils.is_backend_available(), reason="native backend not available"
+)
+def test_tm2d_receiver_hvp_native_does_not_run_a_separate_forward(monkeypatch):
+    case = _tm2d_native_case_on(torch.device("cpu"))
+    forward_module = importlib.import_module("tide.maxwell.tm2d")
+    monkeypatch.setattr(
+        forward_module,
+        "maxwelltm",
+        _fail_if_separate_forward_is_called,
+    )
+
+    result = tm2d_receiver_hvp_native(
+        case["epsilon"],
+        case["sigma"],
+        case["mu"],
+        vepsilon=case["vepsilon"],
+        vsigma=case["vsigma"],
+        grid_spacing=case["grid_spacing"],
+        dt=case["dt"],
+        source_amplitude=case["source_amplitude"],
+        source_location=case["source_location"],
+        receiver_location=case["receiver_location"],
+        observed_data=case["observed_data"],
+        misfit_fn=_nonlinear_receiver_misfit,
+        pml_width=0,
+        stencil=2,
+    )
+
+    _assert_finite_nonzero_hvp(*result)
 
 
 @pytest.mark.skipif(
@@ -438,6 +506,48 @@ def test_maxwell3d_receiver_hvp_naive_matches_exact_nested_autodiff():
     _assert_relative_norm_close(hvp_sigma_proto, hvp_sigma_exact, rtol=1e-6)
 
 
+def test_maxwell3d_receiver_hvp_naive_does_not_run_a_separate_forward(monkeypatch):
+    dtype = torch.float64
+    nz, ny, nx = 5, 6, 7
+    nt = 8
+    dt = 4e-11
+    epsilon = torch.full((nz, ny, nx), 4.0, dtype=dtype)
+    sigma = torch.full_like(epsilon, 3e-4)
+    mu = torch.ones_like(epsilon)
+    source_location = torch.tensor([[[2, 2, 1]]], dtype=torch.long)
+    receiver_location = torch.tensor([[[2, 2, 4]]], dtype=torch.long)
+    source_amplitude = tide.ricker(
+        80e6, nt, dt, peak_time=1.0 / 80e6, dtype=dtype
+    ).view(1, 1, nt)
+    forward_module = importlib.import_module("tide.maxwell.maxwell3d")
+    monkeypatch.setattr(
+        forward_module,
+        "maxwell3d",
+        _fail_if_separate_forward_is_called,
+    )
+
+    result = maxwell3d_receiver_hvp_naive(
+        epsilon,
+        sigma,
+        mu,
+        vepsilon=torch.full_like(epsilon, 0.01),
+        vsigma=torch.full_like(sigma, 0.01),
+        grid_spacing=(0.03, 0.02, 0.02),
+        dt=dt,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        observed_data=torch.zeros(nt, 1, 1, dtype=dtype),
+        misfit_fn=_nonlinear_receiver_misfit,
+        pml_width=2,
+        stencil=2,
+        source_component="ey",
+        receiver_component="ey",
+    )
+
+    _assert_finite_nonzero_hvp(*result)
+
+
 @pytest.mark.skipif(
     not backend_utils.is_backend_available(), reason="native backend not available"
 )
@@ -492,6 +602,51 @@ def test_maxwell3d_receiver_hvp_native_returns_coeff_hvp():
     )
 
     _assert_finite_nonzero_hvp(hvp_epsilon_native, hvp_sigma_native)
+
+
+@pytest.mark.skipif(
+    not backend_utils.is_backend_available(), reason="native backend not available"
+)
+def test_maxwell3d_receiver_hvp_native_does_not_run_a_separate_forward(monkeypatch):
+    dtype = torch.float64
+    nz, ny, nx = 5, 6, 7
+    nt = 8
+    dt = 4e-11
+    epsilon = torch.full((nz, ny, nx), 4.0, dtype=dtype)
+    sigma = torch.full_like(epsilon, 3e-4)
+    mu = torch.ones_like(epsilon)
+    source_location = torch.tensor([[[2, 2, 1]]], dtype=torch.long)
+    receiver_location = torch.tensor([[[2, 2, 4]]], dtype=torch.long)
+    source_amplitude = tide.ricker(
+        80e6, nt, dt, peak_time=1.0 / 80e6, dtype=dtype
+    ).view(1, 1, nt)
+    forward_module = importlib.import_module("tide.maxwell.maxwell3d")
+    monkeypatch.setattr(
+        forward_module,
+        "maxwell3d",
+        _fail_if_separate_forward_is_called,
+    )
+
+    result = maxwell3d_receiver_hvp_native(
+        epsilon,
+        sigma,
+        mu,
+        vepsilon=torch.full_like(epsilon, 0.01),
+        vsigma=torch.full_like(sigma, 0.01),
+        grid_spacing=(0.03, 0.02, 0.02),
+        dt=dt,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        observed_data=torch.zeros(nt, 1, 1, dtype=dtype),
+        misfit_fn=_nonlinear_receiver_misfit,
+        pml_width=2,
+        stencil=2,
+        source_component="ey",
+        receiver_component="ey",
+    )
+
+    _assert_finite_nonzero_hvp(*result)
 
 
 @pytest.mark.skipif(

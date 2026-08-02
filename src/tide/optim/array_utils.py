@@ -1,63 +1,112 @@
-"""Array helpers for CPU-state optimization prototypes."""
+"""Tensor validation and box-constraint helpers."""
 
 from __future__ import annotations
 
-import numpy as np
-from numpy.typing import ArrayLike, NDArray
-
-from .types import Objective, Preconditioner
+import torch
+from torch import Tensor
 
 
-def _as_float32_vector(
-    name: str, value: ArrayLike, size: int | None = None
-) -> NDArray[np.float32]:
-    array = np.asarray(value, dtype=np.float32).reshape(-1)
-    if size is not None and array.size != size:
-        raise ValueError(f"{name} has size {array.size}, expected {size}.")
-    if not array.flags.c_contiguous:
-        array = np.ascontiguousarray(array)
-    return array.copy()
+def _as_model_tensor(name: str, value: Tensor) -> Tensor:
+    if not isinstance(value, Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor.")
+    if value.layout != torch.strided:
+        raise TypeError(f"{name} must be a dense strided tensor.")
+    if value.dtype not in (torch.float32, torch.float64):
+        raise TypeError(f"{name} must have dtype torch.float32 or torch.float64.")
+    if value.is_complex():
+        raise TypeError(f"{name} must be real.")
+    if value.numel() == 0:
+        raise ValueError(f"{name} must contain at least one element.")
+    return value.detach().clone(memory_format=torch.preserve_format)
 
 
-def _evaluate_objective(
-    objective: Objective,
-    x: NDArray[np.float32],
-    grad: NDArray[np.float32],
-) -> float:
-    return float(objective(x, grad))
+def _as_bound(
+    name: str,
+    value: Tensor | float | None,
+    x: Tensor,
+    *,
+    default: float,
+) -> Tensor:
+    if value is None:
+        return torch.full_like(x, default)
+    bound = torch.as_tensor(value, dtype=x.dtype, device=x.device)
+    try:
+        return torch.broadcast_to(bound, x.shape).clone()
+    except RuntimeError as exc:
+        raise ValueError(f"{name} must be scalar or broadcastable to x.shape.") from exc
 
 
-def _apply_preconditioner(
-    preconditioner: Preconditioner | None,
-    x: NDArray[np.float32],
-    vector: NDArray[np.float32],
-    out: NDArray[np.float32],
-) -> bool:
-    if preconditioner is None:
-        out[:] = vector
-        return False
-    preconditioner(x, vector, out)
-    return True
+def _prepare_bounds(
+    x: Tensor,
+    lower_bounds: Tensor | float | None,
+    upper_bounds: Tensor | float | None,
+) -> tuple[Tensor | None, Tensor | None]:
+    if lower_bounds is None and upper_bounds is None:
+        return None, None
+    lower = _as_bound("lower_bounds", lower_bounds, x, default=-torch.inf)
+    upper = _as_bound("upper_bounds", upper_bounds, x, default=torch.inf)
+    if torch.isnan(lower).any() or torch.isnan(upper).any():
+        raise ValueError("bounds must not contain NaN.")
+    if torch.any(lower > upper):
+        raise ValueError("lower_bounds must be <= upper_bounds.")
+    return lower, upper
 
 
-def _project(
-    x: NDArray[np.float32],
-    lower_bounds: NDArray[np.float32] | None,
-    upper_bounds: NDArray[np.float32] | None,
-    margin: float,
-) -> None:
-    if lower_bounds is None:
-        return
-    np.minimum(x, upper_bounds - margin, out=x)
-    np.maximum(x, lower_bounds + margin, out=x)
+def _project(x: Tensor, lower: Tensor | None, upper: Tensor | None) -> Tensor:
+    if lower is None or upper is None:
+        return x
+    return torch.maximum(torch.minimum(x, upper), lower)
 
 
-def _set_trial_step(
-    x: NDArray[np.float32],
-    xk: NDArray[np.float32],
-    descent: NDArray[np.float32],
-    alpha: float,
-) -> None:
-    np.multiply(descent, np.float32(alpha), out=x)
-    x += xk
+def _projected_gradient(
+    x: Tensor,
+    grad: Tensor,
+    lower: Tensor | None,
+    upper: Tensor | None,
+) -> Tensor:
+    if lower is None or upper is None:
+        return grad
+    result = grad.clone()
+    at_lower = x <= lower
+    at_upper = x >= upper
+    result.masked_fill_(at_lower & (grad > 0), 0)
+    result.masked_fill_(at_upper & (grad < 0), 0)
+    result.masked_fill_(lower == upper, 0)
+    return result
 
+
+def _feasible_direction(
+    x: Tensor,
+    direction: Tensor,
+    lower: Tensor | None,
+    upper: Tensor | None,
+) -> Tensor:
+    if lower is None or upper is None:
+        return direction
+    result = direction.clone()
+    result.masked_fill_((x <= lower) & (result < 0), 0)
+    result.masked_fill_((x >= upper) & (result > 0), 0)
+    result.masked_fill_(lower == upper, 0)
+    return result
+
+
+def _dot(a: Tensor, b: Tensor) -> float:
+    return float(torch.dot(a.reshape(-1), b.reshape(-1)).item())
+
+
+def _norm_inf(value: Tensor) -> float:
+    return float(torch.linalg.vector_norm(value.reshape(-1), ord=torch.inf).item())
+
+
+def _validate_operator_output(name: str, value: Tensor, reference: Tensor) -> Tensor:
+    if not isinstance(value, Tensor):
+        raise TypeError(f"{name} must return a torch.Tensor.")
+    if value.shape != reference.shape:
+        raise ValueError(
+            f"{name} returned shape {tuple(value.shape)}, expected {tuple(reference.shape)}."
+        )
+    if value.device != reference.device:
+        raise ValueError(f"{name} output must be on {reference.device}.")
+    if value.dtype != reference.dtype:
+        raise ValueError(f"{name} output must have dtype {reference.dtype}.")
+    return value.detach().clone(memory_format=torch.preserve_format)

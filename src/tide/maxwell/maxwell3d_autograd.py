@@ -4,13 +4,11 @@ import torch
 
 from ..callbacks import CallbackState
 from ..storage import (
-    _CPU_STORAGE_BUFFERS,
-    STORAGE_CPU,
     STORAGE_DEVICE,
     STORAGE_DISK,
-    TemporaryStorage,
-    _resolve_storage_compression,
-    storage_mode_to_int,
+    SnapshotAllocation,
+    SnapshotAllocator,
+    resolve_snapshot_storage,
 )
 from .common import _make_storage_streams
 
@@ -30,8 +28,6 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         meta: dict[str, Any],
     ) -> tuple[torch.Tensor, ...]:
         from .. import backend_utils
-        import ctypes
-
         (
             az,
             bz,
@@ -109,10 +105,12 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
 
         ca_requires_grad = bool(ca.requires_grad)
         cb_requires_grad = bool(cb.requires_grad)
-        requires_grad = ca_requires_grad or cb_requires_grad
+        source_requires_grad = bool(source_amplitudes_scaled.requires_grad)
+        requires_grad = ca_requires_grad or cb_requires_grad or source_requires_grad
         if not requires_grad:
             raise RuntimeError(
-                "Maxwell3DForwardFunc should only be used when gradients are required."
+                "Maxwell3DForwardFunc requires at least one differentiable coefficient "
+                "or source-amplitude input."
             )
 
         if n_receivers > 0:
@@ -123,20 +121,21 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
 
         step_ratio = max(1, step_ratio)
-        num_steps_stored = (nt + step_ratio - 1) // step_ratio
-        shot_numel = nz * ny * nx
-        _, store_dtype, _, storage_format = _resolve_storage_compression(
-            meta["storage_compression"],
-            dtype,
-            device,
-            context="storage_compression",
-        )
-        shot_bytes_uncomp = shot_numel * store_dtype.itemsize
         storage_mode_str = str(meta["storage_mode_str"]).lower()
         storage_path = str(meta["storage_path"])
-        if device.type == "cpu" and storage_mode_str in {"cpu", "disk"}:
-            storage_mode_str = "device"
-        storage_mode = storage_mode_to_int(storage_mode_str)
+        storage_spec = resolve_snapshot_storage(
+            storage_mode=storage_mode_str,
+            storage_compression=meta["storage_compression"],
+            dtype=dtype,
+            device=device,
+            nt=nt,
+            step_ratio=step_ratio,
+            shot_shape=(n_shots, nz, ny, nx),
+            cpu_alias_modes=("cpu", "disk"),
+        )
+        storage_mode = storage_spec.mode
+        storage_format = storage_spec.format
+        shot_bytes_uncomp = storage_spec.shot_bytes
         eonly_snapshots = (
             bool(meta.get("experimental_eonly_snapshots", False))
             and storage_mode == STORAGE_DEVICE
@@ -149,134 +148,47 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         compute_stream_handle, storage_stream_handle, stream_keepalive = (
             _make_storage_streams(device, storage_mode)
         )
-        backward_storage_objects: list[Any] = []
-        backward_storage_filename_arrays: list[Any] = []
-        char_ptr_type = ctypes.c_char_p
-        is_cuda = device.type == "cuda"
-        empty_store = torch.empty(0, device=device, dtype=store_dtype)
+        snapshot_allocator = SnapshotAllocator(storage_spec, device, storage_path)
 
-        def alloc_storage(requires_grad_cond: bool):
-            store_1 = empty_store
-            store_3 = empty_store
-            filenames_arr = (char_ptr_type * 0)()
-            if not requires_grad_cond:
-                backward_storage_filename_arrays.append(filenames_arr)
-                return store_1, store_3, 0
+        def unpack_storage(
+            allocation: SnapshotAllocation,
+        ) -> tuple[torch.Tensor, torch.Tensor, Any]:
+            return allocation.device, allocation.host, allocation.filenames_ptr
 
-            if storage_mode == STORAGE_DEVICE:
-                store_1 = torch.empty(
-                    num_steps_stored,
-                    n_shots,
-                    nz,
-                    ny,
-                    nx,
-                    device=device,
-                    dtype=store_dtype,
-                )
-            elif storage_mode == STORAGE_CPU:
-                store_1 = torch.empty(
-                    _CPU_STORAGE_BUFFERS,
-                    n_shots,
-                    nz,
-                    ny,
-                    nx,
-                    device=device,
-                    dtype=store_dtype,
-                )
-                store_3 = torch.empty(
-                    num_steps_stored,
-                    n_shots,
-                    nz,
-                    ny,
-                    nx,
-                    device="cpu",
-                    pin_memory=True,
-                    dtype=store_dtype,
-                )
-            elif storage_mode == STORAGE_DISK:
-                storage_obj = TemporaryStorage(storage_path, 1 if is_cuda else n_shots)
-                backward_storage_objects.append(storage_obj)
-                filenames_list = [f.encode("utf-8") for f in storage_obj.get_filenames()]
-                filenames_arr = (char_ptr_type * len(filenames_list))()
-                for i_file, f_name in enumerate(filenames_list):
-                    filenames_arr[i_file] = ctypes.cast(
-                        ctypes.create_string_buffer(f_name), char_ptr_type
-                    )
-                if is_cuda:
-                    store_1 = torch.empty(
-                        _CPU_STORAGE_BUFFERS,
-                        n_shots,
-                        nz,
-                        ny,
-                        nx,
-                        device=device,
-                        dtype=store_dtype,
-                    )
-                    store_3 = torch.empty(
-                        _CPU_STORAGE_BUFFERS,
-                        n_shots,
-                        nz,
-                        ny,
-                        nx,
-                        device="cpu",
-                        pin_memory=True,
-                        dtype=store_dtype,
-                    )
-                else:
-                    store_1 = torch.empty(
-                        n_shots, nz, ny, nx, device=device, dtype=store_dtype
-                    )
-
-            backward_storage_filename_arrays.append(filenames_arr)
-            filenames_ptr = (
-                ctypes.cast(filenames_arr, ctypes.c_void_p)
-                if storage_mode == STORAGE_DISK
-                else 0
-            )
-            return store_1, store_3, filenames_ptr
-
-        def alloc_final_e_storage(requires_grad_cond: bool):
-            filenames_arr = (char_ptr_type * 0)()
-            backward_storage_filename_arrays.append(filenames_arr)
-            if not requires_grad_cond:
-                return empty_store, empty_store, 0
-            if storage_mode != STORAGE_DEVICE:
-                raise RuntimeError(
-                    "E-only 3D snapshot storage is only supported on device storage."
-                )
-            store_1 = torch.empty(
-                n_shots,
-                nz,
-                ny,
-                nx,
-                device=device,
-                dtype=store_dtype,
-            )
-            return store_1, empty_store, 0
-
-        store_ex, store_ex_host, store_ex_filenames_ptr = alloc_storage(ca_requires_grad)
-        store_ey, store_ey_host, store_ey_filenames_ptr = alloc_storage(ca_requires_grad)
-        store_ez, store_ez_host, store_ez_filenames_ptr = alloc_storage(ca_requires_grad)
+        store_ex, store_ex_host, store_ex_filenames_ptr = unpack_storage(
+            snapshot_allocator.allocate(ca_requires_grad)
+        )
+        store_ey, store_ey_host, store_ey_filenames_ptr = unpack_storage(
+            snapshot_allocator.allocate(ca_requires_grad)
+        )
+        store_ez, store_ez_host, store_ez_filenames_ptr = unpack_storage(
+            snapshot_allocator.allocate(ca_requires_grad)
+        )
         if eonly_snapshots:
-            store_curl_x, store_curl_x_host, store_curl_x_filenames_ptr = (
-                alloc_final_e_storage(True)
+            empty_curl_storage = [snapshot_allocator.allocate(False) for _ in range(3)]
+            store_curl_x, store_curl_y, store_curl_z = snapshot_allocator.group(
+                3, True, final_only=True
             )
-            store_curl_y, store_curl_y_host, store_curl_y_filenames_ptr = (
-                alloc_final_e_storage(True)
+            store_curl_x_host, store_curl_y_host, store_curl_z_host = (
+                allocation.host for allocation in empty_curl_storage
             )
-            store_curl_z, store_curl_z_host, store_curl_z_filenames_ptr = (
-                alloc_final_e_storage(True)
-            )
+            (
+                store_curl_x_filenames_ptr,
+                store_curl_y_filenames_ptr,
+                store_curl_z_filenames_ptr,
+            ) = (allocation.filenames_ptr for allocation in empty_curl_storage)
         else:
-            store_curl_x, store_curl_x_host, store_curl_x_filenames_ptr = alloc_storage(
-                cb_requires_grad
+            store_curl_x, store_curl_x_host, store_curl_x_filenames_ptr = unpack_storage(
+                snapshot_allocator.allocate(cb_requires_grad)
             )
-            store_curl_y, store_curl_y_host, store_curl_y_filenames_ptr = alloc_storage(
-                cb_requires_grad
+            store_curl_y, store_curl_y_host, store_curl_y_filenames_ptr = unpack_storage(
+                snapshot_allocator.allocate(cb_requires_grad)
             )
-            store_curl_z, store_curl_z_host, store_curl_z_filenames_ptr = alloc_storage(
-                cb_requires_grad
+            store_curl_z, store_curl_z_host, store_curl_z_filenames_ptr = unpack_storage(
+                snapshot_allocator.allocate(cb_requires_grad)
             )
+        backward_storage_objects = snapshot_allocator.storage_objects
+        backward_storage_filename_arrays = snapshot_allocator.filename_arrays
 
         forward_func = backend_utils.get_backend_function(
             "maxwell_3d", "forward_with_storage", accuracy, dtype, device
@@ -538,6 +450,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         }
         ctx.backward_storage_objects = backward_storage_objects
         ctx.backward_storage_filename_arrays = backward_storage_filename_arrays
+        ctx.snapshot_allocator = snapshot_allocator
 
         return (
             Ex,

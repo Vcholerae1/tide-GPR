@@ -1,9 +1,11 @@
 from collections.abc import Callable, Sequence
+from typing import Literal
 
 import torch
 
 from ..callbacks import Callback
 from ..cfl import cfl_condition
+from ..core import BackendPreference, compile_simulation_plan, select_backend
 from ..dispersion import DebyeDispersion
 from ..grid_utils import _normalize_grid_spacing_3d
 from ..resampling import downsample_and_movedim, upsample
@@ -31,6 +33,7 @@ from .common import (
     _structured_vmap_state_in_dim,
     _wrap_structured_callback,
 )
+from .module_utils import _register_maxwell_model
 from .maxwell3d_cuda import maxwell3d_c_cuda
 from .maxwell3d_python import maxwell3d_python
 from .validation_internal import (
@@ -71,19 +74,14 @@ class Maxwell3D(torch.nn.Module):
         sigma_requires_grad: bool | None = None,
     ) -> None:
         super().__init__()
-        _validate_optional_bool("epsilon_requires_grad", epsilon_requires_grad)
-        _validate_optional_bool("sigma_requires_grad", sigma_requires_grad)
-        _validate_tensor_arg("epsilon", epsilon)
-        _validate_tensor_arg("sigma", sigma)
-        _validate_tensor_arg("mu", mu)
-        if epsilon_requires_grad is None:
-            epsilon_requires_grad = epsilon.requires_grad
-        if sigma_requires_grad is None:
-            sigma_requires_grad = sigma.requires_grad
-
-        self.epsilon = torch.nn.Parameter(epsilon, requires_grad=epsilon_requires_grad)
-        self.sigma = torch.nn.Parameter(sigma, requires_grad=sigma_requires_grad)
-        self.register_buffer("mu", mu)
+        _register_maxwell_model(
+            self,
+            epsilon,
+            sigma,
+            mu,
+            epsilon_requires_grad=epsilon_requires_grad,
+            sigma_requires_grad=sigma_requires_grad,
+        )
         self.grid_spacing = grid_spacing
 
     @runtime_typecheck
@@ -214,6 +212,7 @@ class Maxwell3D(torch.nn.Module):
         linearize_source: bool = True,
         source_component: str = "ey",
         receiver_component: str = "ey",
+        hessian_mode: Literal["full", "gauss_newton"] = "full",
         python_backend: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         _validate_optional_bool("python_backend", python_backend)
@@ -241,6 +240,7 @@ class Maxwell3D(torch.nn.Module):
             linearize_source=linearize_source,
             source_component=source_component,
             receiver_component=receiver_component,
+            hessian_mode=hessian_mode,
             python_backend=python_backend,
         )
 
@@ -268,6 +268,7 @@ def maxwell3d_hvp(
     linearize_source: bool = True,
     source_component: str = "ey",
     receiver_component: str = "ey",
+    hessian_mode: Literal["full", "gauss_newton"] = "full",
     python_backend: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply a receiver-space Hessian to a model direction.
@@ -301,16 +302,36 @@ def maxwell3d_hvp(
     model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
         model_gradient_sampling_interval
     )
+    if hessian_mode not in {"full", "gauss_newton"}:
+        raise ValueError(
+            f"hessian_mode must be 'full' or 'gauss_newton', got {hessian_mode!r}."
+        )
     misfit_fn = _default_receiver_misfit if misfit is None else misfit
     if not callable(misfit_fn):
         raise TypeError("misfit must be callable when provided.")
 
-    if python_backend:
-        if model_gradient_sampling_interval > 1:
-            raise NotImplementedError(
-                "Python 3D HVP currently requires "
-                "model_gradient_sampling_interval in {0, 1}."
-            )
+    plan = compile_simulation_plan(
+        operation="hvp",
+        dimension="em3d",
+        epsilon=epsilon,
+        sigma=sigma,
+        mu=mu,
+        python_backend=python_backend,
+        storage_mode="device",
+        model_gradient_sampling_interval=model_gradient_sampling_interval,
+        hessian_mode=hessian_mode,
+        requires_gradients=True,
+        source_component=source_component,
+        receiver_component=receiver_component,
+    )
+    from .. import backend_utils
+
+    decision = select_backend(
+        plan,
+        native_available=backend_utils.is_backend_available(),
+    )
+
+    if decision.selected is BackendPreference.PYTHON:
         from .maxwell3d_born_autograd import maxwell3d_receiver_hvp_naive
 
         return maxwell3d_receiver_hvp_naive(
@@ -334,6 +355,7 @@ def maxwell3d_hvp(
             linearize_source=linearize_source,
             source_component=source_component,
             receiver_component=receiver_component,
+            hessian_mode=hessian_mode,
         )
 
     from .maxwell3d_born_autograd import maxwell3d_receiver_hvp_native
@@ -359,6 +381,7 @@ def maxwell3d_hvp(
         linearize_source=linearize_source,
         source_component=source_component,
         receiver_component=receiver_component,
+        hessian_mode=hessian_mode,
     )
 
 
@@ -415,6 +438,7 @@ def maxwell3d(
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
     compute_mode: str = "native",
+    fallback: Literal["reference", "error"] = "reference",
 ):
     """3D Maxwell equations solver.
 
@@ -507,6 +531,32 @@ def maxwell3d(
     m_ex_y = batch_meta["state_tensors"]["m_ex_y"]
     m_ey_x = batch_meta["state_tensors"]["m_ey_x"]
 
+    plan = compile_simulation_plan(
+        operation="forward",
+        dimension="em3d",
+        epsilon=epsilon,
+        sigma=sigma,
+        mu=mu,
+        python_backend=python_backend,
+        execution_backend=execution_backend,
+        compute_mode=compute_mode,
+        storage_mode=storage_mode,
+        storage_path=storage_path,
+        storage_compression=storage_compression,
+        storage_bytes_limit_device=storage_bytes_limit_device,
+        storage_bytes_limit_host=storage_bytes_limit_host,
+        storage_chunk_steps=storage_chunk_steps,
+        n_threads=n_threads,
+        fallback=fallback,
+        has_callbacks=forward_callback is not None or backward_callback is not None,
+        source_component=source_component,
+        receiver_component=receiver_component,
+        model_gradient_sampling_interval=model_gradient_sampling_interval,
+    )
+    compute_mode = plan.compute_mode.value
+    storage_mode = plan.storage.mode.value
+    execution_backend = plan.runtime.execution_backend
+
     model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
         model_gradient_sampling_interval
     )
@@ -566,18 +616,19 @@ def maxwell3d(
     elif source_amplitude_internal is not None:
         nt_internal = source_amplitude_internal.shape[-1]
 
-    if isinstance(python_backend, bool):
-        use_python = python_backend
-    elif isinstance(python_backend, str):
-        use_python = True
-    else:
-        raise TypeError(
-            f"python_backend must be bool or str, but got {type(python_backend).__name__}"
-        )
+    from .. import backend_utils
+
+    decision = select_backend(
+        plan,
+        native_available=backend_utils.is_backend_available(),
+    )
+    use_python = decision.selected is BackendPreference.PYTHON
     if compute_mode not in {"native", "fp16_io"}:
         raise ValueError("compute_mode must be 'native' or 'fp16_io'.")
     if compute_mode == "fp16_io" and use_python:
-        raise NotImplementedError("compute_mode='fp16_io' requires the native CUDA backend.")
+        raise NotImplementedError(
+            "compute_mode='fp16_io' requires the native CUDA backend."
+        )
 
     if batch_meta["model_batched"] and use_python:
         if forward_callback is not None or backward_callback is not None:
@@ -1008,6 +1059,7 @@ def maxwell3d(
         n_threads,
         dispersion,
         compute_mode=compute_mode,
+        fallback=fallback,
     )
 
     (

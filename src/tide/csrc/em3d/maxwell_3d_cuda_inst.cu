@@ -3265,6 +3265,7 @@ extern "C" void FUNC(born_forward)(
     TIDE_DTYPE *const dm_ex_y,
     TIDE_DTYPE *const dm_ey_x,
     TIDE_DTYPE *const r,
+    TIDE_DTYPE *const background_r,
     TIDE_DTYPE const *const az,
     TIDE_DTYPE const *const bz,
     TIDE_DTYPE const *const azh,
@@ -3355,10 +3356,13 @@ extern "C" void FUNC(born_forward)(
   }
 
   TIDE_DTYPE const *receiver_field_sc = dey;
+  TIDE_DTYPE const *receiver_field_bg = ey;
   if (receiver_component == 0) {
     receiver_field_sc = dex;
+    receiver_field_bg = ex;
   } else if (receiver_component == 2) {
     receiver_field_sc = dez;
+    receiver_field_bg = ez;
   }
 
   ScalarLaunchConfig3D const launch_cfg = make_scalar_launch_config_3d(
@@ -3480,6 +3484,14 @@ extern "C" void FUNC(born_forward)(
           receiver_field_sc,
           receivers_i);
     }
+    if (n_receivers_per_shot_h > 0 && background_r != nullptr &&
+        receivers_i != nullptr) {
+      record_receivers_component<<<(unsigned)launch_cfg.blocks_receivers,
+                                   launch_cfg.threads_sr, 0, stream_compute>>>(
+          background_r + t * n_shots_h * n_receivers_per_shot_h,
+          receiver_field_bg,
+          receivers_i);
+    }
   }
 
   tide::cuda_check_or_abort(cudaPeekAtLastError(), __FILE__, __LINE__);
@@ -3530,6 +3542,7 @@ extern "C" void FUNC(born_forward_with_storage)(
     TIDE_DTYPE *const dm_ex_y,
     TIDE_DTYPE *const dm_ey_x,
     TIDE_DTYPE *const r,
+    TIDE_DTYPE *const background_r,
     TIDE_DTYPE *const store_1,
     TIDE_DTYPE *const store_2,
     char **store_filenames_1,
@@ -3674,10 +3687,13 @@ extern "C" void FUNC(born_forward_with_storage)(
   }
 
   TIDE_DTYPE const *receiver_field_sc = dey;
+  TIDE_DTYPE const *receiver_field_bg = ey;
   if (receiver_component == 0) {
     receiver_field_sc = dex;
+    receiver_field_bg = ex;
   } else if (receiver_component == 2) {
     receiver_field_sc = dez;
+    receiver_field_bg = ez;
   }
 
   ScalarLaunchConfig3D const launch_cfg = make_scalar_launch_config_3d(
@@ -3962,6 +3978,14 @@ extern "C" void FUNC(born_forward_with_storage)(
                                    launch_cfg.threads_sr, 0, stream_compute>>>(
           r + t * n_shots_h * n_receivers_per_shot_h,
           receiver_field_sc,
+          receivers_i);
+    }
+    if (n_receivers_per_shot_h > 0 && background_r != nullptr &&
+        receivers_i != nullptr) {
+      record_receivers_component<<<(unsigned)launch_cfg.blocks_receivers,
+                                   launch_cfg.threads_sr, 0, stream_compute>>>(
+          background_r + t * n_shots_h * n_receivers_per_shot_h,
+          receiver_field_bg,
           receivers_i);
     }
   }

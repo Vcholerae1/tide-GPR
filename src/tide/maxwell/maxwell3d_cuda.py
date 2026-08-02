@@ -4,6 +4,7 @@ from collections.abc import Sequence
 import torch
 
 from ..callbacks import Callback, CallbackState
+from ..core import BackendPreference, compile_simulation_plan, select_backend
 from ..dispersion import DebyeDispersion
 from ..grid_utils import _normalize_grid_spacing_3d, _normalize_pml_width_3d
 from ..storage import _normalize_storage_compression, _resolve_storage_compression
@@ -69,10 +70,12 @@ def maxwell3d_c_cuda(
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
     compute_mode: str = "native",
+    fallback: str = "reference",
 ):
     """3D C/CUDA forward propagation path with Python fallback for gradients."""
     from .. import backend_utils, staggered
     from ..padding import create_or_pad, zero_interior
+
     del (
         storage_chunk_steps,
         freq_taper_frac,
@@ -96,8 +99,7 @@ def maxwell3d_c_cuda(
         )
     if execution_backend_str != "standard":
         raise ValueError(
-            "execution_backend must be 'standard', "
-            f"but got {execution_backend!r}"
+            f"execution_backend must be 'standard', but got {execution_backend!r}"
         )
     if compute_mode not in {"native", "fp16_io"}:
         raise ValueError("compute_mode must be 'native' or 'fp16_io'.")
@@ -111,27 +113,53 @@ def maxwell3d_c_cuda(
             raise ValueError("n_threads must be >= 0 when provided.")
 
     storage_kind = _normalize_storage_compression(storage_compression)
-    requires_grad = epsilon.requires_grad or sigma.requires_grad
+    model_requires_grad = epsilon.requires_grad or sigma.requires_grad
+    source_requires_grad = bool(
+        source_amplitude is not None and source_amplitude.requires_grad
+    )
+    autograd_required = model_requires_grad or source_requires_grad
     functorch_active = torch._C._are_functorch_transforms_active()
     device = epsilon.device
     if fp16_io:
         if device.type != "cuda" or epsilon.dtype != torch.float32:
             raise NotImplementedError("3D fp16_io requires float32 models on CUDA.")
-        if requires_grad:
-            raise NotImplementedError("3D fp16_io currently supports forward inference only.")
+        if autograd_required:
+            raise NotImplementedError(
+                "3D fp16_io currently supports forward inference only."
+            )
         if dispersion is not None:
             raise NotImplementedError("3D fp16_io does not support dispersion.")
         if forward_callback is not None or backward_callback is not None:
             raise NotImplementedError("3D fp16_io does not support callbacks.")
         initial_states = (
-            Ex_0, Ey_0, Ez_0, Hx_0, Hy_0, Hz_0, m_hz_y_0, m_hy_z_0,
-            m_hx_z_0, m_hz_x_0, m_hy_x_0, m_hx_y_0, m_ey_z_0, m_ez_y_0,
-            m_ez_x_0, m_ex_z_0, m_ex_y_0, m_ey_x_0,
+            Ex_0,
+            Ey_0,
+            Ez_0,
+            Hx_0,
+            Hy_0,
+            Hz_0,
+            m_hz_y_0,
+            m_hy_z_0,
+            m_hx_z_0,
+            m_hz_x_0,
+            m_hy_x_0,
+            m_hx_y_0,
+            m_ey_z_0,
+            m_ez_y_0,
+            m_ez_x_0,
+            m_ex_z_0,
+            m_ex_y_0,
+            m_ey_x_0,
         )
         if any(state is not None for state in initial_states):
-            raise NotImplementedError("3D fp16_io currently requires zero initial states.")
+            raise NotImplementedError(
+                "3D fp16_io currently requires zero initial states."
+            )
     storage_bytes_per_elem = epsilon.element_size()
+
     def _fallback_reason(reason: str):
+        if fallback == "error":
+            raise RuntimeError(reason)
         fallback_storage_mode = storage_mode
         if str(fallback_storage_mode).lower() in {"cpu", "disk", "auto"}:
             fallback_storage_mode = "device"
@@ -187,15 +215,38 @@ def maxwell3d_c_cuda(
             dispersion=dispersion,
         )
 
-    if not backend_utils.is_backend_available():
-        return _fallback_reason("C/CUDA backend library is unavailable")
+    plan = compile_simulation_plan(
+        dimension="em3d",
+        epsilon=epsilon,
+        sigma=sigma,
+        mu=mu,
+        python_backend=False,
+        execution_backend=execution_backend_str,
+        compute_mode=compute_mode,
+        storage_mode=storage_mode_str,
+        storage_path=storage_path,
+        storage_compression=storage_compression,
+        storage_bytes_limit_device=storage_bytes_limit_device,
+        storage_bytes_limit_host=storage_bytes_limit_host,
+        n_threads=n_threads,
+        fallback=fallback,
+        has_callbacks=forward_callback is not None or backward_callback is not None,
+        source_component=source_component,
+        receiver_component=receiver_component,
+    )
+    decision = select_backend(
+        plan,
+        native_available=backend_utils.is_backend_available(),
+    )
+    if decision.selected is BackendPreference.PYTHON:
+        return _fallback_reason(decision.reason or "native backend unavailable")
 
     if functorch_active:
         return _fallback_reason(
             "torch.func transforms are not supported for 3D C/CUDA backend"
         )
 
-    if requires_grad:
+    if model_requires_grad:
         if storage_kind != "none":
             if device.type != "cuda":
                 return _fallback_reason(
@@ -214,17 +265,17 @@ def maxwell3d_c_cuda(
     else:
         if storage_kind != "none":
             warnings.warn(
-                "3D C/CUDA forward path ignores storage_compression when gradients are not requested.",
+                "3D C/CUDA ignores storage_compression when model gradients are not requested.",
                 RuntimeWarning,
             )
         if save_snapshots:
             warnings.warn(
-                "save_snapshots is ignored in 3D C/CUDA forward-only path.",
+                "save_snapshots is ignored when model gradients are not requested.",
                 RuntimeWarning,
             )
-        if backward_callback is not None:
+        if backward_callback is not None and not autograd_required:
             warnings.warn(
-                "backward_callback is ignored when model parameters do not require gradients.",
+                "backward_callback is ignored when no differentiable input is present.",
                 RuntimeWarning,
             )
 
@@ -263,7 +314,7 @@ def maxwell3d_c_cuda(
         )
 
     effective_storage_mode_str = storage_mode_str
-    if requires_grad:
+    if model_requires_grad:
         if device.type == "cpu" and effective_storage_mode_str in {"cpu", "disk"}:
             effective_storage_mode_str = "device"
         if effective_storage_mode_str == "auto":
@@ -499,12 +550,20 @@ def maxwell3d_c_cuda(
     shot_scale = torch.ones(n_shots, device=device, dtype=torch.float32)
     if fp16_io:
         if f.numel() > 0:
-            injection_max = f.detach().reshape(nt_steps, n_shots, n_sources).abs().amax(dim=(0, 2))
+            injection_max = (
+                f.detach().reshape(nt_steps, n_shots, n_sources).abs().amax(dim=(0, 2))
+            )
             valid = torch.isfinite(injection_max) & (injection_max > 0)
             exponent = torch.zeros_like(injection_max)
-            exponent[valid] = torch.round(-torch.log2(injection_max[valid])).clamp(-30, 30)
+            exponent[valid] = torch.round(-torch.log2(injection_max[valid])).clamp(
+                -30, 30
+            )
             shot_scale = torch.exp2(exponent)
-            f = (f.reshape(nt_steps, n_shots, n_sources) * shot_scale.reshape(1, -1, 1)).reshape(-1).contiguous()
+            f = (
+                (f.reshape(nt_steps, n_shots, n_sources) * shot_scale.reshape(1, -1, 1))
+                .reshape(-1)
+                .contiguous()
+            )
 
     if n_receivers > 0:
         receiver_amplitudes = torch.zeros(
@@ -538,15 +597,13 @@ def maxwell3d_c_cuda(
     source_component_idx = _COMPONENT_TO_INDEX_3D[source_component]
     receiver_component_idx = _COMPONENT_TO_INDEX_3D[receiver_component]
     eonly_snapshots = False
-    if has_dispersion and requires_grad:
+    if has_dispersion and autograd_required:
         return _fallback_reason(
             "3D Debye C/CUDA path currently supports forward inference only"
         )
     if has_dispersion and device.type == "cpu":
-        return _fallback_reason(
-            "3D Debye CPU backend is not enabled yet"
-        )
-    if requires_grad:
+        return _fallback_reason("3D Debye CPU backend is not enabled yet")
+    if autograd_required:
         try:
             _ = backend_utils.get_backend_function(
                 "maxwell_3d", "forward_with_storage", stencil, dtype, device
@@ -669,13 +726,15 @@ def maxwell3d_c_cuda(
     else:
         try:
             forward_func = backend_utils.get_backend_function(
-                "maxwell_3d", "forward", stencil, dtype, device,
+                "maxwell_3d",
+                "forward",
+                stencil,
+                dtype,
+                device,
                 variant="fp16_io" if fp16_io else "",
             )
         except (RuntimeError, AttributeError, TypeError) as e:
-            return _fallback_reason(
-                f"3D C/CUDA forward symbol is unavailable ({e})"
-            )
+            return _fallback_reason(f"3D C/CUDA forward symbol is unavailable ({e})")
 
         device_idx = (
             device.index if device.type == "cuda" and device.index is not None else 0
@@ -881,8 +940,20 @@ def maxwell3d_c_cuda(
         Hx = Hx.float().div_(inverse_scale)
         Hy = Hy.float().div_(inverse_scale)
         Hz = Hz.float().div_(inverse_scale)
-        for memory in (m_hz_y, m_hy_z, m_hx_z, m_hz_x, m_hy_x, m_hx_y,
-                       m_ey_z, m_ez_y, m_ez_x, m_ex_z, m_ex_y, m_ey_x):
+        for memory in (
+            m_hz_y,
+            m_hy_z,
+            m_hx_z,
+            m_hz_x,
+            m_hy_x,
+            m_hx_y,
+            m_ey_z,
+            m_ez_y,
+            m_ez_x,
+            m_ex_z,
+            m_ex_y,
+            m_ey_x,
+        ):
             memory.div_(inverse_scale)
         if receiver_amplitudes.numel() > 0:
             receiver_amplitudes.div_(shot_scale.reshape(1, -1, 1))
@@ -909,5 +980,6 @@ def maxwell3d_c_cuda(
         receiver_amplitudes,
     )
     return outputs
+
 
 __all__ = ["maxwell3d_c_cuda"]

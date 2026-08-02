@@ -7,8 +7,12 @@ from typing import Any, Literal
 
 import torch
 
+from ..core import BackendPreference, compile_simulation_plan, select_backend
 from .tm2d import _default_receiver_misfit, maxwelltm_hvp
-from .tm2d_born_autograd import tm2d_receiver_hvp_native
+from .tm2d_born_autograd import (
+    tm2d_receiver_full_hvp_native,
+    tm2d_receiver_gn_hvp_native,
+)
 
 ReceiverMisfit = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
@@ -64,6 +68,26 @@ class TM2DLinearizationContext:
         if hessian_mode not in {"full", "gauss_newton"}:
             raise ValueError("hessian_mode must be 'full' or 'gauss_newton'.")
 
+        plan = compile_simulation_plan(
+            operation="linearization",
+            dimension="tm2d",
+            epsilon=epsilon,
+            sigma=sigma,
+            mu=mu,
+            python_backend=python_backend,
+            storage_mode=storage_mode,
+            storage_compression=storage_compression or False,
+            model_gradient_sampling_interval=model_gradient_sampling_interval,
+            hessian_mode=hessian_mode,
+            requires_gradients=True,
+        )
+        from .. import backend_utils
+
+        decision = select_backend(
+            plan,
+            native_available=backend_utils.is_backend_available(),
+        )
+
         self.epsilon = epsilon
         self.sigma = sigma
         self.mu = mu
@@ -81,9 +105,11 @@ class TM2DLinearizationContext:
         self.model_gradient_sampling_interval = model_gradient_sampling_interval
         self.linearize_source = linearize_source
         self.hessian_mode = hessian_mode
-        self.python_backend = python_backend
+        self.python_backend = decision.selected is BackendPreference.PYTHON
         self.storage_mode = storage_mode
         self.storage_compression = storage_compression
+        self._plan = plan
+        self._backend_decision = decision
         self._background_cache: dict[str, Any] | None = None
         self._closed = False
         self._fingerprints = {
@@ -114,12 +140,7 @@ class TM2DLinearizationContext:
     @property
     def can_reuse_background(self) -> bool:
         """Whether this configuration supports native snapshot reuse."""
-        return (
-            not self.python_backend
-            and self.epsilon.device.type == "cuda"
-            and self.storage_mode == "device"
-            and self.model_gradient_sampling_interval in {0, 1}
-        )
+        return self._backend_decision.can_reuse_background(self._plan)
 
     @property
     def can_batch_directions(self) -> bool:
@@ -132,6 +153,13 @@ class TM2DLinearizationContext:
         if self._background_cache is None:
             return None
         return self._background_cache["predicted_data"]
+
+    @property
+    def scattered_history_bytes(self) -> int:
+        """Bytes retained for the nonlinear-physics correction."""
+        if self._background_cache is None:
+            return 0
+        return int(self._background_cache.get("scattered_history_bytes", 0))
 
     def _validate(self) -> None:
         if self._closed:
@@ -172,7 +200,12 @@ class TM2DLinearizationContext:
 
         if self.can_reuse_background:
             capture = self._background_cache is None
-            result = tm2d_receiver_hvp_native(
+            native_hvp = (
+                tm2d_receiver_gn_hvp_native
+                if self.hessian_mode == "gauss_newton"
+                else tm2d_receiver_full_hvp_native
+            )
+            result = native_hvp(
                 self.epsilon,
                 self.sigma,
                 self.mu,
@@ -193,7 +226,6 @@ class TM2DLinearizationContext:
                     self.model_gradient_sampling_interval
                 ),
                 linearize_source=self.linearize_source,
-                hessian_mode=self.hessian_mode,
                 storage_mode=self.storage_mode,
                 storage_compression=self.storage_compression,
                 background_cache=self._background_cache,
@@ -354,7 +386,12 @@ class TM2DLinearizationContext:
             misfit = direction_separable_misfit
 
         observed_data = self.observed_data.repeat(1, block_directions, 1)
-        hvp_epsilon, hvp_sigma = tm2d_receiver_hvp_native(
+        native_hvp = (
+            tm2d_receiver_gn_hvp_native
+            if self.hessian_mode == "gauss_newton"
+            else tm2d_receiver_full_hvp_native
+        )
+        hvp_epsilon, hvp_sigma = native_hvp(
             repeat_model(self.epsilon),
             repeat_model(self.sigma),
             repeat_model(self.mu),
@@ -373,7 +410,6 @@ class TM2DLinearizationContext:
             nt=self.nt,
             model_gradient_sampling_interval=self.model_gradient_sampling_interval,
             linearize_source=self.linearize_source,
-            hessian_mode=self.hessian_mode,
             storage_mode=self.storage_mode,
             storage_compression=self.storage_compression,
             background_cache=self._background_cache,

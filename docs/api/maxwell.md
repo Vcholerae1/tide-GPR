@@ -132,8 +132,11 @@ backend is the default; set `python_backend=True` only for the reference
 implementation.
 
 - `hessian_mode="full"` computes the complete Hessian and preserves the
-  historical API semantics.
-- `hessian_mode="gauss_newton"` computes `J.T @ Phi'' @ Jv`.
+  historical API semantics. Its native backend fuses the Gauss-Newton and
+  nonlinear-physics terms in one incremental-adjoint traversal.
+- `hessian_mode="gauss_newton"` computes `J.T @ Phi'' @ Jv` using only the
+  tangent forward and ordinary background adjoint. It never invokes or
+  allocates the full-Hessian correction path.
 - Native full TM2D HVP currently requires `storage_mode="device"`.
 - `storage_compression=None` preserves the automatic BF16 snapshot policy for
   CUDA float32 and full-precision storage elsewhere.
@@ -149,7 +152,9 @@ Full-Hessian calls also cache the direction-independent background-adjoint
 group for both full and Gauss-Newton Hessians. Gauss-Newton blocks apply the
 receiver misfit independently at the original shot-batch shape for every
 direction, so loss reductions and cross-shot curvature retain their scalar-HVP
-semantics.
+semantics. The ordinary background adjoint maps each flattened execution shot
+to `execution_shot % background_n_shots`, so direction blocks reuse the
+background tape without copying it.
 
 ```python
 with tide.linearize_maxwelltm(
@@ -174,8 +179,9 @@ with tide.linearize_maxwelltm(
 Native snapshot reuse currently requires CUDA, `storage_mode="device"`, and
 `model_gradient_sampling_interval` 0 or 1. Other configurations keep the same
 API but execute independent HVPs. A larger `block_size` reduces launches and
-increases parallelism, while allocating tangent snapshots and workspaces for
-more directions at once. Set `storage_compression=False` when strict
+increases parallelism and workspace use. Gauss-Newton blocks do not retain
+scattered-field histories; full-Hessian blocks retain the additional histories
+needed by the nonlinear-physics correction. Set `storage_compression=False` when strict
 Gauss-Newton symmetry or positive-semidefiniteness checks are more important
 than the memory reduction from automatic BF16 snapshot storage. The context
 detects in-place changes to its model, source/receiver geometry, source
@@ -192,10 +198,5 @@ amplitudes, or observations and must be recreated after such a change. Call
 
 ## Autograd Functions
 - MaxwellTMForwardFunc
-- MaxwellTMForwardBoundaryFunc
 
-## Internal Helpers
-- _register_ctx_handle
-- _get_ctx_handle
-- _release_ctx_handle
-- _compute_boundary_indices_flat
+The boundary-context implementation is internal and is not part of the public API.

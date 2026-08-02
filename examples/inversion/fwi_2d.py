@@ -1,9 +1,7 @@
 """Minimal shot-batched inversion with tide.workflow and tide.optim."""
 
 from __future__ import annotations
-from tide.optim.types import OptimizerResult
 
-import numpy as np
 import torch
 
 import tide
@@ -58,13 +56,8 @@ with torch.no_grad():
     observed = maxwell_receivers(torch.full((ny, nx), 4.0, dtype=dtype, device=device))
 
 
-def objective(x: np.ndarray, grad_out: np.ndarray) -> float:
-    epsilon_value = torch.tensor(
-        float(x[0]),
-        dtype=dtype,
-        device=device,
-        requires_grad=True,
-    )
+def objective(x: torch.Tensor) -> tuple[float, torch.Tensor]:
+    epsilon_value = x.detach().clone().requires_grad_(True)
     epsilon = epsilon_value.expand(ny, nx)
 
     def batch_loss(shot_indices: torch.Tensor) -> torch.Tensor:
@@ -98,17 +91,21 @@ def objective(x: np.ndarray, grad_out: np.ndarray) -> float:
 
     if epsilon_value.grad is None:
         raise RuntimeError("objective did not produce a gradient")
-    grad_out[0] = float(epsilon_value.grad.detach())
-    return total_loss
+    return total_loss, epsilon_value.grad.detach()
 
 
-result: OptimizerResult = tide.optim.lbfgs_minimize(
+result: tide.optim.OptimizerResult = tide.optim.lbfgs_minimize(
     objective,
-    np.array([3.0], dtype=np.float32),
-    lower_bounds=np.array([1.0], dtype=np.float32),
-    upper_bounds=np.array([9.0], dtype=np.float32),
-    options=tide.optim.LBFGSOptions(max_iter=5, max_evaluations=20),
+    torch.tensor([3.0], dtype=dtype, device=device),
+    lower_bounds=1.0,
+    upper_bounds=9.0,
+    options=tide.optim.LBFGSOptions(
+        stopping=tide.optim.StoppingCriteria(
+            max_iter=5,
+            max_evaluations=20,
+        )
+    ),
 )
 
-print(f"estimated epsilon = {result.x[0]:.4f}")
+print(f"estimated epsilon = {result.x[0].item():.4f}")
 print(f"final loss = {result.f:.6g}")

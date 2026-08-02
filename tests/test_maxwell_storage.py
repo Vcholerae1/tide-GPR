@@ -8,7 +8,48 @@ import torch
 import tide
 from tide import backend_utils
 from tide.maxwell.tm2d_helpers import _make_tm_storage_streams
-from tide.storage import STORAGE_CPU, STORAGE_DEVICE
+from tide.storage import (
+    STORAGE_CPU,
+    STORAGE_DEVICE,
+    SnapshotAllocator,
+    resolve_snapshot_storage,
+)
+
+
+def test_snapshot_storage_resolver_normalizes_shape_sampling_and_cpu_alias():
+    spec = resolve_snapshot_storage(
+        storage_mode="cpu",
+        storage_compression=False,
+        dtype=torch.float64,
+        device=torch.device("cpu"),
+        nt=9,
+        step_ratio=2,
+        shot_shape=(3, 4, 5),
+    )
+
+    assert spec.mode == STORAGE_DEVICE
+    assert spec.num_steps == 5
+    assert spec.history_shape == (5, 3, 4, 5)
+    assert spec.shot_bytes == 4 * 5 * torch.float64.itemsize
+
+
+def test_snapshot_allocator_allocates_enabled_groups_and_shared_empty_tensors():
+    spec = resolve_snapshot_storage(
+        storage_mode="device",
+        storage_compression=False,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+        nt=7,
+        step_ratio=3,
+        shot_shape=(2, 4, 5),
+    )
+    allocator = SnapshotAllocator(spec, torch.device("cpu"))
+
+    enabled = allocator.group(2, True)
+    disabled = allocator.group(2, False)
+
+    assert all(tensor.shape == (3, 2, 4, 5) for tensor in enabled)
+    assert all(tensor.numel() == 0 for tensor in disabled)
 
 
 def _run_grad(
