@@ -10,6 +10,12 @@ synthetic workload. Use `--backward` to include snapshot storage and the
 adjoint/model-gradient pass, and compare `median_ms_per_shot` before choosing a
 shot batch size.
 
+`maxwell3d_triton.py` is a deliberately narrow prepared-to-prepared comparison
+of the native CUDA forward loop with experimental flat Triton kernels. It
+supports FP32, fourth-order differences, one shot/source/receiver, and standard
+CPML. Triton JIT and CUDA Graph capture are warmed outside timing; pass
+`--no-cuda-graph` to expose Python launch overhead.
+
 `maxwell3d_fp16_io.py` compares native FP32, scalar FP16-I/O, and the
 SeisCL-style two-x-cell `half2` FP16-I/O experiment. It reports timing, peak
 incremental allocation, and receiver-data error against native FP32.

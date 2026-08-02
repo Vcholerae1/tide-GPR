@@ -355,6 +355,12 @@ def _reset(p: dict[str, object]) -> None:
 
 
 def _triton_run(p: dict[str, object], block: int) -> None:
+    if int(p["n_shots"]) != 1:
+        raise ValueError("The experimental Triton path supports exactly one shot")
+    if int(p["n_sources_per_shot"]) != 1 or int(p["n_receivers_per_shot"]) != 1:
+        raise ValueError(
+            "The experimental Triton path supports one source and receiver per shot"
+        )
     nz, ny, nx = int(p["nz"]), int(p["ny"]), int(p["nx"])
     cells = nz * ny * nx
     grid = (triton.cdiv(cells, block),)
