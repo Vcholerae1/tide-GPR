@@ -1,4 +1,3 @@
-import warnings
 from collections.abc import Sequence
 
 import torch
@@ -14,276 +13,7 @@ from ..utils import (
 )
 from ..validation import validate_model_gradient_sampling_interval
 from .maxwell3d_born_autograd import Born3DForwardFunc
-from .maxwell3d_born_python import born3d_python
 from .validation_internal import _COMPONENT_TO_INDEX_3D
-
-
-_HYBRID_TENSOR_ARG_NAMES = (
-    "epsilon",
-    "sigma",
-    "mu",
-    "depsilon",
-    "dsigma",
-    "dca",
-    "dcb",
-    "source_amplitude",
-    "source_location",
-    "receiver_location",
-    "Ex_0",
-    "Ey_0",
-    "Ez_0",
-    "Hx_0",
-    "Hy_0",
-    "Hz_0",
-    "m_hz_y_0",
-    "m_hy_z_0",
-    "m_hx_z_0",
-    "m_hz_x_0",
-    "m_hy_x_0",
-    "m_hx_y_0",
-    "m_ey_z_0",
-    "m_ez_y_0",
-    "m_ez_x_0",
-    "m_ex_z_0",
-    "m_ex_y_0",
-    "m_ey_x_0",
-    "dEx_0",
-    "dEy_0",
-    "dEz_0",
-    "dHx_0",
-    "dHy_0",
-    "dHz_0",
-    "dm_hz_y_0",
-    "dm_hy_z_0",
-    "dm_hx_z_0",
-    "dm_hz_x_0",
-    "dm_hy_x_0",
-    "dm_hx_y_0",
-    "dm_ey_z_0",
-    "dm_ez_y_0",
-    "dm_ez_x_0",
-    "dm_ex_z_0",
-    "dm_ex_y_0",
-    "dm_ey_x_0",
-)
-
-
-class _Born3DNativeAutogradFallbackFunc(torch.autograd.Function):
-    """Native 3D Born forward with Python reference gradients for unsupported grads."""
-
-    @staticmethod
-    def forward(  # type: ignore[override]
-        ctx,
-        *args,
-    ) -> tuple[torch.Tensor, ...]:
-        meta = args[-1]
-        values = dict(zip(_HYBRID_TENSOR_ARG_NAMES, args[:-1], strict=True))
-        ctx.meta = meta
-        ctx.values = values
-
-        def detached(name: str) -> torch.Tensor | None:
-            value = values[name]
-            return value.detach() if isinstance(value, torch.Tensor) else None
-
-        outputs = born3d_c_cuda(
-            detached("epsilon"),
-            detached("sigma"),
-            detached("mu"),
-            detached("depsilon"),
-            detached("dsigma"),
-            detached("dca"),
-            detached("dcb"),
-            meta["grid_spacing"],
-            meta["dt"],
-            detached("source_amplitude"),
-            detached("source_location"),
-            detached("receiver_location"),
-            meta["stencil"],
-            meta["pml_width"],
-            meta["max_vel"],
-            detached("Ex_0"),
-            detached("Ey_0"),
-            detached("Ez_0"),
-            detached("Hx_0"),
-            detached("Hy_0"),
-            detached("Hz_0"),
-            detached("m_hz_y_0"),
-            detached("m_hy_z_0"),
-            detached("m_hx_z_0"),
-            detached("m_hz_x_0"),
-            detached("m_hy_x_0"),
-            detached("m_hx_y_0"),
-            detached("m_ey_z_0"),
-            detached("m_ez_y_0"),
-            detached("m_ez_x_0"),
-            detached("m_ex_z_0"),
-            detached("m_ex_y_0"),
-            detached("m_ey_x_0"),
-            detached("dEx_0"),
-            detached("dEy_0"),
-            detached("dEz_0"),
-            detached("dHx_0"),
-            detached("dHy_0"),
-            detached("dHz_0"),
-            detached("dm_hz_y_0"),
-            detached("dm_hy_z_0"),
-            detached("dm_hx_z_0"),
-            detached("dm_hz_x_0"),
-            detached("dm_hy_x_0"),
-            detached("dm_hx_y_0"),
-            detached("dm_ey_z_0"),
-            detached("dm_ez_y_0"),
-            detached("dm_ez_x_0"),
-            detached("dm_ex_z_0"),
-            detached("dm_ex_y_0"),
-            detached("dm_ey_x_0"),
-            meta["nt"],
-            meta["parameterization"],
-            meta["model_gradient_sampling_interval"],
-            meta["linearize_source"],
-            meta["source_component"],
-            meta["receiver_component"],
-            storage_mode=meta["storage_mode"],
-            storage_path=meta["storage_path"],
-            storage_compression=meta["storage_compression"],
-            storage_bytes_limit_device=meta["storage_bytes_limit_device"],
-            storage_bytes_limit_host=meta["storage_bytes_limit_host"],
-            n_threads=meta["n_threads"],
-            return_background_receiver_amplitudes=meta.get(
-                "return_background_receiver_amplitudes", False
-            ),
-            _force_no_gradient_fallback=True,
-        )
-        return tuple(outputs)
-
-    @staticmethod
-    def backward(ctx, *grad_outputs):  # type: ignore[override]
-        meta = ctx.meta
-        values = ctx.values
-
-        differentiable_names: list[str] = []
-        differentiable_values: list[torch.Tensor] = []
-        ref_values: dict[str, torch.Tensor | None] = {}
-
-        for idx, name in enumerate(_HYBRID_TENSOR_ARG_NAMES):
-            value = values[name]
-            if not isinstance(value, torch.Tensor):
-                ref_values[name] = None
-                continue
-            if ctx.needs_input_grad[idx] and torch.is_floating_point(value):
-                ref = value.detach().requires_grad_(True)
-                differentiable_names.append(name)
-                differentiable_values.append(ref)
-            else:
-                ref = value.detach()
-            ref_values[name] = ref
-
-        if not differentiable_values:
-            return (None,) * (len(_HYBRID_TENSOR_ARG_NAMES) + 1)
-
-        with torch.enable_grad():
-            ref_outputs = born3d_python(
-                ref_values["epsilon"],
-                ref_values["sigma"],
-                ref_values["mu"],
-                ref_values["depsilon"],
-                ref_values["dsigma"],
-                ref_values["dca"],
-                ref_values["dcb"],
-                meta["grid_spacing"],
-                meta["dt"],
-                ref_values["source_amplitude"],
-                ref_values["source_location"],
-                ref_values["receiver_location"],
-                (
-                    ref_values["receiver_location"]
-                    if meta.get("return_background_receiver_amplitudes", False)
-                    else None
-                ),
-                stencil=meta["stencil"],
-                pml_width=meta["pml_width"],
-                max_vel=meta["max_vel"],
-                Ex_0=ref_values["Ex_0"],
-                Ey_0=ref_values["Ey_0"],
-                Ez_0=ref_values["Ez_0"],
-                Hx_0=ref_values["Hx_0"],
-                Hy_0=ref_values["Hy_0"],
-                Hz_0=ref_values["Hz_0"],
-                m_hz_y_0=ref_values["m_hz_y_0"],
-                m_hy_z_0=ref_values["m_hy_z_0"],
-                m_hx_z_0=ref_values["m_hx_z_0"],
-                m_hz_x_0=ref_values["m_hz_x_0"],
-                m_hy_x_0=ref_values["m_hy_x_0"],
-                m_hx_y_0=ref_values["m_hx_y_0"],
-                m_ey_z_0=ref_values["m_ey_z_0"],
-                m_ez_y_0=ref_values["m_ez_y_0"],
-                m_ez_x_0=ref_values["m_ez_x_0"],
-                m_ex_z_0=ref_values["m_ex_z_0"],
-                m_ex_y_0=ref_values["m_ex_y_0"],
-                m_ey_x_0=ref_values["m_ey_x_0"],
-                dEx_0=ref_values["dEx_0"],
-                dEy_0=ref_values["dEy_0"],
-                dEz_0=ref_values["dEz_0"],
-                dHx_0=ref_values["dHx_0"],
-                dHy_0=ref_values["dHy_0"],
-                dHz_0=ref_values["dHz_0"],
-                dm_hz_y_0=ref_values["dm_hz_y_0"],
-                dm_hy_z_0=ref_values["dm_hy_z_0"],
-                dm_hx_z_0=ref_values["dm_hx_z_0"],
-                dm_hz_x_0=ref_values["dm_hz_x_0"],
-                dm_hy_x_0=ref_values["dm_hy_x_0"],
-                dm_hx_y_0=ref_values["dm_hx_y_0"],
-                dm_ey_z_0=ref_values["dm_ey_z_0"],
-                dm_ez_y_0=ref_values["dm_ez_y_0"],
-                dm_ez_x_0=ref_values["dm_ez_x_0"],
-                dm_ex_z_0=ref_values["dm_ex_z_0"],
-                dm_ex_y_0=ref_values["dm_ex_y_0"],
-                dm_ey_x_0=ref_values["dm_ey_x_0"],
-                nt=meta["nt"],
-                parameterization=meta["parameterization"],
-                linearize_source=meta["linearize_source"],
-                source_component=meta["source_component"],
-                receiver_component=meta["receiver_component"],
-            )
-            ref_outputs = _to_native_output_layout(
-                ref_outputs,
-                return_background_receiver_amplitudes=meta.get(
-                    "return_background_receiver_amplitudes", False
-                ),
-            )
-            active_outputs: list[torch.Tensor] = []
-            active_grad_outputs: list[torch.Tensor] = []
-            for out, grad in zip(ref_outputs, grad_outputs, strict=True):
-                if grad is None or not out.requires_grad:
-                    continue
-                active_outputs.append(out)
-                active_grad_outputs.append(grad)
-            if not active_outputs:
-                return (None,) * (len(_HYBRID_TENSOR_ARG_NAMES) + 1)
-            computed_grads = torch.autograd.grad(
-                active_outputs,
-                differentiable_values,
-                grad_outputs=active_grad_outputs,
-                allow_unused=True,
-            )
-
-        grads_by_name = dict(zip(differentiable_names, computed_grads, strict=True))
-        grads: list[torch.Tensor | None] = []
-        for name in _HYBRID_TENSOR_ARG_NAMES:
-            grads.append(grads_by_name.get(name))
-        grads.append(None)
-        return tuple(grads)
-
-
-def _to_native_output_layout(
-    result: tuple[torch.Tensor, ...],
-    *,
-    return_background_receiver_amplitudes: bool = False,
-) -> tuple[torch.Tensor, ...]:
-    """Match the native state layout while optionally retaining background data."""
-    if return_background_receiver_amplitudes:
-        return result
-    return (*result[:-2], result[-1])
 
 
 def _init_wavefield_3d(
@@ -402,7 +132,6 @@ def born3d_c_cuda(
     storage_bytes_limit_host: int | None = None,
     n_threads: int | None = None,
     return_background_receiver_amplitudes: bool = False,
-    _force_no_gradient_fallback: bool = False,
 ):
     from .. import backend_utils
 
@@ -466,77 +195,16 @@ def born3d_c_cuda(
     unsupported_gradient_fallback = (
         mu.requires_grad or source_requires_grad or state_requires_grad
     )
-    if unsupported_gradient_fallback and not _force_no_gradient_fallback:
-        meta = {
-            "grid_spacing": grid_spacing,
-            "dt": dt,
-            "stencil": stencil,
-            "pml_width": pml_width,
-            "max_vel": max_vel,
-            "nt": nt,
-            "parameterization": parameterization,
-            "model_gradient_sampling_interval": model_gradient_sampling_interval,
-            "linearize_source": linearize_source,
-            "source_component": source_component,
-            "receiver_component": receiver_component,
-            "storage_mode": storage_mode,
-            "storage_path": storage_path,
-            "storage_compression": storage_compression,
-            "storage_bytes_limit_device": storage_bytes_limit_device,
-            "storage_bytes_limit_host": storage_bytes_limit_host,
-            "n_threads": n_threads,
-            "return_background_receiver_amplitudes": (
-                return_background_receiver_amplitudes
-            ),
-        }
-        return _Born3DNativeAutogradFallbackFunc.apply(
-            epsilon,
-            sigma,
-            mu,
-            depsilon,
-            dsigma,
-            dca,
-            dcb,
-            source_amplitude,
-            source_location,
-            receiver_location,
-            Ex_0,
-            Ey_0,
-            Ez_0,
-            Hx_0,
-            Hy_0,
-            Hz_0,
-            m_hz_y_0,
-            m_hy_z_0,
-            m_hx_z_0,
-            m_hz_x_0,
-            m_hy_x_0,
-            m_hx_y_0,
-            m_ey_z_0,
-            m_ez_y_0,
-            m_ez_x_0,
-            m_ex_z_0,
-            m_ex_y_0,
-            m_ey_x_0,
-            dEx_0,
-            dEy_0,
-            dEz_0,
-            dHx_0,
-            dHy_0,
-            dHz_0,
-            dm_hz_y_0,
-            dm_hy_z_0,
-            dm_hx_z_0,
-            dm_hz_x_0,
-            dm_hy_x_0,
-            dm_hx_y_0,
-            dm_ey_z_0,
-            dm_ez_y_0,
-            dm_ez_x_0,
-            dm_ex_z_0,
-            dm_ex_y_0,
-            dm_ey_x_0,
-            meta,
+    if unsupported_gradient_fallback:
+        # Fallbacks are owned by select_backend (architecture.md): by the
+        # time this adapter runs, the capability matrix has approved native
+        # execution, so unsupported gradient targets must fail loudly instead
+        # of silently switching to the Python reference.
+        raise NotImplementedError(
+            "Native born3d supports gradients only with respect to the "
+            "epsilon/sigma background model. Gradients with respect to mu, "
+            "source amplitudes, or initial wavefields require the Python "
+            "reference backend (python_backend=True or fallback='reference')."
         )
 
     if torch._C._are_functorch_transforms_active():
@@ -1156,60 +824,13 @@ def born3d_c_cuda(
 
     storage_mode_str = str(storage_mode).lower()
     if storage_mode_str not in {"device", "none"}:
-        warnings.warn(
-            "Native born3d currently supports only storage_mode='device' or 'none'; "
-            "falling back to Python reference path.",
-            RuntimeWarning,
-        )
-        return _to_native_output_layout(
-            born3d_python(
-                epsilon,
-                sigma,
-                mu,
-                depsilon,
-                dsigma,
-                dca,
-                dcb,
-                grid_spacing,
-                dt,
-                source_amplitude,
-                source_location,
-                receiver_location,
-                (
-                    receiver_location
-                    if return_background_receiver_amplitudes
-                    else None
-                ),
-                stencil=stencil,
-                pml_width=pml_width,
-                max_vel=max_vel,
-                dEx_0=dEx_0,
-                dEy_0=dEy_0,
-                dEz_0=dEz_0,
-                dHx_0=dHx_0,
-                dHy_0=dHy_0,
-                dHz_0=dHz_0,
-                dm_hz_y_0=dm_hz_y_0,
-                dm_hy_z_0=dm_hy_z_0,
-                dm_hx_z_0=dm_hx_z_0,
-                dm_hz_x_0=dm_hz_x_0,
-                dm_hy_x_0=dm_hy_x_0,
-                dm_hx_y_0=dm_hx_y_0,
-                dm_ey_z_0=dm_ey_z_0,
-                dm_ez_y_0=dm_ez_y_0,
-                dm_ez_x_0=dm_ez_x_0,
-                dm_ex_z_0=dm_ex_z_0,
-                dm_ex_y_0=dm_ex_y_0,
-                dm_ey_x_0=dm_ey_x_0,
-                nt=nt,
-                parameterization=parameterization,
-                linearize_source=linearize_source,
-                source_component=source_component,
-                receiver_component=receiver_component,
-            ),
-            return_background_receiver_amplitudes=(
-                return_background_receiver_amplitudes
-            ),
+        # Unsupported modes must be rejected by the capability matrix before
+        # this adapter runs (architecture.md: solver-specific silent fallbacks
+        # are not allowed). This guard protects direct callers of this private
+        # adapter from silently switching to the Python reference.
+        raise ValueError(
+            "Native born3d supports only storage_mode='device' or 'none', "
+            f"got {storage_mode_str!r}."
         )
     if needs_storage and storage_mode_str == "none":
         raise ValueError(
@@ -1225,85 +846,23 @@ def born3d_c_cuda(
     source_component_idx = _COMPONENT_TO_INDEX_3D[source_component]
     receiver_component_idx = _COMPONENT_TO_INDEX_3D[receiver_component]
 
+    symbols = ("born_forward_with_storage" if needs_autograd else "born_forward",)
+    if needs_autograd:
+        symbols += ("born_backward",)
+    if background_coeff_requires_grad:
+        symbols += ("born_backward_bggrad",)
     try:
-        _ = backend_utils.get_backend_function(
-            "maxwell_3d",
-            "born_forward_with_storage" if needs_autograd else "born_forward",
-            stencil,
-            dtype,
-            backend_device,
-        )
-        if needs_autograd:
+        for symbol_name in symbols:
             _ = backend_utils.get_backend_function(
-                "maxwell_3d",
-                "born_backward",
-                stencil,
-                dtype,
-                backend_device,
-            )
-        if background_coeff_requires_grad:
-            _ = backend_utils.get_backend_function(
-                "maxwell_3d",
-                "born_backward_bggrad",
-                stencil,
-                dtype,
-                backend_device,
+                "maxwell_3d", symbol_name, stencil, dtype, backend_device
             )
     except (RuntimeError, AttributeError, TypeError) as exc:
-        warnings.warn(
-            f"3D native born symbols are unavailable ({exc}); falling back to Python reference path.",
-            RuntimeWarning,
-        )
-        return _to_native_output_layout(
-            born3d_python(
-                epsilon,
-                sigma,
-                mu,
-                depsilon,
-                dsigma,
-                dca,
-                dcb,
-                grid_spacing,
-                dt,
-                source_amplitude,
-                source_location,
-                receiver_location,
-                (
-                    receiver_location
-                    if return_background_receiver_amplitudes
-                    else None
-                ),
-                stencil=stencil,
-                pml_width=pml_width,
-                max_vel=max_vel,
-                dEx_0=dEx_0,
-                dEy_0=dEy_0,
-                dEz_0=dEz_0,
-                dHx_0=dHx_0,
-                dHy_0=dHy_0,
-                dHz_0=dHz_0,
-                dm_hz_y_0=dm_hz_y_0,
-                dm_hy_z_0=dm_hy_z_0,
-                dm_hx_z_0=dm_hx_z_0,
-                dm_hz_x_0=dm_hz_x_0,
-                dm_hy_x_0=dm_hy_x_0,
-                dm_hx_y_0=dm_hx_y_0,
-                dm_ey_z_0=dm_ey_z_0,
-                dm_ez_y_0=dm_ez_y_0,
-                dm_ez_x_0=dm_ez_x_0,
-                dm_ex_z_0=dm_ex_z_0,
-                dm_ex_y_0=dm_ex_y_0,
-                dm_ey_x_0=dm_ey_x_0,
-                nt=nt,
-                parameterization=parameterization,
-                linearize_source=linearize_source,
-                source_component=source_component,
-                receiver_component=receiver_component,
-            ),
-            return_background_receiver_amplitudes=(
-                return_background_receiver_amplitudes
-            ),
-        )
+        # Fallbacks are owned by select_backend; a missing kernel symbol is a
+        # build/availability bug that must not silently switch to Python.
+        raise RuntimeError(
+            f"3D native born symbols are unavailable ({exc}); select the "
+            "Python reference backend explicitly."
+        ) from exc
 
     if needs_autograd:
         meta = {

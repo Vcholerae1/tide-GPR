@@ -1,4 +1,4 @@
-"""Torch-native projected Armijo and strong-Wolfe line searches."""
+"""Torch-native SEISCOPE weak-Wolfe, Armijo, and strong-Wolfe searches."""
 
 from __future__ import annotations
 
@@ -76,6 +76,78 @@ def _projected_armijo(
         alpha *= options.contraction
         if alpha < options.step_min:
             break
+    return _failure(x, f, grad, evaluations, OptimizerStatus.LINE_SEARCH_FAILED)
+
+
+def _weak_wolfe(
+    evaluator: _ObjectiveEvaluator,
+    x: Tensor,
+    f: float,
+    grad: Tensor,
+    direction: Tensor,
+    lower: Tensor | None,
+    upper: Tensor | None,
+    options: LineSearchOptions,
+) -> _LineSearchResult:
+    """Run the projected weak-Wolfe search used by SOTB.
+
+    The search brackets by tenfold expansion until the curvature condition is
+    met, then bisects the bracket. As in the Fortran routine, projection is
+    applied to trial points while directional derivatives use the unprojected
+    search direction.
+    """
+
+    slope0 = _dot(grad, direction)
+    if slope0 >= 0.0 or not isfinite(slope0):
+        return _failure(x, f, grad, 0, OptimizerStatus.LINE_SEARCH_FAILED)
+
+    alpha = min(max(options.initial_step, options.step_min), options.step_max)
+    alpha_left = 0.0
+    alpha_right = 0.0
+    evaluations = 0
+    last_trial: tuple[Tensor, float, Tensor, float] | None = None
+
+    for _ in range(options.max_steps + 1):
+        trial_x = _project(x + alpha * direction, lower, upper)
+        try:
+            trial_f, trial_grad = evaluator(trial_x)
+        except _BudgetExhausted:
+            return _failure(x, f, grad, evaluations, OptimizerStatus.MAX_EVALUATIONS)
+        evaluations += 1
+        slope = _dot(trial_grad, direction)
+        finite = isfinite(trial_f) and isfinite(slope) and bool(
+            torch.isfinite(trial_grad).all()
+        )
+        if not finite:
+            return _failure(x, f, grad, evaluations, OptimizerStatus.NONFINITE)
+        last_trial = trial_x, trial_f, trial_grad, alpha
+
+        armijo = trial_f <= f + options.c1 * alpha * slope0
+        curvature = slope >= options.c2 * slope0
+        if armijo and curvature:
+            return _LineSearchResult(
+                True, trial_x, trial_f, trial_grad, alpha, evaluations
+            )
+        if evaluations > options.max_steps:
+            break
+        if not armijo:
+            alpha_right = alpha
+            alpha = 0.5 * (alpha_left + alpha_right)
+        else:
+            alpha_left = alpha
+            alpha = (
+                min(options.growth * alpha, options.step_max)
+                if alpha_right == 0.0
+                else 0.5 * (alpha_left + alpha_right)
+            )
+        if not isfinite(alpha) or alpha < options.step_min:
+            break
+
+    if last_trial is not None and last_trial[1] < f:
+        trial_x, trial_f, trial_grad, alpha = last_trial
+        return _LineSearchResult(
+            True, trial_x, trial_f, trial_grad, alpha, evaluations
+        )
     return _failure(x, f, grad, evaluations, OptimizerStatus.LINE_SEARCH_FAILED)
 
 
@@ -170,6 +242,10 @@ def _line_search(
     upper: Tensor | None,
     options: LineSearchOptions,
 ) -> _LineSearchResult:
+    if options.method == "weak_wolfe":
+        return _weak_wolfe(
+            evaluator, x, f, grad, direction, lower, upper, options
+        )
     if lower is not None and upper is not None:
         return _projected_armijo(
             evaluator, x, f, grad, direction, lower, upper, options

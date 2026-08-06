@@ -16,19 +16,6 @@ supports FP32, fourth-order differences, one shot/source/receiver, and standard
 CPML. Triton JIT and CUDA Graph capture are warmed outside timing; pass
 `--no-cuda-graph` to expose Python launch overhead.
 
-`maxwell3d_fp16_io.py` compares native FP32, scalar FP16-I/O, and the
-SeisCL-style two-x-cell `half2` FP16-I/O experiment. It reports timing, peak
-incremental allocation, and receiver-data error against native FP32.
-
-`tm2d_fp16_io.py` compares native FP32 propagation with the experimental TM2D
-FP16-wavefield-I/O/FP32-compute forward path and reports runtime, peak allocated
-memory, receiver relative L2 error, and waveform correlation.
-
-`tm2d_fp16_overthrust.py` measures complete 100-shot `(200, 400)` Overthrust
-passes, including shot batching, the scalar FP16 baseline, the default half2
-packed path, aggressive half2 arithmetic, and optionally the material-gradient
-backward pass.
-
 `tm2d_hvp.py` compares native full and Gauss-Newton TM2D Hessian-vector
 products with a central finite difference of two native gradients. It reports
 CUDA/wall time and peak allocated memory for fixed small, medium, and large

@@ -1,5 +1,3 @@
-import math
-import os
 from typing import Any
 
 import torch
@@ -92,8 +90,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         device = Ey.device
         coeff_dtype = ca.dtype
         receiver_dtype = coeff_dtype
-        variant = "fp16_io" if scale_ctx is not None else ""
-
+        variant = ""
         ca_requires_grad = ca.requires_grad
         cb_requires_grad = cb.requires_grad
         source_requires_grad = source_amplitudes_scaled.requires_grad
@@ -611,25 +608,9 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         else:
             grad_r = grad_r.contiguous()
 
-        full_fp16_adjoint = (
-            scale_ctx is not None
-            and os.getenv("TIDE_TM_FP16_ADJOINT", "0") not in {"", "0"}
-        )
-        adjoint_scale = 1.0
-        if full_fp16_adjoint and grad_r.numel() > 0:
-            grad_r_max = float(grad_r.detach().abs().amax())
-            if math.isfinite(grad_r_max) and grad_r_max > 0.0:
-                exponent = math.floor(math.log2(0.5 / grad_r_max))
-                exponent = min(max(exponent, -30), 30)
-                adjoint_scale = math.ldexp(1.0, exponent)
-                grad_r = grad_r * adjoint_scale
-        # The default keeps the sensitive time-reversed propagation in FP32.
-        # The opt-in path is useful for measuring the accuracy/performance
-        # boundary of a fully reduced-precision inversion.
-        adjoint_dtype = torch.float16 if full_fp16_adjoint else coeff_dtype
-        lambda_ey = torch.zeros(n_shots, ny, nx, device=device, dtype=adjoint_dtype)
-        lambda_hx = torch.zeros(n_shots, ny, nx, device=device, dtype=adjoint_dtype)
-        lambda_hz = torch.zeros(n_shots, ny, nx, device=device, dtype=adjoint_dtype)
+        lambda_ey = torch.zeros(n_shots, ny, nx, device=device, dtype=coeff_dtype)
+        lambda_hx = torch.zeros(n_shots, ny, nx, device=device, dtype=coeff_dtype)
+        lambda_hz = torch.zeros(n_shots, ny, nx, device=device, dtype=coeff_dtype)
         m_lambda_ey_x = torch.zeros(n_shots, ny, nx, device=device, dtype=coeff_dtype)
         m_lambda_ey_z = torch.zeros(n_shots, ny, nx, device=device, dtype=coeff_dtype)
         m_lambda_hx_z = torch.zeros(n_shots, ny, nx, device=device, dtype=coeff_dtype)
@@ -688,7 +669,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
             accuracy,
             coeff_dtype,
             ctx.backend_device,
-            variant="fp16_io" if full_fp16_adjoint else "",
+            variant="",
         )
         effective_callback_freq = (
             nt // step_ratio if backward_callback is None else callback_frequency
@@ -815,14 +796,6 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                         is_backward=True,
                     )
                 )
-
-        if full_fp16_adjoint and adjoint_scale != 1.0:
-            if grad_f.numel() > 0:
-                grad_f.div_(adjoint_scale)
-            if grad_ca.numel() > 0:
-                grad_ca.div_(adjoint_scale)
-            if grad_cb.numel() > 0:
-                grad_cb.div_(adjoint_scale)
 
         grad_f_flat = (
             grad_f.reshape(nt * n_shots * n_sources) if n_sources > 0 else None

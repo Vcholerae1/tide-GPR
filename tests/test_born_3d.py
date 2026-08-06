@@ -588,7 +588,7 @@ def test_born3d_autograd_uses_bf16_for_saved_snapshots(monkeypatch):
 
 
 def test_native_born3d_supports_background_gradients_by_default(
-    born_3d_setup, monkeypatch
+    born_3d_setup,
 ):
     if not backend_utils.is_backend_available():
         pytest.skip("native backend not available")
@@ -615,33 +615,28 @@ def test_native_born3d_supports_background_gradients_by_default(
     sigma_native = sigma.clone().detach().requires_grad_(True)
     depsilon_native = depsilon_seed.clone().detach().requires_grad_(True)
 
-    def fail_python_fallback(*_args, **_kwargs):
-        raise AssertionError("native 3D Born background gradients used Python fallback")
-
-    with monkeypatch.context() as m:
-        m.setattr(
-            "tide.maxwell.maxwell3d_born_cuda.born3d_python",
-            fail_python_fallback,
-        )
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            pred_native = tide.born3d(
-                epsilon_native,
-                sigma_native,
-                mu,
-                grid_spacing=setup["grid_spacing"],
-                dt=setup["dt"],
-                source_amplitude=setup["source_amplitude"],
-                source_location=setup["source_location"],
-                receiver_location=setup["receiver_location"],
-                depsilon=depsilon_native,
-                pml_width=setup["pml_width"],
-                stencil=setup["stencil"],
-                linearize_source=True,
-                source_component=setup["source_component"],
-                receiver_component=setup["receiver_component"],
-                python_backend=False,
-            )[-1]
+    # The native adapter no longer imports or calls born3d_python at all
+    # (fallbacks are owned by select_backend), so the assertion below is that
+    # the native path emits no fallback-related warning.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pred_native = tide.born3d(
+            epsilon_native,
+            sigma_native,
+            mu,
+            grid_spacing=setup["grid_spacing"],
+            dt=setup["dt"],
+            source_amplitude=setup["source_amplitude"],
+            source_location=setup["source_location"],
+            receiver_location=setup["receiver_location"],
+            depsilon=depsilon_native,
+            pml_width=setup["pml_width"],
+            stencil=setup["stencil"],
+            linearize_source=True,
+            source_component=setup["source_component"],
+            receiver_component=setup["receiver_component"],
+            python_backend=False,
+        )[-1]
     assert not any(
         "background model requires gradients" in str(w.message) for w in caught
     )
@@ -683,7 +678,7 @@ def test_native_born3d_supports_background_gradients_by_default(
 
 @pytest.mark.parametrize("storage_compression", [False, "bf16"])
 def test_native_born3d_cuda_supports_background_gradients_without_fallback(
-    monkeypatch, storage_compression: bool | str
+    storage_compression: bool | str,
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for native 3D Born background gradient test.")
@@ -706,34 +701,29 @@ def test_native_born3d_cuda_supports_background_gradients_without_fallback(
     sigma_native = sigma.clone().detach().requires_grad_(True)
     depsilon_native = depsilon_seed.clone().detach().requires_grad_(True)
 
-    def fail_python_fallback(*_args, **_kwargs):
-        raise AssertionError("native CUDA 3D Born bggrad used Python fallback")
-
-    with monkeypatch.context() as m:
-        m.setattr(
-            "tide.maxwell.maxwell3d_born_cuda.born3d_python",
-            fail_python_fallback,
-        )
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            pred_native = tide.born3d(
-                epsilon_native,
-                sigma_native,
-                mu,
-                grid_spacing=setup["grid_spacing"],
-                dt=setup["dt"],
-                source_amplitude=setup["source_amplitude"],
-                source_location=setup["source_location"],
-                receiver_location=setup["receiver_location"],
-                depsilon=depsilon_native,
-                pml_width=setup["pml_width"],
-                stencil=setup["stencil"],
-                linearize_source=True,
-                source_component=setup["source_component"],
-                receiver_component=setup["receiver_component"],
-                python_backend=False,
-                storage_compression=storage_compression,
-            )[-1]
+    # The native adapter no longer imports or calls born3d_python at all
+    # (fallbacks are owned by select_backend), so the assertion below is that
+    # the native path emits no fallback-related warning.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pred_native = tide.born3d(
+            epsilon_native,
+            sigma_native,
+            mu,
+            grid_spacing=setup["grid_spacing"],
+            dt=setup["dt"],
+            source_amplitude=setup["source_amplitude"],
+            source_location=setup["source_location"],
+            receiver_location=setup["receiver_location"],
+            depsilon=depsilon_native,
+            pml_width=setup["pml_width"],
+            stencil=setup["stencil"],
+            linearize_source=True,
+            source_component=setup["source_component"],
+            receiver_component=setup["receiver_component"],
+            python_backend=False,
+            storage_compression=storage_compression,
+        )[-1]
     assert not any("falling back to Python" in str(w.message) for w in caught)
 
     grad_native = torch.autograd.grad(

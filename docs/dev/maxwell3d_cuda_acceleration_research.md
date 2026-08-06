@@ -78,8 +78,8 @@ Important implications:
 - Source/receiver kernels can become nontrivial launch overhead for small or
   medium grids.
 - `n_threads` is accepted in Python but ignored by the CUDA forward entry.
-- Existing profile artifacts include experimental fp16 and compact-PML runs,
-  but the current public CUDA path rejects non-`standard` execution backends.
+- Existing profile artifacts include compact-PML runs, but the current public
+  CUDA path rejects non-`standard` execution backends.
 
 ## Primary Sources
 
@@ -432,7 +432,7 @@ skip graphs temporarily and fuse the Debye path first.
   factor. If the current kernels are already bandwidth-saturated, gains may be
   modest.
 - CUDA Graphs improve CPU launch overhead, not device-side memory bandwidth.
-- fp16/bf16 field propagation can be fast, but the repo artifacts show
+- BF16 snapshot compression can reduce memory, but the repo artifacts show
   receiver relative L2 differences around a few percent in some 100^3 cases.
   That is a separate numerical-mode decision, not a transparent optimization.
 - Time-reversible gradients are attractive, but tide's lossy and CPML states

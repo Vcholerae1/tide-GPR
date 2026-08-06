@@ -19,11 +19,20 @@ decision = select_backend(plan, native_available=True)
 The contract is intentionally dimension-independent; stencil, CFL, material, and
 boundary validation remains in the physics-specific modules.
 
+## Capability matrix
+
+`backend_capabilities(BackendPreference.NATIVE)` and
+`backend_capabilities(BackendPreference.PYTHON)` return immutable rows covering
+dimension, operation, device, dtype, compute mode, storage, gradient targets,
+and callbacks. Dispatch uses these rows as the source of truth; see the
+[feature matrix](../dev/feature-matrix.md) for the current stable baseline.
+
 ## Main types
 
 - `Dimension`: `tm2d` or `em3d`
 - `BackendPreference`: `auto`, `python`, or `native`
 - `FallbackPolicy`: `reference` or `error`
-- `ComputeMode`: `native` or `fp16_io`
+- `ComputeMode`: `native` only
 - `StorageOptions` and `RuntimeOptions`
 - `SimulationPlan` and `BackendDecision`
+- `BackendCapability` and `BackendCapabilities`

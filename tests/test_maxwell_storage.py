@@ -230,7 +230,7 @@ def test_snapshot_storage_bf16_modes_match():
     torch.testing.assert_close(sig_disk, sig_dev, rtol=1e-4, atol=1e-5)
 
 
-def test_storage_mode_none_rejects_gradients():
+def test_storage_mode_none_routes_gradients_per_fallback_policy():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for this test.")
 
@@ -250,7 +250,9 @@ def test_storage_mode_none_rejects_gradients():
     source_location = torch.tensor([[[8, 8]]], device=device, dtype=torch.int64)
     receiver_location = torch.tensor([[[8, 9]]], device=device, dtype=torch.int64)
 
-    with pytest.raises(ValueError, match="storage_mode='none'"):
+    # Model gradients with storage_mode="none" are rejected by the capability
+    # matrix under fallback="error" (native cannot snapshot wavefields).
+    with pytest.raises(NotImplementedError, match="storage_mode='none'"):
         tide.maxwelltm(
             epsilon,
             sigma,
@@ -263,7 +265,26 @@ def test_storage_mode_none_rejects_gradients():
             stencil=2,
             pml_width=4,
             storage_mode="none",
+            fallback="error",
         )
+
+    # Under the default reference policy the same plan runs on the Python
+    # reference backend instead of raising in the adapter.
+    out = tide.maxwelltm(
+        epsilon,
+        sigma,
+        mu,
+        grid_spacing=0.005,
+        dt=dt,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        stencil=2,
+        pml_width=4,
+        storage_mode="none",
+        fallback="reference",
+    )
+    assert torch.isfinite(out[-1]).all()
 
 
 def _run_tm_forward(stream: torch.cuda.Stream | None = None) -> torch.Tensor:

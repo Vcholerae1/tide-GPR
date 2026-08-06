@@ -1,4 +1,3 @@
-import warnings
 from collections.abc import Sequence
 from typing import Any
 
@@ -16,7 +15,6 @@ from ..utils import (
 )
 from ..validation import validate_model_gradient_sampling_interval
 from .tm2d_born_autograd import BornTMForwardFunc
-from .tm2d_born_python import borntm_python
 from .tm2d_helpers import (
     _init_tm_wavefield,
     _prepare_tm2d_source_injection,
@@ -111,89 +109,16 @@ def borntm_c_cuda(
     dy, dx = grid_spacing
     pml_width_list = _normalize_pml_width_2d(pml_width)
 
-    if mu.requires_grad:
-        warnings.warn(
-            "Native borntm does not yet support gradients with respect to mu. "
-            "Falling back to the Python reference path.",
-            RuntimeWarning,
-        )
-        return borntm_python(
-            epsilon,
-            sigma,
-            mu,
-            depsilon,
-            dsigma,
-            dca,
-            dcb,
-            grid_spacing,
-            dt,
-            source_amplitude,
-            source_location,
-            receiver_location,
-            None,
-            stencil=stencil,
-            pml_width=pml_width,
-            max_vel=max_vel,
-            Ey_0=Ey_0,
-            Hx_0=Hx_0,
-            Hz_0=Hz_0,
-            m_Ey_x_0=m_Ey_x_0,
-            m_Ey_z_0=m_Ey_z_0,
-            m_Hx_z_0=m_Hx_z_0,
-            m_Hz_x_0=m_Hz_x_0,
-            dEy_0=dEy_0,
-            dHx_0=dHx_0,
-            dHz_0=dHz_0,
-            dm_Ey_x_0=dm_Ey_x_0,
-            dm_Ey_z_0=dm_Ey_z_0,
-            dm_Hx_z_0=dm_Hx_z_0,
-            dm_Hz_x_0=dm_Hz_x_0,
-            nt=nt,
-            parameterization=parameterization,
-            linearize_source=linearize_source,
-        )
-
-    if source_requires_grad or state_requires_grad:
-        warnings.warn(
-            "Native borntm does not support gradients with respect to source "
-            "amplitudes or initial wavefields. Falling back to the Python "
-            "reference path.",
-            RuntimeWarning,
-        )
-        return borntm_python(
-            epsilon,
-            sigma,
-            mu,
-            depsilon,
-            dsigma,
-            dca,
-            dcb,
-            grid_spacing,
-            dt,
-            source_amplitude,
-            source_location,
-            receiver_location,
-            None,
-            stencil=stencil,
-            pml_width=pml_width,
-            max_vel=max_vel,
-            Ey_0=Ey_0,
-            Hx_0=Hx_0,
-            Hz_0=Hz_0,
-            m_Ey_x_0=m_Ey_x_0,
-            m_Ey_z_0=m_Ey_z_0,
-            m_Hx_z_0=m_Hx_z_0,
-            m_Hz_x_0=m_Hz_x_0,
-            dEy_0=dEy_0,
-            dHx_0=dHx_0,
-            dHz_0=dHz_0,
-            dm_Ey_x_0=dm_Ey_x_0,
-            dm_Ey_z_0=dm_Ey_z_0,
-            dm_Hx_z_0=dm_Hx_z_0,
-            dm_Hz_x_0=dm_Hz_x_0,
-            nt=nt,
-            parameterization=parameterization,
-            linearize_source=linearize_source,
+    if mu.requires_grad or source_requires_grad or state_requires_grad:
+        # Fallbacks are owned by select_backend (architecture.md): by the time
+        # this adapter runs, the capability matrix has already approved native
+        # execution, so unsupported gradient targets must fail loudly instead
+        # of silently switching to the Python reference.
+        raise NotImplementedError(
+            "Native borntm supports gradients only with respect to the "
+            "epsilon/sigma background model. Gradients with respect to mu, "
+            "source amplitudes, or initial wavefields require the Python "
+            "reference backend (python_backend=True or fallback='reference')."
         )
 
     if torch._C._are_functorch_transforms_active():

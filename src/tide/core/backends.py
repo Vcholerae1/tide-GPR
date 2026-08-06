@@ -4,27 +4,79 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import torch
+
 from .types import (
     BackendPreference,
+    ComputeMode,
     Dimension,
     FallbackPolicy,
+    GradientTarget,
     Operation,
     SimulationPlan,
+    StorageMode,
+)
+
+
+#: Gradient targets whose native execution requires snapshot storage. Source
+#: gradients use the autograd wrappers without stored wavefields, so they are
+#: excluded from the storage-none interaction for forward operations.
+SNAPSHOT_REQUIRING_TARGETS = frozenset(
+    {GradientTarget.EPSILON, GradientTarget.SIGMA}
 )
 
 
 @dataclass(frozen=True, slots=True)
+class BackendCapability:
+    """One supported capability row in the execution matrix.
+
+    Rows are intentionally dimension-scoped today. Keeping the row as a
+    first-class value lets a future operation or backend add a narrow cell
+    without putting another branch in every public solver function.
+    """
+
+    dimension: Dimension
+    operations: frozenset[Operation]
+    devices: frozenset[str]
+    dtypes: frozenset[torch.dtype]
+    compute_modes: frozenset[ComputeMode]
+    storage_modes: frozenset[str]
+    callbacks: bool
+    reusable_background: bool = False
+    gradient_targets: frozenset[GradientTarget] = frozenset()
+
+    def matches(self, plan: SimulationPlan) -> bool:
+        return (
+            self.dimension is plan.dimension
+            and plan.operation in self.operations
+            and plan.compute_mode in self.compute_modes
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class BackendCapabilities:
-    """Capabilities that affect dispatch, not numerical correctness."""
+    """Capabilities that affect dispatch, not numerical correctness.
+
+    The scalar fields are retained as compatibility summaries for callers that
+    inspected the old object. New dispatch decisions use ``matrix`` so the
+    supported dimension/operation/device/precision cells have one owner.
+    """
 
     name: BackendPreference
     cpu: bool
     cuda: bool
-    gradients: bool
     callbacks: bool
     storage_modes: frozenset[str]
     operations: frozenset[Operation]
     reusable_background: bool = False
+    matrix: tuple[BackendCapability, ...] = ()
+
+    def capability_for(self, plan: SimulationPlan) -> BackendCapability | None:
+        """Return the matrix row responsible for a simulation plan."""
+        for capability in self.matrix:
+            if capability.matches(plan):
+                return capability
+        return None
 
     def unsupported_reason(self, plan: SimulationPlan) -> str | None:
         """Return the first capability mismatch in user-facing terms."""
@@ -36,21 +88,77 @@ class BackendCapabilities:
             if plan.operation is Operation.HVP
             else plan.operation.value
         )
+        capability = self.capability_for(plan)
+        if capability is None:
+            return f"{backend_name} {dimension_name} is not in the capability matrix."
+        if plan.device.type not in capability.devices:
+            return (
+                f"{backend_name} {dimension_name} {operation_name} does not support "
+                f"{plan.device.type.upper()}."
+            )
+        if plan.dtype not in capability.dtypes:
+            return (
+                f"{backend_name} {dimension_name} {operation_name} does not support "
+                f"dtype={plan.dtype}."
+            )
+        if plan.compute_mode not in capability.compute_modes:
+            return (
+                f"{backend_name} {dimension_name} {operation_name} does not support "
+                f"compute_mode={plan.compute_mode.value!r}."
+            )
+        if plan.operation not in capability.operations:
+            return f"{backend_name} backend does not support {plan.operation.value}."
         if plan.device.type == "cpu" and not self.cpu:
             return f"{backend_name} {dimension_name} {operation_name} does not support CPU."
         if plan.device.type == "cuda" and not self.cuda:
             return f"{backend_name} {dimension_name} {operation_name} does not support CUDA."
-        if plan.storage.mode.value not in self.storage_modes:
+        if plan.storage.mode.value not in capability.storage_modes:
             return (
                 f"{backend_name} {dimension_name} {operation_name} does not support "
                 f"storage_mode={plan.storage.mode.value!r}."
             )
-        if plan.has_model_gradients and not self.gradients:
-            return f"{backend_name} {dimension_name} does not support model gradients."
-        if plan.has_callbacks and not self.callbacks:
+        missing_targets = plan.gradient_targets - capability.gradient_targets
+        if missing_targets:
+            target_names = ", ".join(
+                sorted(target.value for target in missing_targets)
+            )
+            return (
+                f"{backend_name} {dimension_name} {operation_name} does not "
+                f"support gradients w.r.t. {target_names}."
+            )
+        if (
+            self.name is BackendPreference.NATIVE
+            and plan.storage.mode is StorageMode.NONE
+        ):
+            storage_requiring = plan.gradient_targets & capability.gradient_targets
+            if plan.operation is Operation.FORWARD:
+                # Native forward source gradients run through the autograd
+                # wrappers without stored wavefields; only model gradients
+                # require snapshot storage.
+                storage_requiring = (
+                    storage_requiring & SNAPSHOT_REQUIRING_TARGETS
+                )
+            if storage_requiring:
+                target_names = ", ".join(
+                    sorted(target.value for target in storage_requiring)
+                )
+                return (
+                    f"{backend_name} {dimension_name} {operation_name} does "
+                    f"not support gradients w.r.t. {target_names} with "
+                    "storage_mode='none'."
+                )
+        if (
+            plan.operation is Operation.FORWARD
+            and plan.has_dispersion
+            and plan.gradient_targets
+            and self.name is BackendPreference.NATIVE
+        ):
+            return (
+                f"{backend_name} {dimension_name} forward does not support "
+                "gradients with dispersion; use the Python reference backend."
+            )
+        if plan.has_callbacks and not capability.callbacks:
             return f"{backend_name} backend does not support callbacks."
-        if plan.operation not in self.operations:
-            return f"{backend_name} backend does not support {plan.operation.value}."
         if (
             plan.operation in {Operation.HVP, Operation.LINEARIZATION}
             and self.name is BackendPreference.PYTHON
@@ -88,8 +196,11 @@ class BackendCapabilities:
         return self.unsupported_reason(plan) is None
 
     def can_reuse_background(self, plan: SimulationPlan) -> bool:
+        capability = self.capability_for(plan)
         return bool(
-            self.reusable_background
+            capability is not None
+            and capability.reusable_background
+            and self.reusable_background
             and plan.operation is Operation.LINEARIZATION
             and plan.dimension is Dimension.TM2D
             and plan.device.type == "cuda"
@@ -113,26 +224,188 @@ class BackendDecision:
         )
 
 
-def _capabilities(name: BackendPreference) -> BackendCapabilities:
+def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
+    """Return the immutable capability matrix for a backend.
+
+    Rows are the dispatch contract, so each cell must be reachable by an
+    implementation: no operation, storage mode, or callback flag may be
+    declared here unless a solver actually executes it. Linearization is a
+    TM2D-only feature, native EM3D Born snapshots are device-only, and
+    callbacks are wired only on the forward paths.
+    """
+    all_targets = frozenset(GradientTarget)
     if name is BackendPreference.PYTHON:
-        return BackendCapabilities(
-            name=name,
-            cpu=True,
-            cuda=True,
-            gradients=True,
-            callbacks=True,
-            storage_modes=frozenset({"auto", "device", "none"}),
-            operations=frozenset(Operation),
+        # Storage cells mirror what the public API can actually express for
+        # each operation; the Python reference ignores storage, so every
+        # reachable mode is executable.
+        forward_storage = frozenset({"auto", "device", "cpu", "disk", "none"})
+        born_tm2d_storage = frozenset({"auto", "device", "cpu", "disk", "none"})
+        born_em3d_storage = frozenset({"device", "none"})
+        hvp_tm2d_storage = frozenset({"device", "cpu", "disk"})
+        hvp_em3d_storage = frozenset({"device"})
+        rows: list[BackendCapability] = []
+        for dimension in Dimension:
+            rows.append(
+                BackendCapability(
+                    dimension=dimension,
+                    operations=frozenset({Operation.FORWARD}),
+                    devices=frozenset({"cpu", "cuda"}),
+                    dtypes=frozenset({torch.float32, torch.float64}),
+                    compute_modes=frozenset({ComputeMode.NATIVE}),
+                    storage_modes=forward_storage,
+                    gradient_targets=all_targets,
+                    callbacks=True,
+                )
+            )
+            rows.append(
+                BackendCapability(
+                    dimension=dimension,
+                    operations=frozenset({Operation.BORN}),
+                    devices=frozenset({"cpu", "cuda"}),
+                    dtypes=frozenset({torch.float32, torch.float64}),
+                    compute_modes=frozenset({ComputeMode.NATIVE}),
+                    storage_modes=(
+                        born_tm2d_storage
+                        if dimension is Dimension.TM2D
+                        else born_em3d_storage
+                    ),
+                    gradient_targets=all_targets,
+                    callbacks=False,
+                )
+            )
+            rows.append(
+                BackendCapability(
+                    dimension=dimension,
+                    operations=frozenset({Operation.HVP}),
+                    devices=frozenset({"cpu", "cuda"}),
+                    dtypes=frozenset({torch.float32, torch.float64}),
+                    compute_modes=frozenset({ComputeMode.NATIVE}),
+                    storage_modes=(
+                        hvp_tm2d_storage
+                        if dimension is Dimension.TM2D
+                        else hvp_em3d_storage
+                    ),
+                    gradient_targets=all_targets,
+                    callbacks=False,
+                )
+            )
+            if dimension is Dimension.TM2D:
+                rows.append(
+                    BackendCapability(
+                        dimension=dimension,
+                        operations=frozenset({Operation.LINEARIZATION}),
+                        devices=frozenset({"cpu", "cuda"}),
+                        dtypes=frozenset({torch.float32, torch.float64}),
+                        compute_modes=frozenset({ComputeMode.NATIVE}),
+                        storage_modes=hvp_tm2d_storage,
+                        gradient_targets=all_targets,
+                        callbacks=False,
+                    )
+                )
+        matrix = tuple(rows)
+    else:
+        model_targets = frozenset(
+            {GradientTarget.EPSILON, GradientTarget.SIGMA}
         )
+        forward_targets = model_targets | frozenset({GradientTarget.SOURCE})
+        born_targets = model_targets | frozenset({GradientTarget.PERTURBATION})
+        rows: list[BackendCapability] = []
+        for dimension in Dimension:
+            rows.append(
+                BackendCapability(
+                    dimension=dimension,
+                    operations=frozenset({Operation.FORWARD}),
+                    devices=frozenset({"cpu", "cuda"}),
+                    dtypes=frozenset({torch.float32, torch.float64}),
+                    compute_modes=frozenset({ComputeMode.NATIVE}),
+                    storage_modes=frozenset(
+                        {"auto", "device", "cpu", "disk", "none"}
+                    ),
+                    gradient_targets=forward_targets,
+                    callbacks=True,
+                )
+            )
+            if dimension is Dimension.TM2D:
+                rows.append(
+                    BackendCapability(
+                        dimension=dimension,
+                        operations=frozenset({Operation.BORN}),
+                        devices=frozenset({"cpu", "cuda"}),
+                        dtypes=frozenset({torch.float32, torch.float64}),
+                        compute_modes=frozenset({ComputeMode.NATIVE}),
+                        storage_modes=frozenset(
+                            {"auto", "device", "cpu", "disk", "none"}
+                        ),
+                        gradient_targets=born_targets,
+                        callbacks=False,
+                    )
+                )
+                rows.append(
+                    BackendCapability(
+                        dimension=dimension,
+                        operations=frozenset({Operation.HVP}),
+                        devices=frozenset({"cpu", "cuda"}),
+                        dtypes=frozenset({torch.float32, torch.float64}),
+                        compute_modes=frozenset({ComputeMode.NATIVE}),
+                        storage_modes=frozenset({"device", "cpu", "disk"}),
+                        gradient_targets=model_targets,
+                        callbacks=False,
+                    )
+                )
+                rows.append(
+                    BackendCapability(
+                        dimension=dimension,
+                        operations=frozenset({Operation.LINEARIZATION}),
+                        devices=frozenset({"cpu", "cuda"}),
+                        dtypes=frozenset({torch.float32, torch.float64}),
+                        compute_modes=frozenset({ComputeMode.NATIVE}),
+                        storage_modes=frozenset({"device", "cpu", "disk"}),
+                        gradient_targets=model_targets,
+                        callbacks=False,
+                        reusable_background=True,
+                    )
+                )
+            else:
+                rows.append(
+                    BackendCapability(
+                        dimension=dimension,
+                        operations=frozenset({Operation.BORN}),
+                        devices=frozenset({"cpu", "cuda"}),
+                        dtypes=frozenset({torch.float32, torch.float64}),
+                        compute_modes=frozenset({ComputeMode.NATIVE}),
+                        storage_modes=frozenset({"device", "none"}),
+                        gradient_targets=born_targets,
+                        callbacks=False,
+                    )
+                )
+                rows.append(
+                    BackendCapability(
+                        dimension=dimension,
+                        operations=frozenset({Operation.HVP}),
+                        devices=frozenset({"cpu", "cuda"}),
+                        dtypes=frozenset({torch.float32, torch.float64}),
+                        compute_modes=frozenset({ComputeMode.NATIVE}),
+                        storage_modes=frozenset({"device"}),
+                        gradient_targets=model_targets,
+                        callbacks=False,
+                    )
+                )
+        matrix = tuple(rows)
+
+    devices = frozenset(device for row in matrix for device in row.devices)
     return BackendCapabilities(
-        name=BackendPreference.NATIVE,
-        cpu=True,
-        cuda=True,
-        gradients=True,
-        callbacks=True,
-        storage_modes=frozenset({"auto", "device", "cpu", "disk", "none"}),
-        operations=frozenset(Operation),
-        reusable_background=True,
+        name=name,
+        cpu="cpu" in devices,
+        cuda="cuda" in devices,
+        callbacks=any(row.callbacks for row in matrix),
+        storage_modes=frozenset(
+            storage for row in matrix for storage in row.storage_modes
+        ),
+        operations=frozenset(
+            operation for row in matrix for operation in row.operations
+        ),
+        reusable_background=any(row.reusable_background for row in matrix),
+        matrix=matrix,
     )
 
 
@@ -143,8 +416,8 @@ def select_backend(
 ) -> BackendDecision:
     """Resolve a plan without silently changing a requested backend."""
 
-    python_capabilities = _capabilities(BackendPreference.PYTHON)
-    native_capabilities = _capabilities(BackendPreference.NATIVE)
+    python_capabilities = backend_capabilities(BackendPreference.PYTHON)
+    native_capabilities = backend_capabilities(BackendPreference.NATIVE)
     if plan.backend is BackendPreference.PYTHON:
         python_reason = python_capabilities.unsupported_reason(plan)
         if python_reason is not None:
@@ -187,4 +460,10 @@ def select_backend(
     )
 
 
-__all__ = ["BackendCapabilities", "BackendDecision", "select_backend"]
+__all__ = [
+    "BackendCapability",
+    "BackendCapabilities",
+    "BackendDecision",
+    "backend_capabilities",
+    "select_backend",
+]

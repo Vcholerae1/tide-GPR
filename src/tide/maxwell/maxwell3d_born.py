@@ -4,7 +4,6 @@ from typing import Literal
 import torch
 
 from ..cfl import cfl_condition
-from ..core import BackendPreference, compile_simulation_plan, select_backend
 from ..resampling import downsample_and_movedim, upsample
 from ..typing import (
     Field3DLike,
@@ -25,6 +24,8 @@ from .module_utils import (
     _validate_born_parameterization,
 )
 from .validation_internal import _normalize_component_3d
+from ..core import derive_gradient_targets
+from .dispatch import compile_execution_policy
 
 
 class Born3D(torch.nn.Module):
@@ -144,6 +145,7 @@ class Born3D(torch.nn.Module):
         storage_bytes_limit_device: int | None = None,
         storage_bytes_limit_host: int | None = None,
         n_threads: int | None = None,
+        fallback: Literal["reference", "error"] = "reference",
     ) -> tuple[torch.Tensor, ...]:
         if linearize_source is None:
             linearize_source = self.linearize_source
@@ -219,6 +221,7 @@ class Born3D(torch.nn.Module):
             storage_bytes_limit_device=storage_bytes_limit_device,
             storage_bytes_limit_host=storage_bytes_limit_host,
             n_threads=n_threads,
+            fallback=fallback,
         )
 
 
@@ -298,13 +301,13 @@ def born3d(
     """3D Maxwell Born propagator with background and scattered wavefields."""
     if epsilon.ndim != 3:
         raise NotImplementedError("born3d currently supports a single 3D model only.")
-    plan = compile_simulation_plan(
+    execution = compile_execution_policy(
+        requested_backend=python_backend,
         operation="born",
         dimension="em3d",
         epsilon=epsilon,
         sigma=sigma,
         mu=mu,
-        python_backend=python_backend,
         storage_mode=storage_mode,
         storage_path=storage_path,
         storage_compression=storage_compression,
@@ -315,19 +318,59 @@ def born3d(
         source_component=source_component,
         receiver_component=receiver_component,
         model_gradient_sampling_interval=model_gradient_sampling_interval,
+        gradient_targets=derive_gradient_targets(
+            epsilon=epsilon,
+            sigma=sigma,
+            mu=mu,
+            perturbation_tensors=(depsilon, dsigma, dca, dcb),
+            source_amplitude=source_amplitude,
+            state_tensors=(
+                Ex_0,
+                Ey_0,
+                Ez_0,
+                Hx_0,
+                Hy_0,
+                Hz_0,
+                m_hz_y_0,
+                m_hy_z_0,
+                m_hx_z_0,
+                m_hz_x_0,
+                m_hy_x_0,
+                m_hx_y_0,
+                m_ey_z_0,
+                m_ez_y_0,
+                m_ez_x_0,
+                m_ex_z_0,
+                m_ex_y_0,
+                m_ey_x_0,
+                dEx_0,
+                dEy_0,
+                dEz_0,
+                dHx_0,
+                dHy_0,
+                dHz_0,
+                dm_hz_y_0,
+                dm_hy_z_0,
+                dm_hx_z_0,
+                dm_hz_x_0,
+                dm_hy_x_0,
+                dm_hx_y_0,
+                dm_ey_z_0,
+                dm_ez_y_0,
+                dm_ez_x_0,
+                dm_ex_z_0,
+                dm_ex_y_0,
+                dm_ey_x_0,
+            ),
+        ),
     )
+    plan = execution.plan
     storage_mode = plan.storage.mode.value
     model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
         model_gradient_sampling_interval
     )
 
-    from .. import backend_utils
-
-    decision = select_backend(
-        plan,
-        native_available=backend_utils.is_backend_available(),
-    )
-    use_python = decision.selected is BackendPreference.PYTHON
+    use_python = execution.use_python
 
     source_component = _normalize_component_3d(
         source_component, name="source_component"

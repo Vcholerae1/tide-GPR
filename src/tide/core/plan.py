@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
 import torch
@@ -11,6 +12,7 @@ from .types import (
     ComputeMode,
     Dimension,
     FallbackPolicy,
+    GradientTarget,
     Operation,
     RuntimeOptions,
     SimulationPlan,
@@ -47,11 +49,68 @@ def normalize_backend_request(
     raise ValueError(f"Unknown python_backend value {python_backend!r}.")
 
 
+def derive_gradient_targets(
+    *,
+    epsilon: torch.Tensor | None,
+    sigma: torch.Tensor | None = None,
+    mu: torch.Tensor | None = None,
+    perturbation_tensors: Sequence[torch.Tensor | None] = (),
+    source_amplitude: torch.Tensor | None = None,
+    state_tensors: Sequence[torch.Tensor | None] = (),
+) -> frozenset[GradientTarget]:
+    """Record which inputs actually require gradients.
+
+    Solvers compute this from the user-supplied tensors and pass the result to
+    ``compile_simulation_plan`` so the backend decision (and only the backend
+    decision) owns every fallback.
+    """
+    targets: set[GradientTarget] = set()
+    if epsilon is not None and epsilon.requires_grad:
+        targets.add(GradientTarget.EPSILON)
+    if sigma is not None and sigma.requires_grad:
+        targets.add(GradientTarget.SIGMA)
+    if mu is not None and mu.requires_grad:
+        targets.add(GradientTarget.MU)
+    if any(
+        tensor is not None and tensor.requires_grad
+        for tensor in perturbation_tensors
+    ):
+        targets.add(GradientTarget.PERTURBATION)
+    if source_amplitude is not None and source_amplitude.requires_grad:
+        targets.add(GradientTarget.SOURCE)
+    if any(tensor is not None and tensor.requires_grad for tensor in state_tensors):
+        targets.add(GradientTarget.STATE)
+    return frozenset(targets)
+
+
+def _normalize_gradient_targets(
+    value: GradientTarget | str | Sequence[str | GradientTarget],
+) -> frozenset[GradientTarget]:
+    if isinstance(value, (str, GradientTarget)):
+        items = (value,)
+    else:
+        items = tuple(value)
+    targets: set[GradientTarget] = set()
+    for item in items:
+        try:
+            targets.add(GradientTarget(str(item).lower()))
+        except ValueError as exc:
+            raise ValueError(
+                "gradient_targets must be a subset of "
+                "{'epsilon', 'sigma', 'mu', 'source', 'state', "
+                "'perturbation'}."
+            ) from exc
+    return frozenset(targets)
+
+
 def _normalize_compute_mode(value: str) -> ComputeMode:
     try:
-        return ComputeMode(str(value).lower())
+        mode = ComputeMode(str(value).lower())
     except ValueError as exc:
-        raise ValueError("compute_mode must be 'native' or 'fp16_io'.") from exc
+        raise ValueError(
+            "compute_mode must be 'native'; FP16 support was removed."
+        ) from exc
+    return mode
 
 
 def _normalize_storage_mode(value: str) -> StorageMode:
@@ -93,7 +152,8 @@ def compile_simulation_plan(
     operation: Operation | Literal["forward", "born", "hvp", "linearization"] | str = Operation.FORWARD,
     model_gradient_sampling_interval: int = 1,
     hessian_mode: str | None = None,
-    requires_gradients: bool | None = None,
+    gradient_targets: GradientTarget | str | Sequence[str | GradientTarget] | None = None,
+    has_dispersion: bool = False,
 ) -> SimulationPlan:
     """Compile a dimension-independent execution plan.
 
@@ -149,11 +209,6 @@ def compile_simulation_plan(
         raise ValueError("hessian_mode must be 'full' or 'gauss_newton'.")
     if resolved_operation in {Operation.HVP, Operation.LINEARIZATION}:
         hessian_mode = "full" if hessian_mode is None else hessian_mode
-    if (
-        resolved_compute_mode is ComputeMode.FP16_IO
-        and backend is BackendPreference.PYTHON
-    ):
-        raise NotImplementedError("compute_mode='fp16_io' requires the native backend.")
     if resolved_dimension is Dimension.TM2D and source_component != "ey":
         raise ValueError("TM2D source_component must be 'ey'.")
     if resolved_dimension is Dimension.TM2D and receiver_component != "ey":
@@ -171,13 +226,14 @@ def compile_simulation_plan(
         if receiver_component.lower() not in valid_components:
             raise ValueError(f"invalid receiver_component {receiver_component!r}.")
 
-    model_has_gradients = bool(
-        epsilon.requires_grad
-        or (sigma is not None and sigma.requires_grad)
-        or (mu is not None and mu.requires_grad)
-    )
-    if requires_gradients is None:
-        requires_gradients = model_has_gradients
+    if gradient_targets is None:
+        resolved_gradient_targets = derive_gradient_targets(
+            epsilon=epsilon,
+            sigma=sigma,
+            mu=mu,
+        )
+    else:
+        resolved_gradient_targets = _normalize_gradient_targets(gradient_targets)
 
     return SimulationPlan(
         dimension=resolved_dimension,
@@ -200,13 +256,18 @@ def compile_simulation_plan(
             chunk_steps=storage_chunk_steps,
         ),
         operation=resolved_operation,
-        has_model_gradients=bool(requires_gradients),
         has_callbacks=has_callbacks,
         model_gradient_sampling_interval=model_gradient_sampling_interval,
         hessian_mode=hessian_mode,
         source_component=source_component.lower(),
         receiver_component=receiver_component.lower(),
+        gradient_targets=resolved_gradient_targets,
+        has_dispersion=has_dispersion,
     )
 
 
-__all__ = ["compile_simulation_plan", "normalize_backend_request"]
+__all__ = [
+    "compile_simulation_plan",
+    "derive_gradient_targets",
+    "normalize_backend_request",
+]

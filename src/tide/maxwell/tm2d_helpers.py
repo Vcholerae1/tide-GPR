@@ -1,11 +1,8 @@
-import math
-from collections.abc import Sequence
 from typing import Any
 
 import torch
 
 from ..padding import create_or_pad
-from ..utils import EP0, MU0
 from .common import _make_storage_streams
 
 
@@ -80,78 +77,6 @@ def _prepare_tm2d_source_injection(
     source = source * cb_at_src.to(dtype).unsqueeze(0)
     source.mul_(source_coeff)
     return source.reshape(nt_steps * n_shots * n_sources).contiguous(), f_shot
-
-
-def _build_tm2d_fp16_io_context(
-    epsilon: torch.Tensor,
-    mu: torch.Tensor,
-    grid_spacing: Sequence[float],
-    dt: float,
-    n_shots: int,
-) -> dict[str, Any]:
-    """Build detached reference scales for FP16 wavefield storage."""
-    dy, dx = float(grid_spacing[0]), float(grid_spacing[1])
-    length_scale = min(dy, dx)
-    eps_ref_r = float(epsilon.detach().amin().item())
-    mu_ref_r = float(mu.detach().amin().item())
-    if eps_ref_r <= 0.0 or mu_ref_r <= 0.0:
-        raise ValueError("fp16_io requires strictly positive epsilon and mu.")
-
-    eps_ref_abs = eps_ref_r * EP0
-    mu_ref_abs = mu_ref_r * MU0
-    time_scale = length_scale * math.sqrt(eps_ref_abs * mu_ref_abs)
-    impedance_scale = math.sqrt(mu_ref_abs / eps_ref_abs)
-    source_scale = time_scale / (eps_ref_abs * length_scale * length_scale)
-    return {
-        "length_scale": length_scale,
-        "time_scale": time_scale,
-        "impedance_scale": impedance_scale,
-        "eps_ref_r": eps_ref_r,
-        "mu_ref_r": mu_ref_r,
-        "source_scale": source_scale,
-        "shot_scale": torch.ones(n_shots, device=epsilon.device, dtype=torch.float32),
-        "dt_physical": float(dt),
-        "grid_spacing_physical": (dy, dx),
-    }
-
-
-def _set_tm2d_fp16_io_shot_scale(
-    scale_ctx: dict[str, Any],
-    f_shot: torch.Tensor,
-    initial_primary_fields: tuple[
-        torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
-    ] = (None, None, None),
-) -> torch.Tensor:
-    """Choose exact power-of-two scales bounded by injection and initial fields."""
-    finite_positive = torch.isfinite(f_shot) & (f_shot > 0)
-    exponents = torch.zeros_like(f_shot, dtype=torch.float32)
-    if finite_positive.any():
-        exponents[finite_positive] = torch.round(
-            -torch.log2(f_shot[finite_positive])
-        ).clamp(-30.0, 30.0)
-
-    impedance_scale = float(scale_ctx["impedance_scale"])
-    state_max = torch.zeros_like(f_shot, dtype=torch.float32)
-    for field, field_scale in zip(
-        initial_primary_fields, (1.0, impedance_scale, impedance_scale)
-    ):
-        if field is None or field.numel() == 0:
-            continue
-        per_shot = field.detach().abs().to(torch.float32)
-        if per_shot.ndim == 2:
-            per_shot = per_shot.amax().expand_as(state_max)
-        else:
-            per_shot = per_shot.flatten(1).amax(dim=1)
-        state_max = torch.maximum(state_max, per_shot * field_scale)
-    finite_state = torch.isfinite(state_max) & (state_max > 0)
-    if finite_state.any():
-        state_limit = torch.floor(torch.log2(8192.0 / state_max[finite_state])).clamp(
-            -30.0, 30.0
-        )
-        exponents[finite_state] = torch.minimum(exponents[finite_state], state_limit)
-    shot_scale = torch.exp2(exponents).to(torch.float32)
-    scale_ctx["shot_scale"] = shot_scale
-    return shot_scale
 
 
 def _unscale_tm2d_outputs(

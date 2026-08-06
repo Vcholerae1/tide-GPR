@@ -45,6 +45,7 @@ def lbfgs_minimize(
 
     resolved = options or LBFGSOptions()
     state = _prepare_initial_state(objective, x0, lower_bounds, upper_bounds, resolved)
+    initial_f = state.f
     run = _OptimizerRun(state, _TraceRecorder(resolved.trace, callback), method="lbfgs")
     history = _LBFGSHistory(resolved.history_size, resolved.curvature_tolerance)
     status = run.initial_status(resolved.stopping)
@@ -104,6 +105,19 @@ def lbfgs_minimize(
             line_search_iter=result.evaluations,
             history=len(history.s),
         )
+        relative_tolerance = resolved.relative_objective_tolerance
+        if relative_tolerance is not None:
+            converged_relative = (
+                abs(state.f) <= relative_tolerance
+                if initial_f == 0.0
+                else state.f / initial_f < relative_tolerance
+            )
+            if converged_relative:
+                return run.finish(
+                    OptimizerStatus.CONVERGED_FUNCTION,
+                    iteration,
+                    history=len(history.s),
+                )
         status = run.step_status(resolved.stopping, iteration, previous_x, previous_f)
         if status is not None:
             return run.finish(status, iteration, history=len(history.s))

@@ -259,7 +259,7 @@ def test_debye_em3d_cpu_backend_falls_back_to_python():
     assert torch.isfinite(out[-1]).all()
 
 
-def test_debye_falls_back_to_python_backend_for_gradients():
+def test_debye_gradient_fallback_routes_through_policy():
     epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _tm_case()
     epsilon = epsilon.clone().detach().requires_grad_(True)
     with warnings.catch_warnings(record=True) as caught:
@@ -277,8 +277,16 @@ def test_debye_falls_back_to_python_backend_for_gradients():
             python_backend=False,
             dispersion=tide.DebyeDispersion(delta_epsilon=1.0, tau=5e-10),
         )
-    assert any("Debye native backend currently supports forward inference only" in str(w.message) for w in caught)
     assert torch.isfinite(out[-1]).all()
+    assert out[-1].requires_grad
+    # The capability matrix routes dispersion+gradients to the Python
+    # reference before any adapter runs, so the adapter-level warning
+    # must not fire.
+    assert not any(
+        "Debye native backend currently supports forward inference only"
+        in str(w.message)
+        for w in caught
+    )
 
 
 def test_debye_callback_exposes_dispersion_and_polarization_tm():

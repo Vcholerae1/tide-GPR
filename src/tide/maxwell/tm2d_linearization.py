@@ -7,12 +7,13 @@ from typing import Any, Literal
 
 import torch
 
-from ..core import BackendPreference, compile_simulation_plan, select_backend
+from ..core import derive_gradient_targets
 from .tm2d import _default_receiver_misfit, maxwelltm_hvp
 from .tm2d_born_autograd import (
     tm2d_receiver_full_hvp_native,
     tm2d_receiver_gn_hvp_native,
 )
+from .dispatch import compile_execution_policy
 
 ReceiverMisfit = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
@@ -68,26 +69,23 @@ class TM2DLinearizationContext:
         if hessian_mode not in {"full", "gauss_newton"}:
             raise ValueError("hessian_mode must be 'full' or 'gauss_newton'.")
 
-        plan = compile_simulation_plan(
+        execution = compile_execution_policy(
+            requested_backend=python_backend,
             operation="linearization",
             dimension="tm2d",
             epsilon=epsilon,
             sigma=sigma,
             mu=mu,
-            python_backend=python_backend,
             storage_mode=storage_mode,
             storage_compression=storage_compression or False,
             model_gradient_sampling_interval=model_gradient_sampling_interval,
             hessian_mode=hessian_mode,
-            requires_gradients=True,
+            gradient_targets=derive_gradient_targets(
+                epsilon=epsilon,
+                sigma=sigma,
+                mu=mu,
+            ),
         )
-        from .. import backend_utils
-
-        decision = select_backend(
-            plan,
-            native_available=backend_utils.is_backend_available(),
-        )
-
         self.epsilon = epsilon
         self.sigma = sigma
         self.mu = mu
@@ -105,11 +103,12 @@ class TM2DLinearizationContext:
         self.model_gradient_sampling_interval = model_gradient_sampling_interval
         self.linearize_source = linearize_source
         self.hessian_mode = hessian_mode
-        self.python_backend = decision.selected is BackendPreference.PYTHON
+        self.python_backend = execution.use_python
         self.storage_mode = storage_mode
         self.storage_compression = storage_compression
+        plan = execution.plan
         self._plan = plan
-        self._backend_decision = decision
+        self._backend_decision = execution.decision
         self._background_cache: dict[str, Any] | None = None
         self._closed = False
         self._fingerprints = {

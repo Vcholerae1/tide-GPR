@@ -799,7 +799,14 @@ def test_tm2d_gauss_newton_direction_block_is_symmetric_psd():
         [case["source_amplitude"], 0.7 * case["source_amplitude"]], dim=0
     )
     source_location = case["source_location"].repeat(2, 1, 1)
+    # The source and receiver must be distinct: with a coincident source and
+    # receiver on a tiny 6x6 grid the receiver gradient is dominated by the
+    # injected wavefield, and even the Python reference implementation shows
+    # ~1e-4 relative symmetry breaking in float32 (far above the 2e-5
+    # tolerance), so the check would be meaningless for any backend.
     receiver_location = case["receiver_location"].repeat(2, 1, 1)
+    receiver_location[..., 0, 0] = 2
+    receiver_location[..., 0, 1] = 2
     observed_data = torch.zeros(
         source_amplitude.shape[-1],
         2,

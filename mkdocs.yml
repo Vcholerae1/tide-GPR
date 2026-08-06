@@ -138,4 +138,7 @@ nav:
   - Development:
       - Build: dev/build.md
       - CUDA: dev/cuda.md
+      - Architecture: dev/architecture.md
+      - Feature Lifecycle: dev/feature-lifecycle.md
+      - Feature Matrix: dev/feature-matrix.md
       - Experimental Paths: dev/experimental-paths.md

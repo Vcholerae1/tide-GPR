@@ -26,7 +26,6 @@ class FallbackPolicy(StrEnum):
 
 class ComputeMode(StrEnum):
     NATIVE = "native"
-    FP16_IO = "fp16_io"
 
 
 class StorageMode(StrEnum):
@@ -42,6 +41,30 @@ class Operation(StrEnum):
     BORN = "born"
     HVP = "hvp"
     LINEARIZATION = "linearization"
+
+
+class GradientTarget(StrEnum):
+    """Differentiation targets a solver may be asked to back-propagate into.
+
+    ``epsilon``/``sigma``/``mu`` are background-model tensors; ``perturbation``
+    covers the Born perturbation inputs (`depsilon`, `dsigma`, `dca`, `dcb`);
+    ``source`` is the source-amplitude wavelet; ``state`` is any initial
+    wavefield or Born-derivative state tensor. Rows in the capability matrix
+    declare the subset they support, and ``select_backend`` rejects native
+    execution for plans that require targets a row does not offer.
+    """
+
+    EPSILON = "epsilon"
+    SIGMA = "sigma"
+    MU = "mu"
+    PERTURBATION = "perturbation"
+    SOURCE = "source"
+    STATE = "state"
+
+
+MODEL_GRADIENT_TARGETS = frozenset(
+    {GradientTarget.EPSILON, GradientTarget.SIGMA, GradientTarget.MU}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,12 +125,17 @@ class SimulationPlan:
     runtime: RuntimeOptions
     storage: StorageOptions
     operation: Operation
-    has_model_gradients: bool
     has_callbacks: bool
     model_gradient_sampling_interval: int = 1
     hessian_mode: str | None = None
     source_component: str = "ey"
     receiver_component: str = "ey"
+    gradient_targets: frozenset[GradientTarget] = frozenset()
+    has_dispersion: bool = False
+
+    @property
+    def has_model_gradients(self) -> bool:
+        return bool(self.gradient_targets & MODEL_GRADIENT_TARGETS)
 
     @property
     def backend(self) -> BackendPreference:
@@ -123,11 +151,6 @@ class SimulationPlan:
                 f"{reason} requires the native backend, "
                 "but backend='python' was requested."
             )
-        if (
-            self.compute_mode is ComputeMode.FP16_IO
-            and self.backend is BackendPreference.PYTHON
-        ):
-            raise NotImplementedError("fp16_io requires the native backend.")
 
 
 __all__ = [
@@ -135,6 +158,7 @@ __all__ = [
     "ComputeMode",
     "Dimension",
     "FallbackPolicy",
+    "GradientTarget",
     "Operation",
     "RuntimeOptions",
     "SimulationPlan",

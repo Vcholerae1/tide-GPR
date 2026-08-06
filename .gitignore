@@ -36,6 +36,7 @@ data/
 tide-runs/
 
 # Local research workspaces
+examples/
 experiments/
 docs/research/
 /benchmarks/hydro_*.py

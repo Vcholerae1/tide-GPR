@@ -1,5 +1,6 @@
 import warnings
 from collections.abc import Sequence
+from typing import Literal
 
 import torch
 
@@ -94,7 +95,7 @@ def maxwell3d_python(
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
     *,
-    compute_mode: str = "native",
+    compute_mode: Literal["native"] = "native",
     validate_material_inputs: bool = True,
     fallback: str = "reference",
 ):

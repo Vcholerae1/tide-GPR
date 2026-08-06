@@ -1,0 +1,43 @@
+name: Quality
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-and-cpu:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: "latest"
+
+      - name: Install development environment
+        run: uv sync --group dev
+
+      - name: Ruff
+        run: uv run ruff check src tests
+
+      - name: Architecture and CPU smoke tests
+        run: >-
+          uv run pytest -q
+          tests/test_architecture.py
+          tests/test_public_api.py
+          tests/test_core_plan.py
+          tests/test_validation.py
+          tests/test_wavelets.py
+          tests/test_staggered.py
+          tests/test_utils.py
+          tests/test_optim_methods.py
+          tests/test_workflow_distributed.py
+          tests/test_native_cpu_parity.py
+          tests/test_maxwell3d_backend_parity.py

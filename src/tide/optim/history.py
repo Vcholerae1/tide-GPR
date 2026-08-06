@@ -49,10 +49,9 @@ class _LBFGSHistory:
             alphas.append(alpha)
             rhos.append(rho)
         r = _apply_preconditioner(preconditioner, x, q, budget)
-        if preconditioner is None:
-            last_s = self.s[-1]
-            last_y = self.y[-1]
-            r = (_dot(last_s, last_y) / _dot(last_y, last_y)) * r
+        last_s = self.s[-1]
+        last_y = self.y[-1]
+        r = (_dot(last_s, last_y) / _dot(last_y, last_y)) * r
         for s, y, alpha, rho in zip(
             self.s, self.y, reversed(alphas), reversed(rhos), strict=True
         ):

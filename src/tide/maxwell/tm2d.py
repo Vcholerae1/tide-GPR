@@ -5,7 +5,9 @@ import torch
 
 from ..callbacks import Callback
 from ..cfl import cfl_condition
-from ..core import BackendPreference, compile_simulation_plan, select_backend
+from ..core import (
+    BackendPreference,
+)
 from ..dispersion import DebyeDispersion
 from ..grid_utils import _normalize_grid_spacing_2d
 from ..resampling import downsample_and_movedim, upsample
@@ -33,6 +35,8 @@ from .common import (
     _structured_vmap_state_in_dim,
     _wrap_structured_callback,
 )
+from ..core import GradientTarget, derive_gradient_targets
+from .dispatch import ExecutionPolicy, compile_execution_policy
 from .module_utils import _register_maxwell_model
 from .tm2d_python import maxwell_func
 from .validation_internal import (
@@ -44,6 +48,51 @@ from .validation_internal import (
 )
 
 ReceiverMisfit = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+def _resolve_tm2d_execution_policy(
+    *,
+    epsilon: torch.Tensor,
+    sigma: torch.Tensor,
+    mu: torch.Tensor,
+    python_backend: Literal["eager", "jit", "compile"] | bool,
+    compute_mode: str,
+    storage_mode: str,
+    storage_path: str,
+    storage_compression: bool | str,
+    storage_bytes_limit_device: int | None,
+    storage_bytes_limit_host: int | None,
+    storage_chunk_steps: int,
+    n_threads: int | None,
+    fallback: str,
+    has_callbacks: bool,
+    model_gradient_sampling_interval: int,
+    gradient_targets: frozenset[GradientTarget] | None = None,
+    has_dispersion: bool = False,
+) -> ExecutionPolicy:
+    """Compile the cross-cutting plan and select one TM2D execution adapter."""
+    execution = compile_execution_policy(
+        requested_backend=python_backend,
+        operation="forward",
+        dimension="tm2d",
+        epsilon=epsilon,
+        sigma=sigma,
+        mu=mu,
+        compute_mode=compute_mode,
+        storage_mode=storage_mode,
+        storage_path=storage_path,
+        storage_compression=storage_compression,
+        storage_bytes_limit_device=storage_bytes_limit_device,
+        storage_bytes_limit_host=storage_bytes_limit_host,
+        storage_chunk_steps=storage_chunk_steps,
+        n_threads=n_threads,
+        fallback=fallback,
+        has_callbacks=has_callbacks,
+        model_gradient_sampling_interval=model_gradient_sampling_interval,
+        gradient_targets=gradient_targets,
+        has_dispersion=has_dispersion,
+    )
+    return execution
 
 
 def _default_receiver_misfit(
@@ -112,7 +161,8 @@ class MaxwellTM(torch.nn.Module):
         storage_bytes_limit_host: int | None = None,
         storage_chunk_steps: int = 0,
         dispersion: DebyeDispersion | None = None,
-        compute_mode: Literal["native", "fp16_io"] = "native",
+        compute_mode: Literal["native"] = "native",
+        fallback: Literal["reference", "error"] = "reference",
     ):
         assert isinstance(self.epsilon, torch.Tensor)
         assert isinstance(self.sigma, torch.Tensor)
@@ -155,6 +205,7 @@ class MaxwellTM(torch.nn.Module):
             n_threads=None,
             dispersion=dispersion,
             compute_mode=compute_mode,
+            fallback=fallback,
         )
 
     @runtime_typecheck
@@ -286,25 +337,24 @@ def maxwelltm_hvp(
     if not callable(misfit_fn):
         raise TypeError("misfit must be callable when provided.")
 
-    plan = compile_simulation_plan(
+    execution = compile_execution_policy(
+        requested_backend=python_backend,
         operation="hvp",
         dimension="tm2d",
         epsilon=epsilon,
         sigma=sigma,
         mu=mu,
-        python_backend=python_backend,
         storage_mode=storage_mode,
         storage_compression=storage_compression or False,
         model_gradient_sampling_interval=model_gradient_sampling_interval,
         hessian_mode=hessian_mode,
-        requires_gradients=True,
+        gradient_targets=derive_gradient_targets(
+            epsilon=epsilon,
+            sigma=sigma,
+            mu=mu,
+        ),
     )
-    from .. import backend_utils
-
-    decision = select_backend(
-        plan,
-        native_available=backend_utils.is_backend_available(),
-    )
+    decision = execution.decision
 
     if decision.selected is BackendPreference.PYTHON:
         from .tm2d_born_autograd import tm2d_receiver_hvp_naive
@@ -403,37 +453,12 @@ def maxwelltm(
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
-    compute_mode: Literal["native", "fp16_io"] = "native",
+    compute_mode: Literal["native"] = "native",
     fallback: Literal["reference", "error"] = "reference",
 ):
     """2D TM mode Maxwell equations solver.
 
-    ``compute_mode="fp16_io"`` is an experimental CUDA inference mode that
-    stores the primary wavefields in FP16 and packs adjacent cells with
-    ``half2`` while retaining FP32-lane arithmetic, coefficients, CPML
-    memories, receiver data, and returned states. Set the diagnostic
-    environment variable ``TIDE_TM_FP16_HALF2=0`` to use the scalar FP16 I/O
-    kernel instead. ``TIDE_TM_FP16_HALF2_ARITH=1`` additionally enables
-    experimental native-half2 stencil and interior field arithmetic; it trades
-    accuracy for a small extra speedup and is disabled by default.
-    ``TIDE_TM_FP16_ADJOINT=1`` also stores and propagates the adjoint fields in
-    FP16. An exact power-of-two loss scale is selected from each adjoint source
-    and removed from the returned FP32 gradients to avoid FP16 underflow. This
-    remains an accuracy-limit experiment and is disabled by default.
-    This mode is
-    intended for large multi-shot workloads.
-    Material gradients use FP16
-    forward primary fields, reduced-precision snapshots, and an FP32 adjoint
-    with FP32 accumulation. Gradient mode currently requires device snapshot
-    storage. Batched models, dispersion, callbacks, and the Python backend are
-    not supported.
-
     """
-    if compute_mode not in {
-        "native",
-        "fp16_io",
-    }:
-        raise ValueError("compute_mode must be 'native' or 'fp16_io'.")
 
     epsilon_input = epsilon
     sigma_input = sigma
@@ -483,9 +508,7 @@ def maxwelltm(
     m_Hx_z = batch_meta["state_tensors"]["m_Hx_z"]
     m_Hz_x = batch_meta["state_tensors"]["m_Hz_x"]
 
-    plan = compile_simulation_plan(
-        operation="forward",
-        dimension="tm2d",
+    execution = _resolve_tm2d_execution_policy(
         epsilon=epsilon,
         sigma=sigma,
         mu=mu,
@@ -501,32 +524,27 @@ def maxwelltm(
         fallback=fallback,
         has_callbacks=forward_callback is not None or backward_callback is not None,
         model_gradient_sampling_interval=model_gradient_sampling_interval,
+        gradient_targets=derive_gradient_targets(
+            epsilon=epsilon_input,
+            sigma=sigma_input,
+            mu=mu_input,
+            source_amplitude=source_amplitude_input,
+            state_tensors=(
+                Ey_0_input,
+                Hx_0_input,
+                Hz_0_input,
+                m_Ey_x_input,
+                m_Ey_z_input,
+                m_Hx_z_input,
+                m_Hz_x_input,
+            ),
+        ),
+        has_dispersion=dispersion is not None,
     )
-    compute_mode = plan.compute_mode.value
-    storage_mode = plan.storage.mode.value
-
-    from .. import backend_utils
-
-    decision = select_backend(
-        plan,
-        native_available=backend_utils.is_backend_available(),
-    )
-    use_python = decision.selected is BackendPreference.PYTHON
-    dispatch_backend = python_backend if use_python else False
-
-    if compute_mode == "fp16_io":
-        if use_python:
-            raise NotImplementedError(
-                f"compute_mode={compute_mode!r} requires the native CUDA backend."
-            )
-        if batch_meta["model_batched"]:
-            raise NotImplementedError(
-                f"compute_mode={compute_mode!r} does not yet support batched models."
-            )
-        if forward_callback is not None or backward_callback is not None:
-            raise NotImplementedError(
-                f"compute_mode={compute_mode!r} does not yet support callbacks."
-            )
+    compute_mode = execution.compute_mode
+    storage_mode = execution.storage_mode
+    use_python = execution.use_python
+    dispatch_backend = execution.dispatch_backend
 
     model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
         model_gradient_sampling_interval
@@ -718,6 +736,7 @@ def maxwelltm(
                 n_threads,
                 dispersion,
                 validate_material_inputs=False,
+                fallback=fallback,
             )
 
         result = torch.vmap(
@@ -845,6 +864,7 @@ def maxwelltm(
         n_threads,
         dispersion,
         compute_mode=compute_mode,
+        fallback=fallback,
     )
 
     (

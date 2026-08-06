@@ -410,6 +410,64 @@ def test_line_search_accepts_large_finite_float64_step() -> None:
     assert options.initial_step == 1e40
 
 
+def test_sotb_weak_wolfe_expands_a_projected_tiny_gradient_step() -> None:
+    events: list[tide.optim.OptimizerEvent] = []
+
+    def objective(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        grad = 1e-5 * (x - 1.0)
+        return 0.5e-5 * (x - 1.0).square().sum(), grad
+
+    result = tide.optim.lbfgs_minimize(
+        objective,
+        torch.tensor([0.0]),
+        lower_bounds=0.0,
+        upper_bounds=2.0,
+        options=tide.optim.LBFGSOptions(
+            stopping=_stopping(max_iter=2, max_evaluations=20),
+            line_search=tide.optim.LineSearchOptions(method="weak_wolfe"),
+        ),
+        callback=events.append,
+    )
+
+    steps = [event for event in events if event.event == tide.optim.OptimizerEventType.STEP]
+    assert steps[0].alpha >= 10_000.0
+    torch.testing.assert_close(result.x, torch.tensor([1.0]))
+
+
+def test_preconditioned_lbfgs_history_keeps_sotb_gamma_scaling() -> None:
+    from tide.optim.common import _EvaluationBudget
+    from tide.optim.history import _LBFGSHistory
+
+    history = _LBFGSHistory(size=2, curvature_tolerance=0.0)
+    assert history.update(torch.tensor([1.0, 0.0]), torch.tensor([2.0, 1.0]))
+    direction = history.direction(
+        torch.zeros(2),
+        torch.tensor([1.0, 3.0]),
+        lambda _x, vector: torch.tensor([4.0, 5.0]) * vector,
+        _EvaluationBudget(max_objective=None),
+    )
+
+    torch.testing.assert_close(direction, torch.tensor([2.0, -5.0]))
+
+
+def test_lbfgs_supports_sotb_relative_objective_convergence() -> None:
+    def objective(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        grad = x
+        return 0.5 * x.square().sum(), grad
+
+    result = tide.optim.lbfgs_minimize(
+        objective,
+        torch.tensor([2.0]),
+        options=tide.optim.LBFGSOptions(
+            stopping=_stopping(max_iter=10, max_evaluations=30, gtol=0.0),
+            relative_objective_tolerance=0.1,
+        ),
+    )
+
+    assert result.status == tide.optim.OptimizerStatus.CONVERGED_FUNCTION
+    assert result.f / 2.0 < 0.1
+
+
 def test_shifted_negative_objective_uses_gradient_convergence() -> None:
     def objective(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         grad = x - 3.0

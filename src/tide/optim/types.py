@@ -16,7 +16,7 @@ Objective: TypeAlias = Callable[[Tensor], tuple[ScalarLoss, Tensor]]
 LinearOperator: TypeAlias = Callable[[Tensor], Tensor]
 Preconditioner: TypeAlias = Callable[[Tensor, Tensor], Tensor]
 HessianVectorProduct: TypeAlias = Callable[[Tensor, Tensor], Tensor]
-LineSearchMethod = Literal["strong_wolfe", "armijo"]
+LineSearchMethod = Literal["weak_wolfe", "strong_wolfe", "armijo"]
 
 
 class OptimizerStatus(StrEnum):
@@ -77,25 +77,29 @@ class StoppingCriteria:
 class LineSearchOptions:
     """Line-search settings.
 
-    Box-constrained problems always use projected Armijo backtracking because
-    projection makes the search path non-smooth. ``strong_wolfe`` is used only
-    for unconstrained problems.
+    ``weak_wolfe`` follows the projected bracketing/dichotomy strategy used by
+    the SEISCOPE Optimization Toolbox. ``strong_wolfe`` is used only for
+    unconstrained problems; bounded strong-Wolfe requests fall back to
+    projected Armijo.
     """
 
-    method: LineSearchMethod = "strong_wolfe"
+    method: LineSearchMethod = "weak_wolfe"
     initial_step: float = 1.0
     max_steps: int = 20
     c1: float = 1e-4
     c2: float = 0.9
     contraction: float = 0.5
     expansion: float = 2.0
+    growth: float = 10.0
     step_min: float = 1e-16
-    step_max: float = 65536.0
+    step_max: float = float("inf")
     zoom_tolerance: float = 1e-12
 
     def __post_init__(self) -> None:
-        if self.method not in ("strong_wolfe", "armijo"):
-            raise ValueError("method must be 'strong_wolfe' or 'armijo'.")
+        if self.method not in ("weak_wolfe", "strong_wolfe", "armijo"):
+            raise ValueError(
+                "method must be 'weak_wolfe', 'strong_wolfe', or 'armijo'."
+            )
         if self.initial_step <= 0.0 or not isfinite(self.initial_step):
             raise ValueError("initial_step must be finite and positive.")
         if self.max_steps <= 0:
@@ -106,6 +110,8 @@ class LineSearchOptions:
             raise ValueError("contraction must be in (0, 1).")
         if self.expansion <= 1.0 or not isfinite(self.expansion):
             raise ValueError("expansion must be finite and greater than 1.")
+        if self.growth <= 1.0 or not isfinite(self.growth):
+            raise ValueError("growth must be finite and greater than 1.")
         if not (0.0 < self.step_min < self.step_max):
             raise ValueError("step bounds must satisfy 0 < step_min < step_max.")
         if self.zoom_tolerance < 0.0 or not isfinite(self.zoom_tolerance):
@@ -161,12 +167,20 @@ class LBFGSOptions(OptimizerOptions):
 
     history_size: int = 10
     curvature_tolerance: float = 1e-10
+    relative_objective_tolerance: float | None = None
 
     def __post_init__(self) -> None:
         if self.history_size <= 0:
             raise ValueError("history_size must be positive.")
         if self.curvature_tolerance < 0.0 or not isfinite(self.curvature_tolerance):
             raise ValueError("curvature_tolerance must be finite and non-negative.")
+        if self.relative_objective_tolerance is not None and (
+            self.relative_objective_tolerance < 0.0
+            or not isfinite(self.relative_objective_tolerance)
+        ):
+            raise ValueError(
+                "relative_objective_tolerance must be finite and non-negative."
+            )
 
 
 @dataclass(slots=True, frozen=True)

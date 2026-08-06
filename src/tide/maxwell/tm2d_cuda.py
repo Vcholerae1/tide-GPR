@@ -18,11 +18,9 @@ from .common import (
 )
 from .tm2d_autograd import MaxwellTMForwardFunc
 from .tm2d_helpers import (
-    _build_tm2d_fp16_io_context,
     _init_tm_wavefield,
     _physical_tm2d_callback_wavefields,
     _prepare_tm2d_source_injection,
-    _set_tm2d_fp16_io_shot_scale,
     _unscale_tm2d_outputs,
 )
 from .tm2d_python import maxwell_python
@@ -65,6 +63,7 @@ def maxwell_c_cuda(
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
     compute_mode: str = "native",
+    fallback: str = "reference",
 ):
     """Performs Maxwell propagation using the native C/CUDA backend."""
     from .. import backend_utils
@@ -89,62 +88,10 @@ def maxwell_c_cuda(
     grid_spacing = _normalize_grid_spacing_2d(grid_spacing)
     dy, dx = grid_spacing
 
-    if compute_mode not in {"native", "fp16_io"}:
-        raise ValueError("compute_mode must be 'native' or 'fp16_io'.")
-    fp16_io = compute_mode == "fp16_io"
-    fp32_compact = False
-    if fp16_io:
-        if device.type != "cuda":
-            raise NotImplementedError("compute_mode='fp16_io' requires CUDA.")
-        if dtype != torch.float32:
-            raise TypeError("compute_mode='fp16_io' requires float32 model inputs.")
-        if model_batched:
-            raise NotImplementedError(
-                "compute_mode='fp16_io' does not yet support batched models."
-            )
-        if dispersion is not None:
-            raise NotImplementedError(
-                "compute_mode='fp16_io' does not yet support Debye dispersion."
-            )
-        if (epsilon.requires_grad or sigma.requires_grad) and save_snapshots is False:
-            raise NotImplementedError(
-                "compute_mode='fp16_io' gradients require snapshot storage."
-            )
-        if (
-            epsilon.requires_grad or sigma.requires_grad
-        ) and storage_mode.lower() not in {
-            "auto",
-            "device",
-        }:
-            raise NotImplementedError(
-                "compute_mode='fp16_io' gradients currently require "
-                "storage_mode='auto' or 'device'."
-            )
-        if forward_callback is not None or backward_callback is not None:
-            raise NotImplementedError(
-                "compute_mode='fp16_io' does not yet support callbacks."
-            )
-    if fp32_compact:
-        if device.type != "cuda":
-            raise NotImplementedError(f"compute_mode={compute_mode!r} requires CUDA.")
-        if dtype != torch.float32:
-            raise TypeError(f"compute_mode={compute_mode!r} requires float32 inputs.")
-        if model_batched:
-            raise NotImplementedError(
-                f"compute_mode={compute_mode!r} does not yet support batched models."
-            )
-        if dispersion is not None:
-            raise NotImplementedError(
-                f"compute_mode={compute_mode!r} does not support Debye dispersion."
-            )
-        if epsilon.requires_grad or sigma.requires_grad:
-            raise NotImplementedError(
-                f"compute_mode={compute_mode!r} is currently forward-only."
-            )
-        if forward_callback is not None or backward_callback is not None:
-            raise NotImplementedError(
-                f"compute_mode={compute_mode!r} does not yet support callbacks."
-            )
+    if compute_mode != "native":
+        raise NotImplementedError(
+            "FP16 support was removed; compute_mode must be 'native'."
+        )
 
     n_threads_val = 0
     if n_threads is not None:
@@ -187,21 +134,6 @@ def maxwell_c_cuda(
     pml_dt = dt
     pml_grid_spacing = grid_spacing
     pml_max_vel = max_vel
-    if fp16_io:
-        scale_ctx = _build_tm2d_fp16_io_context(epsilon, mu, grid_spacing, dt, n_shots)
-        epsilon = epsilon / float(scale_ctx["eps_ref_r"])
-        mu = mu / float(scale_ctx["mu_ref_r"])
-        sigma = sigma * (
-            float(scale_ctx["time_scale"]) / (float(scale_ctx["eps_ref_r"]) * EP0)
-        )
-        if source_amplitude is not None and source_amplitude.numel() > 0:
-            source_amplitude = source_amplitude * float(scale_ctx["source_scale"])
-        length_scale = float(scale_ctx["length_scale"])
-        time_scale = float(scale_ctx["time_scale"])
-        grid_spacing = [dy / length_scale, dx / length_scale]
-        dy, dx = grid_spacing
-        dt = dt / time_scale
-        max_vel = max_vel / (length_scale / time_scale)
     pml_freq = 0.5 / pml_dt
 
     fd_pad = stencil // 2
@@ -234,22 +166,13 @@ def maxwell_c_cuda(
         device=device,
         dtype=dtype,
     )
-    if fp16_io:
-        denom = 1.0 + sigma_padded * dt / (2.0 * epsilon_padded)
-        material = {
-            "ca": (1.0 - sigma_padded * dt / (2.0 * epsilon_padded)) / denom,
-            "cb": (dt / epsilon_padded) / denom,
-            "cq": dt / mu_padded,
-            "has_dispersion": False,
-        }
-    else:
-        material = compile_material_coefficients(
-            epsilon_padded,
-            sigma_padded,
-            mu_padded,
-            dt,
-            dispersion=dispersion_padded,
-        )
+    material = compile_material_coefficients(
+        epsilon_padded,
+        sigma_padded,
+        mu_padded,
+        dt,
+        dispersion=dispersion_padded,
+    )
     ca = (
         material["ca"].contiguous()
         if model_batched
@@ -299,7 +222,7 @@ def maxwell_c_cuda(
             cb_flat = cb_phys.expand(n_shots, -1, -1).reshape(n_shots, flat_model_shape)
         cb_at_src = cb_flat.gather(1, sources_i)
 
-    source_injection, f_shot = _prepare_tm2d_source_injection(
+    source_injection, _ = _prepare_tm2d_source_injection(
         source_amplitude=source_amplitude,
         cb_at_src=cb_at_src,
         source_coeff=source_coeff,
@@ -308,35 +231,12 @@ def maxwell_c_cuda(
         n_sources=n_sources,
         nt_steps=nt_steps,
     )
-    if fp16_io and scale_ctx is not None:
-        shot_scale = _set_tm2d_fp16_io_shot_scale(
-            scale_ctx,
-            f_shot,
-            (Ey_0, Hx_0, Hz_0),
-        )
-        if source_injection.numel() > 0:
-            source_injection = (
-                (
-                    source_injection.reshape(nt_steps, n_shots, n_sources)
-                    * shot_scale.reshape(1, n_shots, 1)
-                )
-                .reshape(-1)
-                .contiguous()
-            )
-
     size_with_batch = (n_shots, padded_ny, padded_nx)
-    field_dtype = torch.float16 if fp16_io else dtype
+    field_dtype = dtype
     state_shot_scale = None
     state_h_scale = None
     state_e_memory_scale = None
     state_h_memory_scale = None
-    if fp16_io and scale_ctx is not None:
-        state_shot_scale = scale_ctx["shot_scale"].reshape(-1, 1, 1)
-        impedance_scale = float(scale_ctx["impedance_scale"])
-        length_scale = float(scale_ctx["length_scale"])
-        state_h_scale = state_shot_scale * impedance_scale
-        state_e_memory_scale = state_shot_scale * length_scale
-        state_h_memory_scale = state_h_scale * length_scale
     Ey = _init_tm_wavefield(
         Ey_0,
         n_shots=n_shots,
@@ -367,77 +267,49 @@ def maxwell_c_cuda(
         contiguous=True,
         value_scale=state_h_scale,
     )
-    if fp32_compact:
-        # The active FD domain includes the final electric-field point, hence
-        # the +1.  H uses a one-cell-shifted right PML start but fits the same
-        # compact extent.  Directional CPML arrays retain the transverse full
-        # dimension so their innermost accesses remain contiguous.
-        compact_y = pml_width_list[0] + pml_width_list[1] + 1
-        compact_x = pml_width_list[2] + pml_width_list[3] + 1
+    m_Ey_x = _init_tm_wavefield(
+        m_Ey_x_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+        value_scale=state_e_memory_scale,
+    )
+    m_Ey_z = _init_tm_wavefield(
+        m_Ey_z_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+        value_scale=state_e_memory_scale,
+    )
+    m_Hx_z = _init_tm_wavefield(
+        m_Hx_z_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+        value_scale=state_h_memory_scale,
+    )
+    m_Hz_x = _init_tm_wavefield(
+        m_Hz_x_0,
+        n_shots=n_shots,
+        size_with_batch=size_with_batch,
+        fd_pad_list=fd_pad_list,
+        device=device,
+        dtype=dtype,
+        contiguous=True,
+        value_scale=state_h_memory_scale,
+    )
 
-        def init_compact(
-            value: torch.Tensor | None, shape: tuple[int, int, int], name: str
-        ) -> torch.Tensor:
-            if value is None:
-                return torch.zeros(shape, device=device, dtype=dtype)
-            if value.ndim == 2:
-                value = value.unsqueeze(0).expand(n_shots, -1, -1)
-            if tuple(value.shape) != shape:
-                raise ValueError(
-                    f"{name} must have compact shape {shape}, got {tuple(value.shape)}."
-                )
-            return value.to(device=device, dtype=dtype).contiguous()
-
-        x_shape = (n_shots, padded_ny, compact_x)
-        y_shape = (n_shots, compact_y, padded_nx)
-        m_Ey_x = init_compact(m_Ey_x_0, x_shape, "m_Ey_x")
-        m_Ey_z = init_compact(m_Ey_z_0, y_shape, "m_Ey_z")
-        m_Hx_z = init_compact(m_Hx_z_0, y_shape, "m_Hx_z")
-        m_Hz_x = init_compact(m_Hz_x_0, x_shape, "m_Hz_x")
-    else:
-        m_Ey_x = _init_tm_wavefield(
-            m_Ey_x_0,
-            n_shots=n_shots,
-            size_with_batch=size_with_batch,
-            fd_pad_list=fd_pad_list,
-            device=device,
-            dtype=dtype,
-            contiguous=True,
-            value_scale=state_e_memory_scale,
-        )
-        m_Ey_z = _init_tm_wavefield(
-            m_Ey_z_0,
-            n_shots=n_shots,
-            size_with_batch=size_with_batch,
-            fd_pad_list=fd_pad_list,
-            device=device,
-            dtype=dtype,
-            contiguous=True,
-            value_scale=state_e_memory_scale,
-        )
-        m_Hx_z = _init_tm_wavefield(
-            m_Hx_z_0,
-            n_shots=n_shots,
-            size_with_batch=size_with_batch,
-            fd_pad_list=fd_pad_list,
-            device=device,
-            dtype=dtype,
-            contiguous=True,
-            value_scale=state_h_memory_scale,
-        )
-        m_Hz_x = _init_tm_wavefield(
-            m_Hz_x_0,
-            n_shots=n_shots,
-            size_with_batch=size_with_batch,
-            fd_pad_list=fd_pad_list,
-            device=device,
-            dtype=dtype,
-            contiguous=True,
-            value_scale=state_h_memory_scale,
-        )
-
-        for wf, dim in zip([m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x], [1, 0, 0, 1]):
-            zero_interior(wf, fd_pad_list, pml_width_list, dim)
+    for wf, dim in zip([m_Ey_x, m_Ey_z, m_Hx_z, m_Hz_x], [1, 0, 0, 1]):
+        zero_interior(wf, fd_pad_list, pml_width_list, dim)
 
     (
         ay,
@@ -492,6 +364,12 @@ def maxwell_c_cuda(
     )
     autograd_required = model_requires_grad or source_requires_grad
     if has_dispersion and (autograd_required or (save_snapshots is True)):
+        if fallback == "error":
+            raise NotImplementedError(
+                "Debye native backend supports forward inference only; "
+                "gradients or snapshot storage with dispersion require the "
+                "Python reference backend (fallback='reference')."
+            )
         warnings.warn(
             "Debye native backend currently supports forward inference only; "
             "falling back to the Python backend for gradients or snapshot storage.",
@@ -764,9 +642,7 @@ def maxwell_c_cuda(
             stencil,
             dtype,
             backend_device,
-            variant=(
-                "fp16_io" if fp16_io else ""
-            ),
+            variant="",
         )
     except AttributeError as exc:
         raise RuntimeError(

@@ -5,7 +5,7 @@ import torch
 
 from ..callbacks import Callback
 from ..cfl import cfl_condition
-from ..core import BackendPreference, compile_simulation_plan, select_backend
+from ..core import BackendPreference
 from ..dispersion import DebyeDispersion
 from ..grid_utils import _normalize_grid_spacing_3d
 from ..resampling import downsample_and_movedim, upsample
@@ -33,6 +33,8 @@ from .common import (
     _structured_vmap_state_in_dim,
     _wrap_structured_callback,
 )
+from ..core import derive_gradient_targets
+from .dispatch import compile_execution_policy
 from .module_utils import _register_maxwell_model
 from .maxwell3d_cuda import maxwell3d_c_cuda
 from .maxwell3d_python import maxwell3d_python
@@ -133,7 +135,8 @@ class Maxwell3D(torch.nn.Module):
         storage_chunk_steps: int = 0,
         n_threads: int | None = None,
         dispersion: DebyeDispersion | None = None,
-        compute_mode: str = "native",
+        compute_mode: Literal["native"] = "native",
+        fallback: Literal["reference", "error"] = "reference",
     ):
         assert isinstance(self.epsilon, torch.Tensor)
         assert isinstance(self.sigma, torch.Tensor)
@@ -190,6 +193,7 @@ class Maxwell3D(torch.nn.Module):
             n_threads,
             dispersion=dispersion,
             compute_mode=compute_mode,
+            fallback=fallback,
         )
 
     @runtime_typecheck
@@ -310,26 +314,25 @@ def maxwell3d_hvp(
     if not callable(misfit_fn):
         raise TypeError("misfit must be callable when provided.")
 
-    plan = compile_simulation_plan(
+    execution = compile_execution_policy(
+        requested_backend=python_backend,
         operation="hvp",
         dimension="em3d",
         epsilon=epsilon,
         sigma=sigma,
         mu=mu,
-        python_backend=python_backend,
         storage_mode="device",
         model_gradient_sampling_interval=model_gradient_sampling_interval,
         hessian_mode=hessian_mode,
-        requires_gradients=True,
+        gradient_targets=derive_gradient_targets(
+            epsilon=epsilon,
+            sigma=sigma,
+            mu=mu,
+        ),
         source_component=source_component,
         receiver_component=receiver_component,
     )
-    from .. import backend_utils
-
-    decision = select_backend(
-        plan,
-        native_available=backend_utils.is_backend_available(),
-    )
+    decision = execution.decision
 
     if decision.selected is BackendPreference.PYTHON:
         from .maxwell3d_born_autograd import maxwell3d_receiver_hvp_naive
@@ -437,18 +440,13 @@ def maxwell3d(
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
-    compute_mode: str = "native",
+    compute_mode: Literal["native"] = "native",
     fallback: Literal["reference", "error"] = "reference",
 ):
     """3D Maxwell equations solver.
 
     Coordinate convention is `[z, y, x]`.
 
-    ``compute_mode="fp16_io"`` is an experimental CUDA forward-only mode. It
-    stores the six primary E/H fields in FP16 while retaining FP32 stencil
-    arithmetic, material coefficients, CPML memories, and receiver samples.
-    Setting ``TIDE_EM3D_FP16_HALF2=1`` additionally enables an experimental
-    SeisCL-style path that packs two adjacent x-cells per CUDA thread.
     """
     epsilon_input = epsilon
     sigma_input = sigma
@@ -531,13 +529,13 @@ def maxwell3d(
     m_ex_y = batch_meta["state_tensors"]["m_ex_y"]
     m_ey_x = batch_meta["state_tensors"]["m_ey_x"]
 
-    plan = compile_simulation_plan(
+    execution = compile_execution_policy(
+        requested_backend=python_backend,
         operation="forward",
         dimension="em3d",
         epsilon=epsilon,
         sigma=sigma,
         mu=mu,
-        python_backend=python_backend,
         execution_backend=execution_backend,
         compute_mode=compute_mode,
         storage_mode=storage_mode,
@@ -552,7 +550,35 @@ def maxwell3d(
         source_component=source_component,
         receiver_component=receiver_component,
         model_gradient_sampling_interval=model_gradient_sampling_interval,
+        gradient_targets=derive_gradient_targets(
+            epsilon=epsilon_input,
+            sigma=sigma_input,
+            mu=mu_input,
+            source_amplitude=source_amplitude_input,
+            state_tensors=(
+                Ex_0_input,
+                Ey_0_input,
+                Ez_0_input,
+                Hx_0_input,
+                Hy_0_input,
+                Hz_0_input,
+                m_hz_y_input,
+                m_hy_z_input,
+                m_hx_z_input,
+                m_hz_x_input,
+                m_hy_x_input,
+                m_hx_y_input,
+                m_ey_z_input,
+                m_ez_y_input,
+                m_ez_x_input,
+                m_ex_z_input,
+                m_ex_y_input,
+                m_ey_x_input,
+            ),
+        ),
+        has_dispersion=dispersion is not None,
     )
+    plan = execution.plan
     compute_mode = plan.compute_mode.value
     storage_mode = plan.storage.mode.value
     execution_backend = plan.runtime.execution_backend
@@ -616,18 +642,10 @@ def maxwell3d(
     elif source_amplitude_internal is not None:
         nt_internal = source_amplitude_internal.shape[-1]
 
-    from .. import backend_utils
-
-    decision = select_backend(
-        plan,
-        native_available=backend_utils.is_backend_available(),
-    )
-    use_python = decision.selected is BackendPreference.PYTHON
-    if compute_mode not in {"native", "fp16_io"}:
-        raise ValueError("compute_mode must be 'native' or 'fp16_io'.")
-    if compute_mode == "fp16_io" and use_python:
+    use_python = execution.use_python
+    if compute_mode != "native":
         raise NotImplementedError(
-            "compute_mode='fp16_io' requires the native CUDA backend."
+            "FP16 support was removed; compute_mode must be 'native'."
         )
 
     if batch_meta["model_batched"] and use_python:

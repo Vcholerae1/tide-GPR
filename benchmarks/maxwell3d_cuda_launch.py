@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import statistics
 
 import torch
@@ -24,19 +23,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeat", type=int, default=7)
     parser.add_argument("--backward", action="store_true")
     parser.add_argument("--gradient-sampling-interval", type=int, default=20)
-    parser.add_argument("--compute-mode", default="native", choices=("native", "fp16_io"))
-    parser.add_argument("--fp16-half2", action="store_true")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if args.fp16_half2:
-        if args.compute_mode != "fp16_io":
-            raise ValueError("--fp16-half2 requires --compute-mode fp16_io")
-        os.environ["TIDE_EM3D_FP16_HALF2"] = "1"
-    else:
-        os.environ.pop("TIDE_EM3D_FP16_HALF2", None)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
     shape = tuple(int(value) for value in args.shape.split(","))
@@ -85,7 +76,7 @@ def main() -> None:
             n_threads=n_threads,
             python_backend=False,
             save_snapshots=args.backward,
-            compute_mode=args.compute_mode,
+            compute_mode="native",
             model_gradient_sampling_interval=args.gradient_sampling_interval,
         )
         if args.backward:
@@ -104,7 +95,7 @@ def main() -> None:
         "stencil": args.stencil,
         "backward": args.backward,
         "gradient_sampling_interval": args.gradient_sampling_interval,
-        "compute_mode": args.compute_mode,
+        "compute_mode": "native",
     }
     print(json.dumps(metadata), flush=True)
     for n_threads in thread_counts:
