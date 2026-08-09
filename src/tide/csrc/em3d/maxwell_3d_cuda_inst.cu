@@ -1319,6 +1319,319 @@ __global__ void record_adjoint_at_sources_component(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Exact adjoint (transpose) kernels for the unsplit 3D Maxwell time step.
+//
+// The forward step runs the H-update then the E-update:
+//   H:  hx -= cq*(dEy_dz - dEz_dy) ; hy -= cq*(dEz_dx - dEx_dz) ;
+//       hz -= cq*(dEx_dy - dEy_dx)
+//   E:  ex = ca*ex + cb*(dHy_dz - dHz_dy) ; ey = ca*ey + cb*(dHz_dx - dHx_dz) ;
+//       ez = ca*ez + cb*(dHx_dy - dHy_dx)
+// with C-PML stretched derivatives (memory variables m_*).
+//
+// The backward step applies the transpose in reverse order: the E-adjoint
+// first (scatters cb-weighted lambda_E into lambda_H and the memory adjoints),
+// then the H-adjoint (scatters cq-weighted lambda_H into lambda_E and applies
+// the ca scaling).  The C-PML memory recursions transpose into the backward
+// recurrence  lam_m(t) = lam_used(t) + b*lam_m(t+1)  carried through the
+// reverse time loop, so each memory adjoint is advanced in a separate kernel
+// before the scatter that consumes it (no cross-thread races).
+// ---------------------------------------------------------------------------
+
+// Adjoint of the forward E-update's PML memory recursions (m_hy_z, m_hz_y,
+// m_hz_x, m_hx_z, m_hx_y, m_hy_x).  lam_used signs follow the curls:
+//   ex += cb*(+dHy_dz - dHz_dy) ; ey += cb*(+dHz_dx - dHx_dz) ;
+//   ez += cb*(+dHx_dy - dHy_dx)
+__global__ void backward_kernel_e_mem_adj_3d(
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const lambda_ex,
+    TIDE_DTYPE const *__restrict const lambda_ey,
+    TIDE_DTYPE const *__restrict const lambda_ez,
+    TIDE_DTYPE *__restrict const m_lambda_hy_z,
+    TIDE_DTYPE *__restrict const m_lambda_hz_y,
+    TIDE_DTYPE *__restrict const m_lambda_hz_x,
+    TIDE_DTYPE *__restrict const m_lambda_hx_z,
+    TIDE_DTYPE *__restrict const m_lambda_hx_y,
+    TIDE_DTYPE *__restrict const m_lambda_hy_x,
+    TIDE_DTYPE const *__restrict const bz,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const bx) {
+  int64_t i = 0;
+  LinearCellIndex3D idx{};
+  if (!current_cell_index_3d(&idx, &i)) {
+    return;
+  }
+  if (!is_active_cell_3d(idx)) {
+    return;
+  }
+  int const j = idx.j;
+  TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];
+  TIDE_DTYPE const q_ex = cb_val * lambda_ex[i];
+  TIDE_DTYPE const q_ey = cb_val * lambda_ey[i];
+  TIDE_DTYPE const q_ez = cb_val * lambda_ez[i];
+  if (idx.z < pml_z0 || idx.z >= pml_z1) {
+    m_lambda_hy_z[i] = bz[idx.z] * m_lambda_hy_z[i] + q_ex;
+    m_lambda_hx_z[i] = bz[idx.z] * m_lambda_hx_z[i] - q_ey;
+  }
+  if (idx.y < pml_y0 || idx.y >= pml_y1) {
+    m_lambda_hz_y[i] = by[idx.y] * m_lambda_hz_y[i] - q_ex;
+    m_lambda_hx_y[i] = by[idx.y] * m_lambda_hx_y[i] + q_ez;
+  }
+  if (idx.x < pml_x0 || idx.x >= pml_x1) {
+    m_lambda_hz_x[i] = bx[idx.x] * m_lambda_hz_x[i] + q_ey;
+    m_lambda_hy_x[i] = bx[idx.x] * m_lambda_hy_x[i] - q_ez;
+  }
+}
+
+// Raw adjoint accessors for the 3D scatter kernels.
+//
+// lam_raw at an offset cell = a*lam_m + lam_used/k (PML) or lam_used (plain),
+// where lam_used = +/-coeff*lambda carries the curl/update sign.  Both return
+// 0 outside the relevant forward scatter domain (active box, plus the half-cell
+// inner guard for the H-side), so the multi-point adjoint stencils
+// (DIFF*_ADJ) sum only the forward cells whose derivative actually exists.
+
+__device__ __forceinline__ TIDE_DTYPE raw_e_side(
+    TIDE_DTYPE const *coeff, TIDE_DTYPE const *lambda,
+    TIDE_DTYPE const *mem, TIDE_DTYPE const *a, TIDE_DTYPE const *k,
+    bool batched, int64_t i, int z, int y, int x, int dz, int dy, int dx,
+    int dir, bool neg) {
+  int const oz = z + dz, oy = y + dy, ox = x + dx;
+  if (oz < FD_PAD || oz >= nz - FD_PAD + 1 || oy < FD_PAD ||
+      oy >= ny - FD_PAD + 1 || ox < FD_PAD || ox >= nx - FD_PAD + 1) {
+    return static_cast<TIDE_DTYPE>(0);
+  }
+  int64_t const in = i + dz * ny * nx + dy * nx + dx;
+  int64_t const jn = in % shot_numel;
+  TIDE_DTYPE q = (batched ? coeff[in] : coeff[jn]) * lambda[in];
+  if (neg) {
+    q = -q;
+  }
+  int const coord = dir == 0 ? oz : dir == 1 ? oy : ox;
+  bool const pml = dir == 0 ? (oz < pml_z0 || oz >= pml_z1)
+                 : dir == 1 ? (oy < pml_y0 || oy >= pml_y1)
+                            : (ox < pml_x0 || ox >= pml_x1);
+  return pml ? (a[coord] * mem[in] + q / k[coord]) : q;
+}
+
+__device__ __forceinline__ TIDE_DTYPE raw_h_side(
+    TIDE_DTYPE const *coeff, TIDE_DTYPE const *lambda,
+    TIDE_DTYPE const *mem, TIDE_DTYPE const *a, TIDE_DTYPE const *k,
+    bool batched, int64_t i, int z, int y, int x, int dz, int dy, int dx,
+    int dir, bool neg, int gate_dim, int gate_lim) {
+  int const oz = z + dz, oy = y + dy, ox = x + dx;
+  if (oz < FD_PAD || oz >= nz - FD_PAD + 1 || oy < FD_PAD ||
+      oy >= ny - FD_PAD + 1 || ox < FD_PAD || ox >= nx - FD_PAD + 1) {
+    return static_cast<TIDE_DTYPE>(0);
+  }
+  if ((gate_dim == 0 && oz >= gate_lim) || (gate_dim == 1 && oy >= gate_lim) ||
+      (gate_dim == 2 && ox >= gate_lim)) {
+    return static_cast<TIDE_DTYPE>(0);
+  }
+  int64_t const in = i + dz * ny * nx + dy * nx + dx;
+  int64_t const jn = in % shot_numel;
+  TIDE_DTYPE q = (batched ? coeff[in] : coeff[jn]) * lambda[in];
+  if (neg) {
+    q = -q;
+  }
+  int const coord = dir == 0 ? oz : dir == 1 ? oy : ox;
+  int const pml_z1h = pml_z1 > pml_z0 ? pml_z1 - 1 : pml_z0;
+  int const pml_y1h = pml_y1 > pml_y0 ? pml_y1 - 1 : pml_y0;
+  int const pml_x1h = pml_x1 > pml_x0 ? pml_x1 - 1 : pml_x0;
+  bool const pml = dir == 0 ? (oz < pml_z0 || oz >= pml_z1h)
+                 : dir == 1 ? (oy < pml_y0 || oy >= pml_y1h)
+                            : (ox < pml_x0 || ox >= pml_x1h);
+  return pml ? (a[coord] * mem[in] + q / k[coord]) : q;
+}
+
+#define RAW_ONE(dz, dy, dx) (static_cast<TIDE_DTYPE>(1.0))
+// E-side raws: curl signs follow ex += cb*(+dHy_dz - dHz_dy),
+// ey += cb*(+dHz_dx - dHx_dz), ez += cb*(+dHx_dy - dHy_dx).
+#define RAW_HY_Z(dz, dy, dx)                                                   \
+  raw_e_side(cb, lambda_ex, m_lambda_hy_z, az, kz, cb_batched, i, z, y, x,     \
+             (dz), (dy), (dx), 0, false)
+#define RAW_HZ_Y(dz, dy, dx)                                                   \
+  raw_e_side(cb, lambda_ex, m_lambda_hz_y, ay, ky, cb_batched, i, z, y, x,     \
+             (dz), (dy), (dx), 1, true)
+#define RAW_HZ_X(dz, dy, dx)                                                   \
+  raw_e_side(cb, lambda_ey, m_lambda_hz_x, ax, kx, cb_batched, i, z, y, x,     \
+             (dz), (dy), (dx), 2, false)
+#define RAW_HX_Z(dz, dy, dx)                                                   \
+  raw_e_side(cb, lambda_ey, m_lambda_hx_z, az, kz, cb_batched, i, z, y, x,     \
+             (dz), (dy), (dx), 0, true)
+#define RAW_HX_Y(dz, dy, dx)                                                   \
+  raw_e_side(cb, lambda_ez, m_lambda_hx_y, ay, ky, cb_batched, i, z, y, x,     \
+             (dz), (dy), (dx), 1, false)
+#define RAW_HY_X(dz, dy, dx)                                                   \
+  raw_e_side(cb, lambda_ez, m_lambda_hy_x, ax, kx, cb_batched, i, z, y, x,     \
+             (dz), (dy), (dx), 2, true)
+// H-side raws: update signs follow hx -= cq*(dEy_dz - dEz_dy),
+// hy -= cq*(dEz_dx - dEx_dz), hz -= cq*(dEx_dy - dEy_dx); gate_dim/gate_lim
+// reproduce the forward H-update's half-cell inner guards.
+#define RAW_EYZ(dz, dy, dx)                                                    \
+  raw_h_side(cq, lambda_hx, m_lambda_ey_z, azh, kzh, cq_batched, i, z, y, x,   \
+             (dz), (dy), (dx), 0, true, 0, nz - FD_PAD)
+#define RAW_EZY(dz, dy, dx)                                                    \
+  raw_h_side(cq, lambda_hx, m_lambda_ez_y, ayh, kyh, cq_batched, i, z, y, x,   \
+             (dz), (dy), (dx), 1, false, 1, ny - FD_PAD)
+#define RAW_EZX(dz, dy, dx)                                                    \
+  raw_h_side(cq, lambda_hy, m_lambda_ez_x, axh, kxh, cq_batched, i, z, y, x,   \
+             (dz), (dy), (dx), 2, true, 2, nx - FD_PAD)
+#define RAW_EXZ(dz, dy, dx)                                                    \
+  raw_h_side(cq, lambda_hy, m_lambda_ex_z, azh, kzh, cq_batched, i, z, y, x,   \
+             (dz), (dy), (dx), 0, false, 0, nz - FD_PAD)
+#define RAW_EXY(dz, dy, dx)                                                    \
+  raw_h_side(cq, lambda_hz, m_lambda_ex_y, ayh, kyh, cq_batched, i, z, y, x,   \
+             (dz), (dy), (dx), 1, true, 1, ny - FD_PAD)
+#define RAW_EYX(dz, dy, dx)                                                    \
+  raw_h_side(cq, lambda_hz, m_lambda_ey_x, axh, kxh, cq_batched, i, z, y, x,   \
+             (dz), (dy), (dx), 2, false, 2, nx - FD_PAD)
+
+// Adjoint of the forward E-update, applied to the adjoint fields.  The memory
+// adjoints were advanced to this time step by backward_kernel_e_mem_adj_3d.
+// The scatters are the multi-point transposes of the forward staggered
+// derivatives (DIFF*_ADJ), which reduce to single-neighbour gathers for
+// TIDE_STENCIL==2 and to the weighted multi-neighbour transposes for 4/6/8.
+__global__ void backward_kernel_e_adj_3d(
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const lambda_ex,
+    TIDE_DTYPE const *__restrict const lambda_ey,
+    TIDE_DTYPE const *__restrict const lambda_ez,
+    TIDE_DTYPE *__restrict const lambda_hx,
+    TIDE_DTYPE *__restrict const lambda_hy,
+    TIDE_DTYPE *__restrict const lambda_hz,
+    TIDE_DTYPE const *__restrict const m_lambda_hy_z,
+    TIDE_DTYPE const *__restrict const m_lambda_hz_y,
+    TIDE_DTYPE const *__restrict const m_lambda_hz_x,
+    TIDE_DTYPE const *__restrict const m_lambda_hx_z,
+    TIDE_DTYPE const *__restrict const m_lambda_hx_y,
+    TIDE_DTYPE const *__restrict const m_lambda_hy_x,
+    TIDE_DTYPE const *__restrict const az,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const kz,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kx) {
+  int64_t i = 0;
+  LinearCellIndex3D idx{};
+  if (!current_cell_index_3d(&idx, &i)) {
+    return;
+  }
+  if (!is_active_cell_3d(idx)) {
+    return;
+  }
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
+
+  // Curl transposes (each thread writes only its own cell).
+  lambda_hx[i] += DIFFZ1_ADJ(RAW_HX_Z, RAW_ONE) + DIFFY1_ADJ(RAW_HX_Y, RAW_ONE);
+  lambda_hy[i] += DIFFZ1_ADJ(RAW_HY_Z, RAW_ONE) + DIFFX1_ADJ(RAW_HY_X, RAW_ONE);
+  lambda_hz[i] += DIFFY1_ADJ(RAW_HZ_Y, RAW_ONE) + DIFFX1_ADJ(RAW_HZ_X, RAW_ONE);
+}
+
+// Adjoint of the forward H-update's PML memory recursions (m_ey_z, m_ez_y,
+// m_ez_x, m_ex_z, m_ex_y, m_ey_x).  lam_used signs follow the H-updates:
+//   hx -= cq*(dEy_dz - dEz_dy) ; hy -= cq*(dEz_dx - dEx_dz) ;
+//   hz -= cq*(dEx_dy - dEy_dx)
+// Uses the lambda_H already updated by the E-adjoint (the half-staggered
+// adjoints at this time step).  Runs before the H-adjoint scatter.
+__global__ void backward_kernel_h_mem_adj_3d(
+    TIDE_DTYPE const *__restrict const cq,
+    TIDE_DTYPE const *__restrict const lambda_hx,
+    TIDE_DTYPE const *__restrict const lambda_hy,
+    TIDE_DTYPE const *__restrict const lambda_hz,
+    TIDE_DTYPE *__restrict const m_lambda_ey_z,
+    TIDE_DTYPE *__restrict const m_lambda_ez_y,
+    TIDE_DTYPE *__restrict const m_lambda_ez_x,
+    TIDE_DTYPE *__restrict const m_lambda_ex_z,
+    TIDE_DTYPE *__restrict const m_lambda_ex_y,
+    TIDE_DTYPE *__restrict const m_lambda_ey_x,
+    TIDE_DTYPE const *__restrict const bzh,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const bxh) {
+  int64_t i = 0;
+  LinearCellIndex3D idx{};
+  if (!current_cell_index_3d(&idx, &i)) {
+    return;
+  }
+  if (!is_active_cell_3d(idx)) {
+    return;
+  }
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
+  int const pml_z1h = pml_z1 > pml_z0 ? pml_z1 - 1 : pml_z0;
+  int const pml_y1h = pml_y1 > pml_y0 ? pml_y1 - 1 : pml_y0;
+  int const pml_x1h = pml_x1 > pml_x0 ? pml_x1 - 1 : pml_x0;
+  bool const pml_z_h = z < pml_z0 || z >= pml_z1h;
+  bool const pml_y_h = y < pml_y0 || y >= pml_y1h;
+  bool const pml_x_h = x < pml_x0 || x >= pml_x1h;
+  TIDE_DTYPE const cq_val = cq_batched ? cq[i] : cq[j];
+  if (z < nz - FD_PAD && pml_z_h) {
+    m_lambda_ey_z[i] = bzh[z] * m_lambda_ey_z[i] - cq_val * lambda_hx[i];
+    m_lambda_ex_z[i] = bzh[z] * m_lambda_ex_z[i] + cq_val * lambda_hy[i];
+  }
+  if (y < ny - FD_PAD && pml_y_h) {
+    m_lambda_ez_y[i] = byh[y] * m_lambda_ez_y[i] + cq_val * lambda_hx[i];
+    m_lambda_ex_y[i] = byh[y] * m_lambda_ex_y[i] - cq_val * lambda_hz[i];
+  }
+  if (x < nx - FD_PAD && pml_x_h) {
+    m_lambda_ez_x[i] = bxh[x] * m_lambda_ez_x[i] - cq_val * lambda_hy[i];
+    m_lambda_ey_x[i] = bxh[x] * m_lambda_ey_x[i] + cq_val * lambda_hz[i];
+  }
+}
+
+// Adjoint of the forward H-update, applied to the adjoint fields.  Also
+// applies the ca scaling of lambda_E (lambda_E_pre = ca*lambda_E).  The memory
+// adjoints were advanced by backward_kernel_h_mem_adj_3d; the scatters are the
+// multi-point transposes of the half-cell staggered derivatives (DIFF*H1_ADJ).
+__global__ void backward_kernel_h_adj_3d(
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cq,
+    TIDE_DTYPE const *__restrict const lambda_hx,
+    TIDE_DTYPE const *__restrict const lambda_hy,
+    TIDE_DTYPE const *__restrict const lambda_hz,
+    TIDE_DTYPE *__restrict const lambda_ex,
+    TIDE_DTYPE *__restrict const lambda_ey,
+    TIDE_DTYPE *__restrict const lambda_ez,
+    TIDE_DTYPE const *__restrict const m_lambda_ey_z,
+    TIDE_DTYPE const *__restrict const m_lambda_ez_y,
+    TIDE_DTYPE const *__restrict const m_lambda_ez_x,
+    TIDE_DTYPE const *__restrict const m_lambda_ex_z,
+    TIDE_DTYPE const *__restrict const m_lambda_ex_y,
+    TIDE_DTYPE const *__restrict const m_lambda_ey_x,
+    TIDE_DTYPE const *__restrict const azh,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const kzh,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kxh) {
+  int64_t i = 0;
+  LinearCellIndex3D idx{};
+  if (!current_cell_index_3d(&idx, &i)) {
+    return;
+  }
+  if (!is_active_cell_3d(idx)) {
+    return;
+  }
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
+
+  TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
+  lambda_ex[i] = ca_val * lambda_ex[i];
+  lambda_ey[i] = ca_val * lambda_ey[i];
+  lambda_ez[i] = ca_val * lambda_ez[i];
+
+  // Scatter transposes of the H-update.
+  lambda_ey[i] += DIFFZH1_ADJ(RAW_EYZ, RAW_ONE) + DIFFXH1_ADJ(RAW_EYX, RAW_ONE);
+  lambda_ex[i] += DIFFZH1_ADJ(RAW_EXZ, RAW_ONE) + DIFFYH1_ADJ(RAW_EXY, RAW_ONE);
+  lambda_ez[i] += DIFFYH1_ADJ(RAW_EZY, RAW_ONE) + DIFFXH1_ADJ(RAW_EZX, RAW_ONE);
+}
+
 template <typename SnapshotT>
 __global__ void coeff_grad_3d(
     TIDE_DTYPE const *__restrict const lambda_ex,
@@ -3985,56 +4298,29 @@ extern "C" void FUNC(backward)(
       }
     }
 
-    forward_kernel_h<<<(unsigned)launch_cfg.blocks_cells,
-                       launch_cfg.threads_cells, 0, stream_compute>>>(
-        cq,
-        lambda_ex,
-        lambda_ey,
-        lambda_ez,
-        lambda_hx,
-        lambda_hy,
-        lambda_hz,
-        m_lambda_ey_z,
-        m_lambda_ez_y,
-        m_lambda_ez_x,
-        m_lambda_ex_z,
-        m_lambda_ex_y,
-        m_lambda_ey_x,
-        azh,
-        bzh,
-        ayh,
-        byh,
-        axh,
-        bxh,
-        kzh,
-        kyh,
-        kxh);
-
-    forward_kernel_e<<<(unsigned)launch_cfg.blocks_cells,
-                       launch_cfg.threads_cells, 0, stream_compute>>>(
-        ca,
-        cb,
-        lambda_ex,
-        lambda_ey,
-        lambda_ez,
-        lambda_hx,
-        lambda_hy,
-        lambda_hz,
-        m_lambda_hy_z,
-        m_lambda_hz_y,
-        m_lambda_hz_x,
-        m_lambda_hx_z,
-        m_lambda_hx_y,
-        m_lambda_hy_x,
-        az,
-        bz,
-        ay,
-        by,
-        ax,
-        bx,
-        kz,
-        ky,
-        kx);
+    backward_kernel_e_mem_adj_3d<<<(unsigned)launch_cfg.blocks_cells,
+                                launch_cfg.threads_cells, 0,
+                                stream_compute>>>(
+        cb, lambda_ex, lambda_ey, lambda_ez, m_lambda_hy_z, m_lambda_hz_y,
+        m_lambda_hz_x, m_lambda_hx_z, m_lambda_hx_y, m_lambda_hy_x, bz, by, bx);
+    backward_kernel_e_adj_3d<<<(unsigned)launch_cfg.blocks_cells,
+                               launch_cfg.threads_cells, 0,
+                               stream_compute>>>(
+        cb, lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
+        m_lambda_hy_z, m_lambda_hz_y, m_lambda_hz_x, m_lambda_hx_z,
+        m_lambda_hx_y, m_lambda_hy_x, az, ay, ax, kz, ky, kx);
+    backward_kernel_h_mem_adj_3d<<<(unsigned)launch_cfg.blocks_cells,
+                                   launch_cfg.threads_cells, 0,
+                                   stream_compute>>>(
+        cq, lambda_hx, lambda_hy, lambda_hz, m_lambda_ey_z, m_lambda_ez_y,
+        m_lambda_ez_x, m_lambda_ex_z, m_lambda_ex_y, m_lambda_ey_x, bzh, byh,
+        bxh);
+    backward_kernel_h_adj_3d<<<(unsigned)launch_cfg.blocks_cells,
+                               launch_cfg.threads_cells, 0,
+                               stream_compute>>>(
+        ca, cq, lambda_hx, lambda_hy, lambda_hz, lambda_ex, lambda_ey,
+        lambda_ez, m_lambda_ey_z, m_lambda_ez_y, m_lambda_ez_x, m_lambda_ex_z,
+        m_lambda_ex_y, m_lambda_ey_x, azh, ayh, axh, kzh, kyh, kxh);
 
     if (n_receivers_per_shot_h > 0 && grad_r != nullptr && receivers_i != nullptr) {
       add_adjoint_receivers_component<<<(unsigned)launch_cfg.blocks_receivers,
