@@ -2,62 +2,45 @@
 
 **T**orch-based **I**nversion & **D**evelopment **E**ngine
 
-TIDE is a PyTorch-based library for high-frequency electromagnetic wave propagation and inversion, built on Maxwell's equations. It provides CPU and CUDA implementations for forward modeling, gradient computation, and full-waveform inversion workflows.
-
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Features
+TIDE is a PyTorch-first electromagnetic FDTD library for forward modeling and full-waveform inversion. It provides differentiable 2D and 3D Maxwell solvers, native C/CUDA kernels, and configurable snapshot storage for memory-intensive gradient calculations.
 
-- **Maxwell Equation Solvers**:
-  - 2D TM mode propagation
-  - 3D Maxwell propagation
-- **Automatic Differentiation**: Gradient support through PyTorch's autograd hooks
-- **High Performance**: Optimized C/CUDA kernels for critical operations
-- **Flexible Storage**: Device/CPU/disk snapshot modes for gradient computation
-- **Staggered Grid**: Standard FDTD staggered grid implementation
-- **PML Boundaries**: Perfectly Matched Layer absorbing boundaries
-- **Snapshot Compression**: Optional BF16 snapshot compression on the default path
+## Capabilities
 
-## Feature Matrix
+| Capability | API | Status |
+| --- | --- | --- |
+| 2D TM forward modeling | `tide.maxwelltm` | Stable |
+| 2D TM inversion with autograd | `tide.maxwelltm`, `MaxwellTM` | Stable |
+| 3D forward modeling | `tide.maxwell3d` | Stable |
+| 3D inversion and gradients | `tide.maxwell3d`, `Maxwell3D` | Stable with constraints |
+| Snapshot storage | `storage_mode` | Device, CPU, disk, none, or auto |
+| Snapshot compression | `storage_compression` | Optional BF16 compression |
+| Debye dispersion | `DebyeDispersion` | Advanced |
 
-| Capability | Entry Point | Status | Notes |
-| --- | --- | --- | --- |
-| 2D TM forward modeling | `tide.maxwelltm` | Stable | Primary onboarding path |
-| 2D TM inversion / autograd | `tide.maxwelltm`, `MaxwellTM` | Stable | Uses PyTorch autograd |
-| 3D forward modeling | `tide.maxwell3d` | Stable | Supports component selection |
-| 3D inversion / gradients | `tide.maxwell3d`, `Maxwell3D` | Stable with constraints | Check the limitations guide before scaling up |
-| Snapshot storage modes | `storage_mode=*` | Stable | Device, CPU, disk, none, and auto |
-| Callbacks | `forward_callback`, `backward_callback` | Stable | Keep callback work lightweight |
-| Debye dispersion | `DebyeDispersion` | Advanced | Requires explicit time-step validation |
+TIDE also includes PML boundaries, staggered-grid operators, callbacks, CFL resampling, shot batching, and inversion workflow helpers. Check the [limitations guide](docs/guides/limitations.md) before scaling up 3D or inversion workloads.
 
 ## Installation
 
-### From PyPI
+TIDE requires Python 3.12 or newer and PyTorch 2.12 or newer.
 
-Ensure you have proper PyTorch installation with CUDA binding for your system.
-
-For CUDA environments, you may need to install a CUDA-enabled PyTorch build first:
-```bash
-uv pip install torch --index-url https://download.pytorch.org/whl/cu128
-``` 
-The cu128 tag is for CUDA 12.8. Replace it based on your CUDA version.
-
-Then install TIDE via uv or pip:
+Install the package from PyPI:
 
 ```bash
 uv pip install tide-GPR
 ```
 
-or
+You can also use `pip`:
 
 ```bash
 pip install tide-GPR
 ```
 
+For GPU use, install the [PyTorch build](https://pytorch.org/get-started/locally/) that matches your CUDA environment before installing TIDE.
 
-### From Source
+### Build from source
 
-We recommend using [uv](https://github.com/astral-sh/uv) for building:
+Building from source requires CMake 3.28 or newer. A CUDA Toolkit is optional.
 
 ```bash
 git clone https://github.com/vcholerae1/tide.git
@@ -65,118 +48,87 @@ cd tide
 uv build
 ```
 
-**Requirements:**
-- Python >= 3.12
-- PyTorch >= 2.12
-- CUDA Toolkit (optional, for GPU support)
-- CMake >= 3.28 (optional, for building from source)
+See the [build guide](docs/dev/build.md) for native-backend builds and troubleshooting.
 
-## Quick Start
+## Quick start
+
+This example runs a small 2D TM forward simulation on CUDA when available and falls back to CPU otherwise:
 
 ```python
 import torch
 import tide
 
-# Create a simple model
-nx, ny = 200, 100
-epsilon = torch.ones(ny, nx) * 4.0  # Relative permittivity
-sigma = torch.zeros_like(epsilon)    # Conductivity (S/m)
-mu = torch.ones_like(epsilon)        # Relative permeability
-epsilon[50:, :] = 9.0  # Add a layer
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+dtype = torch.float32
 
-# Set up source
-source_amplitude = tide.ricker(
-    freq=4e8,           # 400 MHz
-    length=1000,
-    dt=1e-11,
-    peak_time=5e-10
-).reshape(1, 1, -1)
+ny, nx = 96, 96
+epsilon = torch.full((ny, nx), 4.0, device=device, dtype=dtype)
+sigma = torch.zeros_like(epsilon)
+mu = torch.ones_like(epsilon)
 
-source_location = torch.tensor([[[10, 100]]], dtype=torch.long)
-receiver_location = torch.tensor([[[10, 150]]], dtype=torch.long)
+nt = 300
+dt = 4e-11
+source = tide.ricker(
+    freq=8e8,
+    length=nt,
+    dt=dt,
+    device=device,
+    dtype=dtype,
+).view(1, 1, nt)
 
-# Run forward simulation
+source_location = torch.tensor(
+    [[[20, 48]]],
+    device=device,
+    dtype=torch.long,
+)
+receiver_location = torch.tensor(
+    [[[20, 60]]],
+    device=device,
+    dtype=torch.long,
+)
+
 *_, receiver_data = tide.maxwelltm(
     epsilon=epsilon,
-  sigma=sigma,
-  mu=mu,
-  grid_spacing=0.01,
-    dt=1e-11,
-  source_amplitude=source_amplitude,
-  source_location=source_location,
-  receiver_location=receiver_location,
-    pml_width=10
-)
-
-print(f"Recorded data shape: {receiver_data.shape}")
-```
-
-## Core Modules
-
-- `tide.maxwelltm`: 2D TM solver
-- `tide.maxwell3d`: 3D solver
-- `tide.wavelets`: Source wavelet generation
-- `tide.callbacks`: Callback state and factories
-- `tide.storage`: Snapshot storage and compression controls
-- `tide.workflow`: Shot batching, receiver loss, and optimizer workflow helpers
-- `tide.resampling`: CFL resampling helpers
-- `tide.cfl`: CFL condition helper
-- `tide.padding`: Padding and interior masking helpers
-- `tide.validation`: Input validation helpers
-
-## Precision and Storage
-
-Storage and precision controls:
-
-```python
-out = tide.maxwelltm(
-    epsilon,
-    sigma,
-    mu,
+    sigma=sigma,
+    mu=mu,
     grid_spacing=0.02,
-    dt=4e-11,
-    source_amplitude=src,
-    source_location=src_loc,
-    receiver_location=rec_loc,
-    storage_mode="auto",
-    storage_compression="bf16",
+    dt=dt,
+    source_amplitude=source,
+    source_location=source_location,
+    receiver_location=receiver_location,
+    pml_width=10,
 )
-```
 
-Notes:
-- `storage_mode` accepts device, cpu, disk, none, and auto.
-- `storage_compression` accepts none or bf16 for float32 snapshot storage on
-  Maxwell and Born native paths that save backward intermediates.
+print(receiver_data.shape)  # [nt, n_shots, n_receivers]
+```
 
 ## Documentation
 
-Recommended reading path:
+Start with the path that matches your task:
 
-1. `docs/getting-started.md` for installation and the first 2D forward run
-2. `docs/guides/api-orientation.md` for choosing between `tide.maxwelltm`, `tide.maxwell3d`, `MaxwellTM`, and `Maxwell3D`
-3. `docs/guides/modeling.md` and `docs/guides/inversion.md` for forward modeling and inversion workflows
-4. `docs/guides/configuration.md` for storage, callbacks, backend, and CFL-related controls
-5. `docs/guides/limitations.md` and `docs/guides/verification.md` before enabling advanced features broadly
+- [Getting started](docs/getting-started.md): installation, backend checks, and a first 2D simulation
+- [API orientation](docs/guides/api-orientation.md): functional and module-level solver APIs
+- [Modeling](docs/guides/modeling.md): sources, receivers, boundaries, and tensor layouts
+- [Inversion](docs/guides/inversion.md): losses, backpropagation, and optimizer workflows
+- [Configuration](docs/guides/configuration.md): storage, callbacks, backends, and CFL controls
+- [API reference](docs/api/index.md): public modules and functions
 
-## Testing
+Before relying on advanced configurations, review the [known limitations](docs/guides/limitations.md) and [verification guide](docs/guides/verification.md).
 
-Run the test suite:
+## Development
+
+Install the development dependencies and run the test suite:
 
 ```bash
-pytest tests/
+uv sync --group dev
+uv run pytest
 ```
 
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Acknowledgments
-
-This project includes code derived from [Deepwave](https://github.com/ar4/deepwave) by Alan Richardson. We gratefully acknowledge the foundational work that made TIDE possible.
+Issues and pull requests are welcome.
 
 ## Citation
 
-If you use TIDE in your research, please cite:
+If you use TIDE in your research, cite:
 
 ```bibtex
 @software{tide2025,
@@ -187,6 +139,10 @@ If you use TIDE in your research, please cite:
 }
 ```
 
+## Acknowledgments
+
+TIDE includes code derived from [Deepwave](https://github.com/ar4/deepwave) by Alan Richardson.
+
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+TIDE is available under the [MIT License](LICENSE).
