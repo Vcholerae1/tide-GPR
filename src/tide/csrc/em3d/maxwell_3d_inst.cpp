@@ -2086,6 +2086,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(backward)(
     TIDE_DTYPE *__restrict const m_lambda_hz_x,
     TIDE_DTYPE *__restrict const m_lambda_hy_x,
     TIDE_DTYPE *__restrict const m_lambda_hx_y,
+    TIDE_DTYPE *__restrict const adjoint_memory_scratch,
     TIDE_DTYPE *__restrict const store_1,
     TIDE_DTYPE *__restrict const store_2,
     char **store_filenames_1,
@@ -2166,6 +2167,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(backward)(
     int64_t const execution_backend,
     void *const compute_stream_handle,
     void *const storage_stream_handle) {
+  (void)adjoint_memory_scratch;
   (void)device;
   (void)execution_backend;
   (void)compute_stream_handle;
@@ -2372,6 +2374,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(born_backward_bggrad)(
     TIDE_DTYPE *__restrict const m_eta_hz_x,
     TIDE_DTYPE *__restrict const m_eta_hy_x,
     TIDE_DTYPE *__restrict const m_eta_hx_y,
+    TIDE_DTYPE *__restrict const adjoint_memory_scratch,
     TIDE_DTYPE *__restrict const store_1,
     TIDE_DTYPE *__restrict const store_2,
     char **store_filenames_1,
@@ -2469,6 +2472,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(born_backward_bggrad)(
   (void)execution_backend;
   (void)compute_stream_handle;
   (void)storage_stream_handle;
+  (void)adjoint_memory_scratch;
   (void)dt;
   (void)f0;
   (void)df;
@@ -2898,6 +2902,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(born_backward)(
     TIDE_DTYPE *__restrict const m_lambda_hz_x,
     TIDE_DTYPE *__restrict const m_lambda_hy_x,
     TIDE_DTYPE *__restrict const m_lambda_hx_y,
+    TIDE_DTYPE *__restrict const adjoint_memory_scratch,
     TIDE_DTYPE *__restrict const store_1,
     TIDE_DTYPE *__restrict const store_2,
     char **store_filenames_1,
@@ -2979,6 +2984,7 @@ TIDE_EXTERN_C TIDE_EXPORT void FUNC(born_backward)(
   (void)execution_backend;
   (void)compute_stream_handle;
   (void)storage_stream_handle;
+  (void)adjoint_memory_scratch;
   (void)dt;
   (void)store_2;
   (void)store_filenames_1;

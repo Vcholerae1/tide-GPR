@@ -763,6 +763,16 @@ class BornTMForwardFunc(torch.autograd.Function):
             m_lambda_hz_x = torch.empty(0, device=device, dtype=coeff_dtype)
             work_x = torch.empty(0, device=device, dtype=coeff_dtype)
             work_z = torch.empty(0, device=device, dtype=coeff_dtype)
+        if needs_bggrad:
+            adjoint_memory_scratch = torch.empty(
+                (8, *lambda_ey.shape), device=device, dtype=coeff_dtype
+            )
+        elif needs_background_backward:
+            adjoint_memory_scratch = torch.empty(
+                (4, *lambda_ey.shape), device=device, dtype=coeff_dtype
+            )
+        else:
+            adjoint_memory_scratch = torch.empty(0, device=device, dtype=coeff_dtype)
 
         if (receiver_grad_needed or needs_bggrad) and ctx.n_sources > 0:
             grad_f = torch.zeros(
@@ -898,6 +908,7 @@ class BornTMForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(m_lambda_ey_z),
                 backend_utils.tensor_to_ptr(m_lambda_hx_z),
                 backend_utils.tensor_to_ptr(m_lambda_hz_x),
+                backend_utils.tensor_to_ptr(adjoint_memory_scratch),
                 backend_utils.tensor_to_ptr(ey_store_1),
                 backend_utils.tensor_to_ptr(ey_store_3),
                 ey_filenames_ptr,
@@ -1035,6 +1046,7 @@ class BornTMForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(bggrad_grad_cb_shot_ptr),
                 backend_utils.tensor_to_ptr(grad_dca_shot_ptr),
                 backend_utils.tensor_to_ptr(grad_dcb_shot_ptr),
+                backend_utils.tensor_to_ptr(adjoint_memory_scratch),
                 backend_utils.tensor_to_ptr(ay),
                 backend_utils.tensor_to_ptr(by),
                 backend_utils.tensor_to_ptr(ay_h),

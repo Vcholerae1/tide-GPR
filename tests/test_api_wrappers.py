@@ -990,6 +990,40 @@ def test_maxwell3d_hvp_native_module_matches_functional_cpu():
         torch.testing.assert_close(module_out, func_out)
 
 
+@pytest.mark.parametrize("hessian_mode", ["gauss_newton", "full"])
+@pytest.mark.skipif(
+    not backend_utils.is_backend_available() or not torch.cuda.is_available(),
+    reason="native cuda backend not available",
+)
+def test_maxwell3d_hvp_native_cuda_matches_python_reference(hessian_mode):
+    case = _build_3d_case(torch.device("cuda"))
+    outputs = {}
+    for python_backend in (True, False):
+        outputs[python_backend] = tide.maxwell3d_hvp(
+            case["epsilon"],
+            case["sigma"],
+            case["mu"],
+            grid_spacing=case["grid_spacing"],
+            dt=case["dt"],
+            source_amplitude=case["source_amplitude"],
+            source_location=case["source_location"],
+            receiver_location=case["receiver_location"],
+            observed_data=case["observed_data"],
+            vepsilon=case["depsilon"],
+            vsigma=case["dsigma"],
+            stencil=2,
+            pml_width=1,
+            source_component=case["source_component"],
+            receiver_component=case["receiver_component"],
+            hessian_mode=hessian_mode,
+            python_backend=python_backend,
+        )
+
+    for reference, native in zip(outputs[True], outputs[False]):
+        relative_l2 = (native - reference).double().norm() / reference.double().norm()
+        assert relative_l2 < 5e-6
+
+
 @pytest.mark.skipif(
     not backend_utils.is_backend_available() or not torch.cuda.is_available(),
     reason="native cuda backend not available",

@@ -291,6 +291,7 @@ _TM_BACKWARD_SPEC: _Spec = [
     (_P, 1, "grad_r"),
     (_P, 3, "lambda_ey, lambda_hx, lambda_hz"),
     (_P, 4, "m_lambda_ey_x, m_lambda_ey_z, m_lambda_hx_z, m_lambda_hz_x"),
+    (_P, 1, "adjoint_memory_scratch"),
     (
         _P,
         6,
@@ -311,6 +312,7 @@ _TM_BACKGROUND_VJP_REUSE_SPEC: _Spec = [
     (_P, 1, "grad_r"),
     (_P, 3, "lambda_ey, lambda_hx, lambda_hz"),
     (_P, 4, "m_lambda_ey_x, m_lambda_ey_z, m_lambda_hx_z, m_lambda_hz_x"),
+    (_P, 1, "adjoint_memory_scratch"),
     (
         _P,
         6,
@@ -428,6 +430,7 @@ _TM_BORN_BACKWARD_BGGRAD_SPEC: _Spec = [
         "eta_source_old, work_eta_x, work_eta_z, "
         "grad_ca_shot, grad_cb_shot, grad_dca_shot, grad_dcb_shot",
     ),
+    (_P, 1, "adjoint_memory_scratch"),
     *_TM_PML_PROFILES,
     *_TM_COMMON_TAIL,
     *_TM_STORAGE_TAIL,
@@ -532,6 +535,7 @@ _3D_BACKWARD_SPEC: _Spec = [
     (_P, 3, "ca, cb, cq"),
     (_P, 1, "grad_r"),
     *_3D_ADJ_FIELDS,
+    (_P, 1, "adjoint_memory_scratch"),
     (
         _P,
         18,
@@ -611,6 +615,7 @@ _3D_BORN_BACKWARD_SPEC: _Spec = [
     (_P, 3, "ca, cb, cq"),
     (_P, 1, "grad_r"),
     *_3D_ADJ_FIELDS,
+    (_P, 1, "adjoint_memory_scratch"),
     (
         _P,
         18,
@@ -641,6 +646,7 @@ _3D_BORN_BACKWARD_BGGRAD_SPEC: _Spec = [
         "m_eta_ex_y, m_eta_ey_x, m_eta_hz_y, m_eta_hy_z, "
         "m_eta_hx_z, m_eta_hz_x, m_eta_hy_x, m_eta_hx_y",
     ),
+    (_P, 1, "adjoint_memory_scratch"),
     (
         _P,
         18,
@@ -885,6 +891,25 @@ def get_tm2d_full_hvp_incremental_adjoint_function(
     """
     return get_backend_function(
         "maxwell_tm",
+        "born_backward_bggrad",
+        accuracy,
+        dtype,
+        device,
+    )
+
+
+def get_maxwell3d_full_hvp_incremental_adjoint_function(
+    accuracy: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> CFunctionPointer:
+    """Return the fused 3D full-HVP incremental-adjoint backend.
+
+    The native symbol retains the existing ``born_backward_bggrad`` ABI name;
+    this semantic resolver keeps Gauss-Newton dispatch on ``born_backward``.
+    """
+    return get_backend_function(
+        "maxwell_3d",
         "born_backward_bggrad",
         accuracy,
         dtype,

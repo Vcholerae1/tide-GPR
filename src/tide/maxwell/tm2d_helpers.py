@@ -29,14 +29,17 @@ def _init_tm_wavefield(
         if value_scale is not None:
             field_0 = field_0 * value_scale
         field_0 = field_0.to(device=device, dtype=dtype)
-        wavefield = create_or_pad(
-            field_0,
-            fd_pad_list,
-            device,
-            dtype,
-            size_with_batch,
-            mode="constant",
-        )
+        if field_0.shape == size_with_batch:
+            wavefield = field_0.clone()
+        else:
+            wavefield = create_or_pad(
+                field_0,
+                fd_pad_list,
+                device,
+                dtype,
+                size_with_batch,
+                mode="constant",
+            )
     else:
         wavefield = torch.zeros(size_with_batch, device=device, dtype=dtype)
     return wavefield.contiguous() if contiguous else wavefield

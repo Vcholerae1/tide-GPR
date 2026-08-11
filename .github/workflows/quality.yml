@@ -6,6 +6,8 @@ on:
   push:
     branches: [main, develop]
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
@@ -25,7 +27,7 @@ jobs:
         run: uv sync --group dev
 
       - name: Ruff
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests benchmarks/maxwell_runtime.py
 
       - name: Architecture and CPU smoke tests
         run: >-
@@ -41,3 +43,39 @@ jobs:
           tests/test_workflow_distributed.py
           tests/test_native_cpu_parity.py
           tests/test_maxwell3d_backend_parity.py
+
+
+      - name: Fast numerical correctness
+        run: uv run pytest -q -m "numerical and not cuda and not slow"
+
+      - name: Benchmark CLI smoke
+        run: >-
+          uv run python benchmarks/maxwell_runtime.py
+          --dimension 2 --device cpu --shape 12,14 --nt 8
+          --shots 1 --receivers 1 --warmup 0 --repeats 1
+          --output artifacts/benchmarks/ci-smoke.json
+
+  nightly-cpu:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: "latest"
+
+      - name: Install development environment
+        run: uv sync --group dev
+
+      - name: Slow numerical and OpenMP suite
+        run: uv run pytest -q -m "slow and not cuda"
+
+      - name: Upload numerical artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-cpu-numerical
+          path: artifacts/
+          if-no-files-found: ignore

@@ -1,6 +1,6 @@
 [project]
 name = "tide-GPR"
-version = "0.0.33"
+version = "0.0.34"
 description = "Torch-based Inversion & Development Engine for electromagnetic wave propagation"
 readme = "README.md"
 license = {text = "MIT"}
@@ -100,6 +100,13 @@ CMAKE_CUDA_ARCHITECTURES = "89"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "numerical: small deterministic numerical correctness checks",
+    "cuda: requires a native CUDA backend",
+    "slow: long-running stability or stress checks",
+    "openmp: executes native OpenMP cases in fresh processes",
+    "benchmark: measures performance rather than correctness",
+]
 
 [tool.cibuildwheel]
 # Build for Python 3.12 only (python-independent wheel)
@@ -120,16 +127,16 @@ test-requires = "pytest numpy scipy torch"
 # Install GCC 13 for better OpenMP SIMD support
 before-all = "dnf install -y gcc-toolset-13"
 environment = { PATH="/opt/rh/gcc-toolset-13/root/usr/bin:$PATH", CC="gcc", CXX="g++" }
-test-command = "pytest {project}/tests"
+test-command = 'pytest -q -m "not cuda and not slow and not benchmark" {project}/tests'
 # Don't bundle CUDA libraries
 repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel} --exclude libcuda.so.1 --exclude 'libcudart.so.*'"
 before-test = "pip install torch --index-url https://download.pytorch.org/whl/cpu"
 
 [tool.cibuildwheel.windows]
-test-command = "pytest {project}/tests"
+test-command = 'pytest -q -m "not cuda and not slow and not benchmark" {project}/tests'
 
 [tool.cibuildwheel.macos]
-test-command = "pytest {project}/tests"
+test-command = 'pytest -q -m "not cuda and not slow and not benchmark" {project}/tests'
 
 [dependency-groups]
 dev = [

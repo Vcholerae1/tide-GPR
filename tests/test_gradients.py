@@ -1,6 +1,11 @@
 """Tests for gradient computation correctness and sampling interval."""
 
 import pytest
+from numerical_utils import (
+    deterministic_direction,
+    directional_derivative_errors,
+    taylor_remainders,
+)
 import torch
 
 import tide
@@ -34,13 +39,17 @@ class TestGradientAccuracy2D:
         sigma = torch.zeros_like(epsilon)
         mu = torch.ones_like(epsilon)
 
-        source_locations = torch.tensor([[[ny // 2, nx // 4]]], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
+        )
         receiver_locations = torch.tensor(
             [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
         )
 
         freq = 200e6
-        wavelet = tide.ricker(freq, nt, dt, peak_time=1.0 / freq, dtype=dtype, device=device)
+        wavelet = tide.ricker(
+            freq, nt, dt, peak_time=1.0 / freq, dtype=dtype, device=device
+        )
         source_amplitude = wavelet.view(1, 1, nt)
 
         return {
@@ -107,7 +116,9 @@ class TestGradientAccuracy2D:
 
         # The gradient should have the same sign and similar magnitude
         # Using a looser tolerance since FD is approximate
-        assert torch.sign(grad_at_point) == torch.sign(fd_approx), "Gradient sign should match"
+        assert torch.sign(grad_at_point) == torch.sign(fd_approx), (
+            "Gradient sign should match"
+        )
         rel_error = abs(grad_at_point - fd_approx) / (abs(fd_approx) + 1e-10)
         assert rel_error < 0.5, f"Gradient FD mismatch too large: {rel_error}"
 
@@ -158,13 +169,17 @@ class TestGradientSamplingInterval:
         sigma = torch.zeros_like(epsilon)
         mu = torch.ones_like(epsilon)
 
-        source_locations = torch.tensor([[[ny // 2, nx // 4]]], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
+        )
         receiver_locations = torch.tensor(
             [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
         )
 
         freq = 100e6
-        wavelet = tide.ricker(freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device)
+        wavelet = tide.ricker(
+            freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device
+        )
         source_amplitude = wavelet.view(1, 1, nt)
 
         # Compute gradient with sampling interval 1
@@ -209,9 +224,13 @@ class TestGradientSamplingInterval:
 
         # Gradients should be different (sampling_interval affects gradient computation)
         # Note: they might be similar if the simulation is short, so we just check they're not identical
-        correlation = (grad1 * grad2).sum() / (torch.norm(grad1) * torch.norm(grad2) + 1e-10)
+        correlation = (grad1 * grad2).sum() / (
+            torch.norm(grad1) * torch.norm(grad2) + 1e-10
+        )
         # Correlation should be high (both approximate the same gradient) but not exactly 1
-        assert 0.5 < correlation < 1.0, f"Unexpected gradient correlation: {correlation}"
+        assert 0.5 < correlation < 1.0, (
+            f"Unexpected gradient correlation: {correlation}"
+        )
 
     def test_gradient_sampling_interval_values(self):
         """Test various sampling interval values."""
@@ -225,7 +244,9 @@ class TestGradientSamplingInterval:
         sigma = torch.zeros_like(epsilon)
         mu = torch.ones_like(epsilon)
 
-        source_locations = torch.tensor([[[ny // 2, nx // 4]]], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
+        )
         receiver_locations = torch.tensor(
             [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
         )
@@ -256,7 +277,9 @@ class TestGradientSamplingInterval:
             assert eps.grad is not None
             grad = eps.grad
 
-            assert torch.isfinite(grad).all(), f"Gradient should be finite for interval={interval}"
+            assert torch.isfinite(grad).all(), (
+                f"Gradient should be finite for interval={interval}"
+            )
 
 
 class TestGradientBoundaryConditions:
@@ -274,7 +297,9 @@ class TestGradientBoundaryConditions:
         sigma = torch.zeros_like(epsilon)
         mu = torch.ones_like(epsilon)
 
-        source_locations = torch.tensor([[[ny // 2, nx // 4]]], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
+        )
         receiver_locations = torch.tensor(
             [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
         )
@@ -318,7 +343,9 @@ class TestGradientBoundaryConditions:
         sigma = torch.zeros_like(epsilon)
         mu = torch.ones_like(epsilon)
 
-        source_locations = torch.tensor([[[ny // 2, nx // 4]]], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
+        )
         receiver_locations = torch.tensor(
             [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
         )
@@ -367,12 +394,16 @@ class TestGradientMultiSource:
         sigma = torch.zeros_like(epsilon)
         mu = torch.ones_like(epsilon)
 
-        source_locations = torch.tensor([
-            [[ny // 3, nx // 3], [2 * ny // 3, 2 * nx // 3]]
-        ], dtype=torch.long, device=device)
-        receiver_locations = torch.tensor([
-            [[ny // 2, nx // 2], [ny // 2, nx // 2 + 2]]
-        ], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 3, nx // 3], [2 * ny // 3, 2 * nx // 3]]],
+            dtype=torch.long,
+            device=device,
+        )
+        receiver_locations = torch.tensor(
+            [[[ny // 2, nx // 2], [ny // 2, nx // 2 + 2]]],
+            dtype=torch.long,
+            device=device,
+        )
 
         wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
         # For multiple sources, use the same wavelet for each source
@@ -399,7 +430,9 @@ class TestGradientMultiSource:
         assert eps.grad is not None
         grad = eps.grad
 
-        assert torch.isfinite(grad).all(), "Gradient should be finite for multiple sources"
+        assert torch.isfinite(grad).all(), (
+            "Gradient should be finite for multiple sources"
+        )
         assert grad.abs().sum() > 0, "Gradient should be non-zero for multiple sources"
 
 
@@ -472,7 +505,9 @@ class TestGradientBackendConsistency:
         assert cos_eps > 0.999, f"epsilon gradient cosine too low: {cos_eps:.6f}"
         assert cos_sig > 0.999, f"sigma gradient cosine too low: {cos_sig:.6f}"
 
-    def test_eager_vs_native_source_and_model_gradients_cpu_no_pml_match_reference(self):
+    def test_eager_vs_native_source_and_model_gradients_cpu_no_pml_match_reference(
+        self,
+    ):
         try:
             from tide import backend_utils
         except Exception:  # pragma: no cover
@@ -644,12 +679,8 @@ class TestGradientBackendConsistency:
         epsilon = torch.full((nz, ny, nx), 4.0, device=device, dtype=dtype)
         sigma = torch.full_like(epsilon, 1e-4)
         mu = torch.ones_like(epsilon)
-        source_location = torch.tensor(
-            [[[2, 2, 2]]], dtype=torch.long, device=device
-        )
-        receiver_location = torch.tensor(
-            [[[2, 2, 4]]], dtype=torch.long, device=device
-        )
+        source_location = torch.tensor([[[2, 2, 2]]], dtype=torch.long, device=device)
+        receiver_location = torch.tensor([[[2, 2, 4]]], dtype=torch.long, device=device)
         source_wavelet = tide.ricker(
             90e6,
             nt,
@@ -713,11 +744,17 @@ class TestGradientBackendConsistency:
         x = torch.linspace(0.0, 1.0, nx, device=device, dtype=dtype)
         yy, xx = torch.meshgrid(y, x, indexing="ij")
 
-        epsilon = (4.0 + 0.8 * torch.exp(-((xx - 0.45) ** 2 + (yy - 0.55) ** 2) / 0.05)).detach()
-        sigma = (6e-4 + 1.0e-3 * torch.exp(-((xx - 0.65) ** 2 + (yy - 0.40) ** 2) / 0.08)).detach()
+        epsilon = (
+            4.0 + 0.8 * torch.exp(-((xx - 0.45) ** 2 + (yy - 0.55) ** 2) / 0.05)
+        ).detach()
+        sigma = (
+            6e-4 + 1.0e-3 * torch.exp(-((xx - 0.65) ** 2 + (yy - 0.40) ** 2) / 0.08)
+        ).detach()
         mu = torch.ones_like(epsilon)
 
-        source_locations = torch.tensor([[[ny // 2, nx // 4]]], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
+        )
         receiver_locations = torch.tensor(
             [[[ny // 2, nx // 2], [ny // 2, nx // 2 + 2]]],
             dtype=torch.long,
@@ -791,9 +828,7 @@ def test_eager_vs_native_gradients_cuda_include_pml_foldback():
     x = torch.linspace(0.0, 1.0, nx, device=device, dtype=dtype)
     yy, xx = torch.meshgrid(y, x, indexing="ij")
     epsilon = (
-        4.0
-        + 0.5 * torch.exp(-((xx - 0.15) ** 2 + (yy - 0.20) ** 2) / 0.02)
-        + 0.3 * xx
+        4.0 + 0.5 * torch.exp(-((xx - 0.15) ** 2 + (yy - 0.20) ** 2) / 0.02) + 0.3 * xx
     ).detach()
     sigma = (5e-4 + 8e-4 * yy).detach()
     mu = torch.ones_like(epsilon)
@@ -844,6 +879,73 @@ def test_eager_vs_native_gradients_cuda_include_pml_foldback():
     left_norm_ratio = float(torch.norm(left_native) / (torch.norm(left_ref) + 1e-12))
 
     assert top_norm_ratio > 0.5, f"top-row foldback too small: {top_norm_ratio:.3f}"
-    assert left_norm_ratio > 0.5, f"left-column foldback too small: {left_norm_ratio:.3f}"
+    assert left_norm_ratio > 0.5, (
+        f"left-column foldback too small: {left_norm_ratio:.3f}"
+    )
     assert cosine(top_native, top_ref) > 0.75
     assert cosine(left_native, left_ref) > 0.95
+
+
+@pytest.mark.numerical
+@pytest.mark.parametrize("stencil", [2, 4, 6, 8])
+@pytest.mark.parametrize("parameter", ["epsilon", "sigma"])
+def test_tm2d_native_directional_derivative(parameter: str, stencil: int) -> None:
+    device = torch.device("cpu")
+    dtype = torch.float64
+    ny, nx, nt = 18, 20, 60
+    epsilon = torch.full((ny, nx), 4.0, dtype=dtype)
+    sigma = torch.full_like(epsilon, 2.0e-4)
+    mu = torch.ones_like(epsilon)
+    source = tide.ricker(400e6, nt, 2.0e-11, peak_time=8.0e-10, dtype=dtype).view(
+        1, 1, nt
+    )
+    source_location = torch.tensor([[[9, 7]]], dtype=torch.long)
+    receiver_location = torch.tensor([[[9, 12], [11, 12]]], dtype=torch.long)
+    residual = torch.linspace(-0.7, 1.1, nt, dtype=dtype).view(nt, 1, 1)
+
+    def objective(value: torch.Tensor) -> torch.Tensor:
+        epsilon_i = value if parameter == "epsilon" else epsilon
+        sigma_i = value if parameter == "sigma" else sigma
+        receiver = tide.maxwelltm(
+            epsilon_i,
+            sigma_i,
+            mu,
+            [0.018, 0.022],
+            2.0e-11,
+            source,
+            source_location,
+            receiver_location,
+            stencil=stencil,
+            pml_width=4,
+            python_backend=False,
+            storage_compression=False,
+        )[-1]
+        return (receiver * residual).sum()
+
+    base = (epsilon if parameter == "epsilon" else sigma).clone().requires_grad_(True)
+    loss = objective(base)
+    (gradient,) = torch.autograd.grad(loss, base)
+    direction = deterministic_direction(
+        base.shape, seed=7100 + stencil, device=device, dtype=dtype
+    )
+    scale = 1.0e-2 if parameter == "epsilon" else 1.0e-5
+    steps = (scale, scale / 2.0, scale / 4.0)
+    errors = directional_derivative_errors(
+        objective,
+        base.detach(),
+        direction,
+        gradient,
+        steps,
+    )
+    zero_order, first_order = taylor_remainders(
+        objective,
+        base.detach(),
+        direction,
+        gradient,
+        steps,
+        base_value=loss,
+    )
+    assert min(errors) < 5.0e-3, errors
+    assert first_order[1] < 0.35 * first_order[0], (zero_order, first_order)
+    assert first_order[2] < 0.35 * first_order[1], (zero_order, first_order)
+    assert first_order[-1] < zero_order[-1], (zero_order, first_order)

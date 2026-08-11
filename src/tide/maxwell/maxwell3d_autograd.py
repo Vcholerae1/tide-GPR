@@ -567,6 +567,9 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         m_lambda_hz_x = torch.zeros_like(lambda_ex)
         m_lambda_hy_x = torch.zeros_like(lambda_ex)
         m_lambda_hx_y = torch.zeros_like(lambda_ex)
+        adjoint_memory_scratch = torch.empty(
+            (12, *lambda_ex.shape), device=device, dtype=dtype
+        )
 
         if n_sources > 0:
             grad_f = torch.zeros(nt, n_shots, n_sources, device=device, dtype=dtype)
@@ -581,7 +584,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             )
             grad_ca_shot = (
                 torch.empty(0, device=device, dtype=dtype)
-                if ca_batched
+                if ca_batched or n_shots == 1
                 else torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
             )
         else:
@@ -596,7 +599,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             )
             grad_cb_shot = (
                 torch.empty(0, device=device, dtype=dtype)
-                if cb_batched
+                if cb_batched or n_shots == 1
                 else torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
             )
         else:
@@ -659,6 +662,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(m_lambda_hz_x),
                 backend_utils.tensor_to_ptr(m_lambda_hy_x),
                 backend_utils.tensor_to_ptr(m_lambda_hx_y),
+                backend_utils.tensor_to_ptr(adjoint_memory_scratch),
                 backend_utils.tensor_to_ptr(store_ex),
                 backend_utils.tensor_to_ptr(store_ex_host),
                 ctypes.cast(

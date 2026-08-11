@@ -615,6 +615,9 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
         m_lambda_ey_z = torch.zeros(n_shots, ny, nx, device=device, dtype=coeff_dtype)
         m_lambda_hx_z = torch.zeros(n_shots, ny, nx, device=device, dtype=coeff_dtype)
         m_lambda_hz_x = torch.zeros(n_shots, ny, nx, device=device, dtype=coeff_dtype)
+        adjoint_memory_scratch = torch.empty(
+            4, n_shots, ny, nx, device=device, dtype=coeff_dtype
+        )
 
         if n_sources > 0:
             grad_f = torch.zeros(
@@ -690,6 +693,7 @@ class MaxwellTMForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(m_lambda_ey_z),
                 backend_utils.tensor_to_ptr(m_lambda_hx_z),
                 backend_utils.tensor_to_ptr(m_lambda_hz_x),
+                backend_utils.tensor_to_ptr(adjoint_memory_scratch),
                 backend_utils.tensor_to_ptr(ey_store_1),
                 backend_utils.tensor_to_ptr(ey_store_3),
                 ey_filenames_ptr,

@@ -18,9 +18,9 @@ BatchedModel3D = Float[Tensor, "batch z y x"]
 Model3DLike = Model3D | BatchedModel3D
 
 Field2DLike = (
-    Float[Tensor, "y x"]
-    | Float[Tensor, "shot y x"]
-    | Float[Tensor, "batch shot y x"]
+    Float[Tensor, "field_y field_x"]
+    | Float[Tensor, "shot field_y field_x"]
+    | Float[Tensor, "batch shot field_y field_x"]
 )
 Field3DLike = (
     Float[Tensor, "z y x"]
@@ -29,29 +29,23 @@ Field3DLike = (
 )
 
 WaveletBatch = (
-    Float[Tensor, "shot source time"]
-    | Float[Tensor, "batch shot source time"]
+    Float[Tensor, "shot source time"] | Float[Tensor, "batch shot source time"]
 )
 
 Location2D = Int[Tensor, "shot _ 2"] | Int[Tensor, "batch shot _ 2"]
-SourceLocation2D = (
-    Int[Tensor, "shot source 2"] | Int[Tensor, "batch shot source 2"]
-)
+SourceLocation2D = Int[Tensor, "shot source 2"] | Int[Tensor, "batch shot source 2"]
 ReceiverLocation2D = (
     Int[Tensor, "shot receiver 2"] | Int[Tensor, "batch shot receiver 2"]
 )
 
 Location3D = Int[Tensor, "shot _ 3"] | Int[Tensor, "batch shot _ 3"]
-SourceLocation3D = (
-    Int[Tensor, "shot source 3"] | Int[Tensor, "batch shot source 3"]
-)
+SourceLocation3D = Int[Tensor, "shot source 3"] | Int[Tensor, "batch shot source 3"]
 ReceiverLocation3D = (
     Int[Tensor, "shot receiver 3"] | Int[Tensor, "batch shot receiver 3"]
 )
 
 ReceiverData = (
-    Float[Tensor, "time shot receiver"]
-    | Float[Tensor, "batch time shot receiver"]
+    Float[Tensor, "time shot receiver"] | Float[Tensor, "batch time shot receiver"]
 )
 
 VectorF32 = Float32[np.ndarray, "n"]

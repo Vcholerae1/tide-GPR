@@ -7,6 +7,7 @@ import torch
 
 import tide
 from tide import backend_utils
+from numerical_utils import cosine_similarity, relative_l2
 
 
 @pytest.mark.parametrize("storage_mode", ["device", "cpu", "disk", "auto"])
@@ -43,7 +44,11 @@ def test_maxwell3d_storage_modes_are_accepted_in_backend_path(storage_mode: str)
 
 
 def _run_3d_grad(
-    storage_mode: str, storage_path: str, *, stream: torch.cuda.Stream | None = None
+    storage_mode: str,
+    storage_path: str,
+    *,
+    stream: torch.cuda.Stream | None = None,
+    storage_compression: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     device = torch.device("cuda")
     dtype = torch.float32
@@ -56,12 +61,8 @@ def _run_3d_grad(
     sigma = torch.full_like(epsilon, 2e-4, requires_grad=True)
     mu = torch.ones_like(epsilon)
 
-    source_location = torch.tensor(
-        [[[2, 3, 2]]], dtype=torch.long, device=device
-    )
-    receiver_location = torch.tensor(
-        [[[2, 3, 5]]], dtype=torch.long, device=device
-    )
+    source_location = torch.tensor([[[2, 3, 2]]], dtype=torch.long, device=device)
+    receiver_location = torch.tensor([[[2, 3, 5]]], dtype=torch.long, device=device)
     source_amplitude = tide.ricker(
         80e6, nt, 4e-11, peak_time=1.0 / 80e6, dtype=dtype, device=device
     ).view(1, 1, nt)
@@ -81,7 +82,7 @@ def _run_3d_grad(
             python_backend=False,
             storage_mode=storage_mode,
             storage_path=storage_path,
-            storage_compression=False,
+            storage_compression=storage_compression,
         )[-1]
         receivers.square().sum().backward()
     torch.cuda.synchronize()
@@ -205,3 +206,23 @@ def test_maxwell3d_plain_forward_matches_on_custom_current_stream():
     rec_stream = _run_3d_forward(stream=torch.cuda.Stream())
 
     torch.testing.assert_close(rec_stream, rec_base, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.cuda
+@pytest.mark.numerical
+def test_maxwell3d_bf16_storage_preserves_forward_and_gradient_direction():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for Maxwell3D BF16 storage tests.")
+
+    with tempfile.TemporaryDirectory() as storage_path:
+        eps_full, sig_full, rec_full = _run_3d_grad(
+            "device", storage_path, storage_compression=False
+        )
+        eps_bf16, sig_bf16, rec_bf16 = _run_3d_grad(
+            "device", storage_path, storage_compression=True
+        )
+
+    torch.testing.assert_close(rec_bf16, rec_full, rtol=0.0, atol=0.0)
+    for compressed, full in ((eps_bf16, eps_full), (sig_bf16, sig_full)):
+        assert relative_l2(compressed, full) < 1.0e-2
+        assert cosine_similarity(compressed, full) > 0.999

@@ -14,6 +14,7 @@ from tide.storage import (
     SnapshotAllocator,
     resolve_snapshot_storage,
 )
+from numerical_utils import cosine_similarity, relative_l2
 
 
 def test_snapshot_storage_resolver_normalizes_shape_sampling_and_cpu_alias():
@@ -76,7 +77,9 @@ def _run_grad(
     dt = 1e-11
     nt = 64
 
-    wavelet = tide.ricker(freq0, nt, dt, peak_time=1.0 / freq0, dtype=dtype, device=device)
+    wavelet = tide.ricker(
+        freq0, nt, dt, peak_time=1.0 / freq0, dtype=dtype, device=device
+    )
     n_shots = 2
     source_amplitude = wavelet.view(1, 1, nt).repeat(n_shots, 1, 1)
 
@@ -93,9 +96,7 @@ def _run_grad(
         dtype=torch.int64,
     )
 
-    context = (
-        torch.cuda.stream(stream) if stream is not None else nullcontext()
-    )
+    context = torch.cuda.stream(stream) if stream is not None else nullcontext()
     with context:
         *_, receivers = tide.maxwelltm(
             epsilon,
@@ -138,9 +139,7 @@ def test_tm_storage_backend_argtypes_include_stream_handles():
     forward_argtypes = backend_utils._template_argtypes(
         "maxwell_tm_forward_with_storage", "float"
     )
-    backward_argtypes = backend_utils._template_argtypes(
-        "maxwell_tm_backward", "float"
-    )
+    backward_argtypes = backend_utils._template_argtypes("maxwell_tm_backward", "float")
 
     assert forward_argtypes[-2:] == [ctypes.c_void_p, ctypes.c_void_p]
     assert backward_argtypes[-2:] == [ctypes.c_void_p, ctypes.c_void_p]
@@ -166,7 +165,9 @@ def test_make_tm_storage_streams_uses_current_and_storage_streams(monkeypatch):
     compute_stream = _FakeStream(101)
     storage_stream = _FakeStream(202)
 
-    monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: compute_stream)
+    monkeypatch.setattr(
+        torch.cuda, "current_stream", lambda device=None: compute_stream
+    )
     monkeypatch.setattr(torch.cuda, "Stream", lambda device=None: storage_stream)
 
     compute_handle, storage_handle, keepalive = _make_tm_storage_streams(
@@ -181,7 +182,9 @@ def test_make_tm_storage_streams_uses_current_and_storage_streams(monkeypatch):
 def test_make_tm_storage_streams_skips_storage_stream_for_device_mode(monkeypatch):
     compute_stream = _FakeStream(303)
 
-    monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: compute_stream)
+    monkeypatch.setattr(
+        torch.cuda, "current_stream", lambda device=None: compute_stream
+    )
     monkeypatch.setattr(
         torch.cuda,
         "Stream",
@@ -196,14 +199,21 @@ def test_make_tm_storage_streams_skips_storage_stream_for_device_mode(monkeypatc
     assert storage_handle == 0
     assert keepalive == (compute_stream,)
 
+
 def test_snapshot_storage_modes_match():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for snapshot storage tests.")
 
     with tempfile.TemporaryDirectory() as storage_path:
-        eps_dev, sig_dev, rec_dev = _run_grad("device", storage_path, storage_compression=False)
-        eps_cpu, sig_cpu, rec_cpu = _run_grad("cpu", storage_path, storage_compression=False)
-        eps_disk, sig_disk, rec_disk = _run_grad("disk", storage_path, storage_compression=False)
+        eps_dev, sig_dev, rec_dev = _run_grad(
+            "device", storage_path, storage_compression=False
+        )
+        eps_cpu, sig_cpu, rec_cpu = _run_grad(
+            "cpu", storage_path, storage_compression=False
+        )
+        eps_disk, sig_disk, rec_disk = _run_grad(
+            "disk", storage_path, storage_compression=False
+        )
 
     torch.testing.assert_close(rec_cpu, rec_dev, rtol=1e-5, atol=1e-6)
     torch.testing.assert_close(rec_disk, rec_dev, rtol=1e-5, atol=1e-6)
@@ -218,9 +228,15 @@ def test_snapshot_storage_bf16_modes_match():
         pytest.skip("CUDA is required for this test.")
 
     with tempfile.TemporaryDirectory() as storage_path:
-        eps_dev, sig_dev, rec_dev = _run_grad("device", storage_path, storage_compression=True)
-        eps_cpu, sig_cpu, rec_cpu = _run_grad("cpu", storage_path, storage_compression=True)
-        eps_disk, sig_disk, rec_disk = _run_grad("disk", storage_path, storage_compression=True)
+        eps_dev, sig_dev, rec_dev = _run_grad(
+            "device", storage_path, storage_compression=True
+        )
+        eps_cpu, sig_cpu, rec_cpu = _run_grad(
+            "cpu", storage_path, storage_compression=True
+        )
+        eps_disk, sig_disk, rec_disk = _run_grad(
+            "disk", storage_path, storage_compression=True
+        )
 
     torch.testing.assert_close(rec_cpu, rec_dev, rtol=1e-4, atol=1e-5)
     torch.testing.assert_close(rec_disk, rec_dev, rtol=1e-4, atol=1e-5)
@@ -228,6 +244,26 @@ def test_snapshot_storage_bf16_modes_match():
     torch.testing.assert_close(eps_disk, eps_dev, rtol=1e-4, atol=1e-5)
     torch.testing.assert_close(sig_cpu, sig_dev, rtol=1e-4, atol=1e-5)
     torch.testing.assert_close(sig_disk, sig_dev, rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.cuda
+@pytest.mark.numerical
+def test_bf16_storage_preserves_forward_and_bounded_gradient_error():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for this test.")
+
+    with tempfile.TemporaryDirectory() as storage_path:
+        eps_full, sig_full, rec_full = _run_grad(
+            "device", storage_path, storage_compression=False
+        )
+        eps_bf16, sig_bf16, rec_bf16 = _run_grad(
+            "device", storage_path, storage_compression=True
+        )
+
+    torch.testing.assert_close(rec_bf16, rec_full, rtol=0.0, atol=0.0)
+    for compressed, full in ((eps_bf16, eps_full), (sig_bf16, sig_full)):
+        assert relative_l2(compressed, full) < 1.0e-2
+        assert cosine_similarity(compressed, full) > 0.999
 
 
 def test_storage_mode_none_routes_gradients_per_fallback_policy():
@@ -244,7 +280,9 @@ def test_storage_mode_none_routes_gradients_per_fallback_policy():
     dt = 1e-11
     nt = 16
     freq0 = 9e8
-    wavelet = tide.ricker(freq0, nt, dt, peak_time=1.0 / freq0, dtype=dtype, device=device)
+    wavelet = tide.ricker(
+        freq0, nt, dt, peak_time=1.0 / freq0, dtype=dtype, device=device
+    )
 
     source_amplitude = wavelet.view(1, 1, nt)
     source_location = torch.tensor([[[8, 8]]], device=device, dtype=torch.int64)
@@ -299,7 +337,9 @@ def _run_tm_forward(stream: torch.cuda.Stream | None = None) -> torch.Tensor:
 
     dt = 1e-11
     freq0 = 9e8
-    wavelet = tide.ricker(freq0, nt, dt, peak_time=1.0 / freq0, dtype=dtype, device=device)
+    wavelet = tide.ricker(
+        freq0, nt, dt, peak_time=1.0 / freq0, dtype=dtype, device=device
+    )
     source_amplitude = wavelet.view(1, 1, nt).repeat(2, 1, 1)
     source_location = torch.tensor(
         [[[ny // 2, nx // 2]], [[ny // 2, nx // 2]]],
@@ -330,6 +370,7 @@ def _run_tm_forward(stream: torch.cuda.Stream | None = None) -> torch.Tensor:
         )[-1]
     torch.cuda.synchronize()
     return receivers.detach().cpu()
+
 
 @pytest.mark.parametrize("storage_mode", ["cpu", "disk"])
 @pytest.mark.parametrize("storage_compression", [False, True])

@@ -152,9 +152,7 @@ class Born3DForwardFunc(torch.autograd.Function):
             )
         else:
             receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
-            background_receiver_amplitudes = torch.empty(
-                0, device=device, dtype=dtype
-            )
+            background_receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
 
         device_idx = (
             device.index if device.type == "cuda" and device.index is not None else 0
@@ -185,9 +183,7 @@ class Born3DForwardFunc(torch.autograd.Function):
             compute_stream_handle, storage_stream_handle, stream_keepalive = (
                 _make_storage_streams(device, storage_mode)
             )
-            store_ex, store_ey, store_ez = snapshot_allocator.group(
-                3, store_e_needed
-            )
+            store_ex, store_ey, store_ez = snapshot_allocator.group(3, store_e_needed)
             store_curl_x, store_curl_y, store_curl_z = snapshot_allocator.group(
                 3, store_curl_needed
             )
@@ -790,13 +786,16 @@ class Born3DForwardFunc(torch.autograd.Function):
             eta_source_ex = torch.zeros_like(lambda_ex)
             eta_source_ey = torch.zeros_like(lambda_ex)
             eta_source_ez = torch.zeros_like(lambda_ex)
+            adjoint_memory_scratch = torch.empty(
+                (24, *lambda_ex.shape), device=device, dtype=dtype
+            )
 
-            backward_func = backend_utils.get_backend_function(
-                "maxwell_3d",
-                "born_backward_bggrad",
-                meta["accuracy"],
-                dtype,
-                meta["backend_device"],
+            backward_func = (
+                backend_utils.get_maxwell3d_full_hvp_incremental_adjoint_function(
+                    meta["accuracy"],
+                    dtype,
+                    meta["backend_device"],
+                )
             )
             backward_func(
                 backend_utils.tensor_to_ptr(ca),
@@ -843,6 +842,7 @@ class Born3DForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(m_eta_hz_x),
                 backend_utils.tensor_to_ptr(m_eta_hy_x),
                 backend_utils.tensor_to_ptr(m_eta_hx_y),
+                backend_utils.tensor_to_ptr(adjoint_memory_scratch),
                 backend_utils.tensor_to_ptr(store_ex),
                 0,
                 0,
@@ -962,6 +962,9 @@ class Born3DForwardFunc(torch.autograd.Function):
                 None,
                 None,
             )
+        adjoint_memory_scratch = torch.empty(
+            (12, *lambda_ex.shape), device=device, dtype=dtype
+        )
 
         backward_func = backend_utils.get_backend_function(
             "maxwell_3d",
@@ -993,6 +996,7 @@ class Born3DForwardFunc(torch.autograd.Function):
             backend_utils.tensor_to_ptr(m_lambda_hz_x),
             backend_utils.tensor_to_ptr(m_lambda_hy_x),
             backend_utils.tensor_to_ptr(m_lambda_hx_y),
+            backend_utils.tensor_to_ptr(adjoint_memory_scratch),
             backend_utils.tensor_to_ptr(store_ex),
             0,
             0,
@@ -1217,22 +1221,28 @@ def maxwell3d_receiver_hvp_native(
     vepsilon_req = _clone_param(
         torch.zeros_like(epsilon_req) if vepsilon is None else vepsilon
     )
-    vsigma_req = _clone_param(
-        torch.zeros_like(sigma_req) if vsigma is None else vsigma
-    )
+    vsigma_req = _clone_param(torch.zeros_like(sigma_req) if vsigma is None else vsigma)
     storage_compression = (
         "bf16"
         if epsilon_req.device.type == "cuda" and epsilon_req.dtype == torch.float32
         else False
     )
+    use_incremental_adjoint = hessian_mode == "full"
+    born_epsilon = epsilon_req if use_incremental_adjoint else epsilon_req.detach()
+    born_sigma = sigma_req if use_incremental_adjoint else sigma_req.detach()
+    born_source_amplitude = (
+        source_amplitude
+        if use_incremental_adjoint or source_amplitude is None
+        else source_amplitude.detach()
+    )
 
     born_outputs = born3d(
-        epsilon_req,
-        sigma_req,
+        born_epsilon,
+        born_sigma,
         mu_fixed,
         grid_spacing=grid_spacing,
         dt=dt,
-        source_amplitude=source_amplitude,
+        source_amplitude=born_source_amplitude,
         source_location=source_location,
         receiver_location=receiver_location,
         bg_receiver_location=receiver_location,

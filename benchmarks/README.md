@@ -5,16 +5,33 @@ examples. Their workloads are configured through explicit command-line
 arguments. Results are written under the ignored `artifacts/benchmarks/`
 directory.
 
+`maxwell_runtime.py` is the common native runtime and memory entry point for
+2D TM and 3D Maxwell forward or forward-plus-backward workloads. It records
+warmup-free timing samples, peak process/CUDA memory, the resolved workload,
+and software/device metadata as JSON. For example:
+
+```bash
+uv run python benchmarks/maxwell_runtime.py \
+  --dimension 3 --device cuda:0 --shape 24,28,32 --nt 400 \
+  --shots 4 --receivers 16 --backward \
+  --output artifacts/benchmarks/maxwell3d-runtime.json
+```
+
+Pass a prior JSON file with `--reference`. On a dedicated, fixed-configuration
+runner, `--max-regression 0.15` rejects median runtime regressions above 15%.
+Do not use that threshold on shared CI hosts; their timing noise is not a
+performance contract.
+
 `maxwell3d_cuda_launch.py` sweeps native 3D CUDA launch configurations on a
 synthetic workload. Use `--backward` to include snapshot storage and the
 adjoint/model-gradient pass, and compare `median_ms_per_shot` before choosing a
 shot batch size.
 
-`maxwell3d_triton.py` is a deliberately narrow prepared-to-prepared comparison
-of the native CUDA forward loop with experimental flat Triton kernels. It
-supports FP32, fourth-order differences, one shot/source/receiver, and standard
-CPML. Triton JIT and CUDA Graph capture are warmed outside timing; pass
-`--no-cuda-graph` to expose Python launch overhead.
+`maxwell3d_shot_batch.py` sweeps the number of shots propagated in one native
+3D CUDA call (default 70x70x70, nt=1200, forward only) and reports
+`median_ms_per_shot` and peak device memory per shot count, stopping the sweep
+on out-of-memory. The final `best_shots` line names the fastest shot batch.
+Use `--backward` to include the adjoint/model-gradient pass.
 
 `tm2d_hvp.py` compares native full and Gauss-Newton TM2D Hessian-vector
 products with a central finite difference of two native gradients. It reports

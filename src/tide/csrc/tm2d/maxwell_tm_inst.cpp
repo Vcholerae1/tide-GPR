@@ -1449,6 +1449,7 @@ extern "C"
         TIDE_DTYPE *const work_z, TIDE_DTYPE *const grad_ca_shot,
         TIDE_DTYPE *const grad_cb_shot, TIDE_DTYPE *const grad_dca_shot,
         TIDE_DTYPE *const grad_dcb_shot,
+        TIDE_DTYPE *const adjoint_memory_scratch,
         TIDE_DTYPE const *const ay, TIDE_DTYPE const *const by,
         TIDE_DTYPE const *const ayh, TIDE_DTYPE const *const byh,
         TIDE_DTYPE const *const ax, TIDE_DTYPE const *const bx,
@@ -1474,6 +1475,7 @@ extern "C"
   (void)device;
   (void)compute_stream_handle;
   (void)storage_stream_handle;
+  (void)adjoint_memory_scratch;
   (void)dt;
   (void)f0;
   (void)df;
@@ -1998,7 +2000,9 @@ extern "C"
         TIDE_DTYPE *const lambda_ey, TIDE_DTYPE *const lambda_hx,
         TIDE_DTYPE *const lambda_hz, TIDE_DTYPE *const m_lambda_ey_x,
         TIDE_DTYPE *const m_lambda_ey_z, TIDE_DTYPE *const m_lambda_hx_z,
-        TIDE_DTYPE *const m_lambda_hz_x, TIDE_DTYPE *const ey_store_1,
+        TIDE_DTYPE *const m_lambda_hz_x,
+        TIDE_DTYPE *const adjoint_memory_scratch,
+        TIDE_DTYPE *const ey_store_1,
         void *const ey_store_3, char const *const *const ey_filenames,
         TIDE_DTYPE *const curl_store_1, void *const curl_store_3,
         char const *const *const curl_filenames, TIDE_DTYPE *const grad_f,
@@ -2028,6 +2032,7 @@ extern "C"
   (void)device;
   (void)compute_stream;
   (void)storage_stream;
+  (void)adjoint_memory_scratch;
   (void)ey_store_3;
   (void)curl_store_3;
 #ifdef _OPENMP

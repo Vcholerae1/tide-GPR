@@ -1,6 +1,12 @@
+import pytest
 import torch
 
 import tide
+from numerical_utils import (
+    deterministic_direction,
+    directional_derivative_errors,
+    taylor_remainders,
+)
 
 
 def _setup_case(device: torch.device):
@@ -107,3 +113,94 @@ def test_maxwell3d_sigma_gradient_nonzero():
     assert sigma.grad is not None
     assert torch.isfinite(sigma.grad).all()
     assert sigma.grad.abs().sum() > 0
+
+
+def _maxwell3d_directional_metrics(
+    parameter: str, stencil: int, *, python_backend: bool
+) -> tuple[list[float], list[float], list[float]]:
+    dtype = torch.float64
+    nz, ny, nx, nt = 9, 10, 11, 45
+    epsilon = torch.full((nz, ny, nx), 4.0, dtype=dtype)
+    sigma = torch.full_like(epsilon, 2.0e-4)
+    mu = torch.ones_like(epsilon)
+    source = tide.ricker(500e6, nt, 2.0e-11, peak_time=6.0e-10, dtype=dtype).view(
+        1, 1, nt
+    )
+    source_location = torch.tensor([[[4, 5, 4]]], dtype=torch.long)
+    receiver_location = torch.tensor([[[4, 5, 7], [5, 7, 7]]], dtype=torch.long)
+    residual = torch.linspace(-0.6, 1.0, nt, dtype=dtype).view(nt, 1, 1)
+
+    def objective(value: torch.Tensor) -> torch.Tensor:
+        epsilon_i = value if parameter == "epsilon" else epsilon
+        sigma_i = value if parameter == "sigma" else sigma
+        receiver = tide.maxwell3d(
+            epsilon_i,
+            sigma_i,
+            mu,
+            [0.016, 0.018, 0.022],
+            2.0e-11,
+            source,
+            source_location,
+            receiver_location,
+            source_component="ey",
+            receiver_component="ey",
+            stencil=stencil,
+            pml_width=4,
+            python_backend=python_backend,
+            storage_compression=False,
+        )[-1]
+        return (receiver * residual).sum()
+
+    base = (epsilon if parameter == "epsilon" else sigma).clone().requires_grad_(True)
+    loss = objective(base)
+    (gradient,) = torch.autograd.grad(loss, base)
+    direction = deterministic_direction(
+        base.shape,
+        seed=9100 + stencil,
+        device=torch.device("cpu"),
+        dtype=dtype,
+    )
+    scale = 1.0e-2 if parameter == "epsilon" else 1.0e-5
+    steps = (scale, scale / 2.0, scale / 4.0)
+    errors = directional_derivative_errors(
+        objective,
+        base.detach(),
+        direction,
+        gradient,
+        steps,
+    )
+    zero_order, first_order = taylor_remainders(
+        objective,
+        base.detach(),
+        direction,
+        gradient,
+        steps,
+        base_value=loss,
+    )
+    return errors, zero_order, first_order
+
+
+@pytest.mark.numerical
+@pytest.mark.parametrize("stencil", [2, 4, 6, 8])
+@pytest.mark.parametrize("parameter", ["epsilon", "sigma"])
+def test_maxwell3d_native_directional_derivative(parameter: str, stencil: int) -> None:
+    errors, zero_order, first_order = _maxwell3d_directional_metrics(
+        parameter, stencil, python_backend=False
+    )
+    assert min(errors) < 1.0e-3, errors
+    assert first_order[-1] < zero_order[-1], (zero_order, first_order)
+
+
+@pytest.mark.numerical
+@pytest.mark.parametrize("stencil", [2, 4, 6, 8])
+@pytest.mark.parametrize("parameter", ["epsilon", "sigma"])
+def test_maxwell3d_reference_gradient_has_second_order_taylor_remainder(
+    parameter: str, stencil: int
+) -> None:
+    errors, zero_order, first_order = _maxwell3d_directional_metrics(
+        parameter, stencil, python_backend=True
+    )
+    assert min(errors) < 1.0e-5, errors
+    assert first_order[1] < 0.4 * first_order[0], (zero_order, first_order)
+    assert first_order[2] < 0.4 * first_order[1], (zero_order, first_order)
+    assert first_order[-1] < zero_order[-1], (zero_order, first_order)

@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import tide
+from numerical_utils import assert_finite_nonzero, require_cuda_backend
 
 
 class TestLongRunStability:
@@ -22,11 +23,17 @@ class TestLongRunStability:
         sigma = torch.ones(ny, nx, device=device, dtype=dtype) * 0.001
         mu = torch.ones_like(epsilon)
 
-        source_locations = torch.tensor([[[ny // 2, nx // 2]]], dtype=torch.long, device=device)
-        receiver_locations = torch.tensor([[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
+        )
+        receiver_locations = torch.tensor(
+            [[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device
+        )
 
         freq = 100e6
-        wavelet = tide.ricker(freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device)
+        wavelet = tide.ricker(
+            freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device
+        )
         source_amplitude = wavelet.view(1, 1, nt)
 
         out = tide.maxwelltm(
@@ -48,11 +55,13 @@ class TestLongRunStability:
         # With damping, signal should decay over time
         # Check that late-time signal is smaller than early peak
         peak_idx = out.abs().argmax()
-        early_peak = out[:peak_idx + 10].abs().max()
+        early_peak = out[: peak_idx + 10].abs().max()
         if peak_idx + 30 < nt:
-            late_signal = out[peak_idx + 30:].abs().max()
+            late_signal = out[peak_idx + 30 :].abs().max()
             # Late signal should be attenuated
-            assert late_signal < early_peak * 1.5, "Signal should not grow significantly"
+            assert late_signal < early_peak * 1.5, (
+                "Signal should not grow significantly"
+            )
 
     def test_cfl_condition_stability(self):
         """Test that CFL condition is respected."""
@@ -66,11 +75,17 @@ class TestLongRunStability:
         sigma = torch.zeros_like(epsilon)
         mu = torch.ones_like(epsilon)
 
-        source_locations = torch.tensor([[[ny // 2, nx // 2]]], dtype=torch.long, device=device)
-        receiver_locations = torch.tensor([[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
+        )
+        receiver_locations = torch.tensor(
+            [[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device
+        )
 
         freq = 100e6
-        wavelet = tide.ricker(freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device)
+        wavelet = tide.ricker(
+            freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device
+        )
         source_amplitude = wavelet.view(1, 1, nt)
 
         # Use a time step that satisfies CFL
@@ -107,19 +122,25 @@ class TestHighContrastStability:
 
         # Create a high contrast interface
         epsilon = torch.ones(ny, nx, device=device, dtype=dtype)
-        epsilon[:, :nx // 2] = 1.0   # Left side: vacuum
-        epsilon[:, nx // 2:] = 80.0  # Right side: water-like
+        epsilon[:, : nx // 2] = 1.0  # Left side: vacuum
+        epsilon[:, nx // 2 :] = 80.0  # Right side: water-like
 
         sigma = torch.zeros_like(epsilon)
         mu = torch.ones_like(epsilon)
 
         # Source on the left side
-        source_locations = torch.tensor([[[ny // 2, nx // 4]]], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
+        )
         # Receiver on the right side
-        receiver_locations = torch.tensor([[[ny // 2, 3 * nx // 4]]], dtype=torch.long, device=device)
+        receiver_locations = torch.tensor(
+            [[[ny // 2, 3 * nx // 4]]], dtype=torch.long, device=device
+        )
 
         freq = 100e6
-        wavelet = tide.ricker(freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device)
+        wavelet = tide.ricker(
+            freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device
+        )
         source_amplitude = wavelet.view(1, 1, nt)
 
         out = tide.maxwelltm(
@@ -150,11 +171,17 @@ class TestHighContrastStability:
         sigma = torch.zeros_like(epsilon)
         mu = torch.ones_like(epsilon)
 
-        source_locations = torch.tensor([[[ny // 2, nx // 2]]], dtype=torch.long, device=device)
-        receiver_locations = torch.tensor([[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
+        )
+        receiver_locations = torch.tensor(
+            [[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device
+        )
 
         freq = 50e6  # Lower frequency for high permittivity
-        wavelet = tide.ricker(freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device)
+        wavelet = tide.ricker(
+            freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device
+        )
         source_amplitude = wavelet.view(1, 1, nt)
 
         out = tide.maxwelltm(
@@ -189,11 +216,17 @@ class TestLossyMediaStability:
         sigma = torch.ones(ny, nx, device=device, dtype=dtype) * 1.0
         mu = torch.ones_like(epsilon)
 
-        source_locations = torch.tensor([[[ny // 2, nx // 2]]], dtype=torch.long, device=device)
-        receiver_locations = torch.tensor([[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
+        )
+        receiver_locations = torch.tensor(
+            [[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device
+        )
 
         freq = 100e6
-        wavelet = tide.ricker(freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device)
+        wavelet = tide.ricker(
+            freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device
+        )
         source_amplitude = wavelet.view(1, 1, nt)
 
         out = tide.maxwelltm(
@@ -223,12 +256,18 @@ class TestLossyMediaStability:
         sigma = torch.zeros_like(epsilon)
         mu = torch.ones_like(epsilon)
 
-        source_locations = torch.tensor([[[ny // 2, nx // 4]]], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
+        )
         # Receiver far away
-        receiver_locations = torch.tensor([[[ny // 2, 3 * nx // 4]]], dtype=torch.long, device=device)
+        receiver_locations = torch.tensor(
+            [[[ny // 2, 3 * nx // 4]]], dtype=torch.long, device=device
+        )
 
         freq = 100e6
-        wavelet = tide.ricker(freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device)
+        wavelet = tide.ricker(
+            freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device
+        )
         source_amplitude = wavelet.view(1, 1, nt)
 
         # Lossless case
@@ -280,11 +319,17 @@ class TestDifferentStencilStability:
         sigma = torch.zeros_like(epsilon)
         mu = torch.ones_like(epsilon)
 
-        source_locations = torch.tensor([[[ny // 2, nx // 2]]], dtype=torch.long, device=device)
-        receiver_locations = torch.tensor([[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
+        )
+        receiver_locations = torch.tensor(
+            [[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device
+        )
 
         freq = 100e6
-        wavelet = tide.ricker(freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device)
+        wavelet = tide.ricker(
+            freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device
+        )
         source_amplitude = wavelet.view(1, 1, nt)
 
         out = tide.maxwelltm(
@@ -319,11 +364,17 @@ class TestEnergyConservation:
         sigma = torch.zeros_like(epsilon)
         mu = torch.ones_like(epsilon)
 
-        source_locations = torch.tensor([[[ny // 2, nx // 2]]], dtype=torch.long, device=device)
-        receiver_locations = torch.tensor([[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device)
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
+        )
+        receiver_locations = torch.tensor(
+            [[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device
+        )
 
         freq = 100e6
-        wavelet = tide.ricker(freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device)
+        wavelet = tide.ricker(
+            freq, nt, 4e-11, peak_time=1.0 / freq, dtype=dtype, device=device
+        )
         source_amplitude = wavelet.view(1, 1, nt)
 
         out = tide.maxwelltm(
@@ -350,7 +401,7 @@ class TestEnergyConservation:
 
         # Late time signal (should be smaller due to PML absorption)
         if source_end_idx + 20 < nt:
-            late_signal = out[source_end_idx + 20:].abs().max()
+            late_signal = out[source_end_idx + 20 :].abs().max()
         else:
             late_signal = torch.tensor(0.0)
 
@@ -358,3 +409,74 @@ class TestEnergyConservation:
 
         # With PML, late signal should be attenuated
         assert torch.isfinite(out).all()
+
+
+@pytest.mark.slow
+@pytest.mark.numerical
+@pytest.mark.parametrize("stencil", [2, 4, 6, 8])
+@pytest.mark.parametrize(
+    "dimension,device_kind",
+    [
+        (2, "cpu"),
+        (3, "cpu"),
+        pytest.param(2, "cuda", marks=pytest.mark.cuda),
+        pytest.param(3, "cuda", marks=pytest.mark.cuda),
+    ],
+)
+def test_native_long_run_forward_and_backward_stay_stable(
+    dimension: int, device_kind: str, stencil: int
+) -> None:
+    device = require_cuda_backend() if device_kind == "cuda" else torch.device("cpu")
+    dtype = torch.float32
+    nt = 220
+    dt = 2.0e-11
+    if dimension == 2:
+        shape = (24, 28)
+        spacing = [0.018, 0.022]
+        source_location = torch.tensor([[[12, 8]]], device=device, dtype=torch.long)
+        receiver_location = torch.tensor(
+            [[[12, 14], [14, 16]]], device=device, dtype=torch.long
+        )
+        solver = tide.maxwelltm
+        component_kwargs = {}
+    else:
+        shape = (12, 13, 14)
+        spacing = [0.016, 0.018, 0.022]
+        source_location = torch.tensor([[[6, 6, 4]]], device=device, dtype=torch.long)
+        receiver_location = torch.tensor(
+            [[[6, 6, 9], [7, 8, 9]]], device=device, dtype=torch.long
+        )
+        solver = tide.maxwell3d
+        component_kwargs = {"source_component": "ey", "receiver_component": "ey"}
+
+    epsilon = torch.full(shape, 4.0, device=device, dtype=dtype)
+    epsilon.reshape(-1)[epsilon.numel() // 3 : epsilon.numel() // 2] = 7.0
+    epsilon.requires_grad_(True)
+    sigma = torch.full(shape, 2.0e-4, device=device, dtype=dtype)
+    sigma.reshape(-1)[sigma.numel() // 2 : 2 * sigma.numel() // 3] = 2.0e-3
+    sigma.requires_grad_(True)
+    mu = torch.ones_like(epsilon)
+    source = tide.ricker(
+        350e6, nt, dt, peak_time=1.0e-9, device=device, dtype=dtype
+    ).view(1, 1, nt)
+    receiver = solver(
+        epsilon,
+        sigma,
+        mu,
+        spacing,
+        dt,
+        source,
+        source_location,
+        receiver_location,
+        stencil=stencil,
+        pml_width=4,
+        python_backend=False,
+        storage_compression=False,
+        **component_kwargs,
+    )[-1]
+    receiver.square().mean().backward()
+    assert epsilon.grad is not None and sigma.grad is not None
+    assert_finite_nonzero(receiver, epsilon.grad, sigma.grad)
+    middle_peak = receiver[55:150].abs().max()
+    late_peak = receiver[175:].abs().max()
+    assert late_peak <= 1.5 * middle_peak

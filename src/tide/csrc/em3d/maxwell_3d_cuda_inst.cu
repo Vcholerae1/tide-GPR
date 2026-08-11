@@ -1393,9 +1393,9 @@ __global__ void backward_kernel_e_mem_adj_3d(
 
 __device__ __forceinline__ TIDE_DTYPE raw_e_side(
     TIDE_DTYPE const *coeff, TIDE_DTYPE const *lambda,
-    TIDE_DTYPE const *mem, TIDE_DTYPE const *a, TIDE_DTYPE const *k,
-    bool batched, int64_t i, int z, int y, int x, int dz, int dy, int dx,
-    int dir, bool neg) {
+    TIDE_DTYPE const *mem, TIDE_DTYPE const *a, TIDE_DTYPE const *b,
+    TIDE_DTYPE const * k, bool batched, int64_t i, int z, int y, int x, int dz,
+    int dy, int dx, int dir, bool neg, bool advance_memory) {
   int const oz = z + dz, oy = y + dy, ox = x + dx;
   if (oz < FD_PAD || oz >= nz - FD_PAD + 1 || oy < FD_PAD ||
       oy >= ny - FD_PAD + 1 || ox < FD_PAD || ox >= nx - FD_PAD + 1) {
@@ -1411,14 +1411,16 @@ __device__ __forceinline__ TIDE_DTYPE raw_e_side(
   bool const pml = dir == 0 ? (oz < pml_z0 || oz >= pml_z1)
                  : dir == 1 ? (oy < pml_y0 || oy >= pml_y1)
                             : (ox < pml_x0 || ox >= pml_x1);
-  return pml ? (a[coord] * mem[in] + q / k[coord]) : q;
+  TIDE_DTYPE const m_used = advance_memory ? b[coord] * mem[in] + q : mem[in];
+  return pml ? (a[coord] * m_used + q / k[coord]) : q;
 }
 
 __device__ __forceinline__ TIDE_DTYPE raw_h_side(
     TIDE_DTYPE const *coeff, TIDE_DTYPE const *lambda,
-    TIDE_DTYPE const *mem, TIDE_DTYPE const *a, TIDE_DTYPE const *k,
-    bool batched, int64_t i, int z, int y, int x, int dz, int dy, int dx,
-    int dir, bool neg, int gate_dim, int gate_lim) {
+    TIDE_DTYPE const *mem, TIDE_DTYPE const *a, TIDE_DTYPE const *b,
+    TIDE_DTYPE const *k, bool batched, int64_t i, int z, int y, int x, int dz,
+    int dy, int dx, int dir, bool neg, bool advance_memory, int gate_dim,
+    int gate_lim) {
   int const oz = z + dz, oy = y + dy, ox = x + dx;
   if (oz < FD_PAD || oz >= nz - FD_PAD + 1 || oy < FD_PAD ||
       oy >= ny - FD_PAD + 1 || ox < FD_PAD || ox >= nx - FD_PAD + 1) {
@@ -1441,58 +1443,53 @@ __device__ __forceinline__ TIDE_DTYPE raw_h_side(
   bool const pml = dir == 0 ? (oz < pml_z0 || oz >= pml_z1h)
                  : dir == 1 ? (oy < pml_y0 || oy >= pml_y1h)
                             : (ox < pml_x0 || ox >= pml_x1h);
-  return pml ? (a[coord] * mem[in] + q / k[coord]) : q;
+  TIDE_DTYPE const m_used = advance_memory ? b[coord] * mem[in] + q : mem[in];
+  return pml ? (a[coord] * m_used + q / k[coord]) : q;
 }
 
 #define RAW_ONE(dz, dy, dx) (static_cast<TIDE_DTYPE>(1.0))
 // E-side raws: curl signs follow ex += cb*(+dHy_dz - dHz_dy),
 // ey += cb*(+dHz_dx - dHx_dz), ez += cb*(+dHx_dy - dHy_dx).
 #define RAW_HY_Z(dz, dy, dx)                                                   \
-  raw_e_side(cb, lambda_ex, m_lambda_hy_z, az, kz, cb_batched, i, z, y, x,     \
-             (dz), (dy), (dx), 0, false)
+  raw_e_side(cb, lambda_ex, m_lambda_hy_z, az, bz, kz, cb_batched, i, z, y, x, \
+             (dz), (dy), (dx), 0, false, advance_memory)
 #define RAW_HZ_Y(dz, dy, dx)                                                   \
-  raw_e_side(cb, lambda_ex, m_lambda_hz_y, ay, ky, cb_batched, i, z, y, x,     \
-             (dz), (dy), (dx), 1, true)
+  raw_e_side(cb, lambda_ex, m_lambda_hz_y, ay, by, ky, cb_batched, i, z, y, x, \
+             (dz), (dy), (dx), 1, true, advance_memory)
 #define RAW_HZ_X(dz, dy, dx)                                                   \
-  raw_e_side(cb, lambda_ey, m_lambda_hz_x, ax, kx, cb_batched, i, z, y, x,     \
-             (dz), (dy), (dx), 2, false)
+  raw_e_side(cb, lambda_ey, m_lambda_hz_x, ax, bx, kx, cb_batched, i, z, y, x, \
+             (dz), (dy), (dx), 2, false, advance_memory)
 #define RAW_HX_Z(dz, dy, dx)                                                   \
-  raw_e_side(cb, lambda_ey, m_lambda_hx_z, az, kz, cb_batched, i, z, y, x,     \
-             (dz), (dy), (dx), 0, true)
+  raw_e_side(cb, lambda_ey, m_lambda_hx_z, az, bz, kz, cb_batched, i, z, y, x, \
+             (dz), (dy), (dx), 0, true, advance_memory)
 #define RAW_HX_Y(dz, dy, dx)                                                   \
-  raw_e_side(cb, lambda_ez, m_lambda_hx_y, ay, ky, cb_batched, i, z, y, x,     \
-             (dz), (dy), (dx), 1, false)
+  raw_e_side(cb, lambda_ez, m_lambda_hx_y, ay, by, ky, cb_batched, i, z, y, x, \
+             (dz), (dy), (dx), 1, false, advance_memory)
 #define RAW_HY_X(dz, dy, dx)                                                   \
-  raw_e_side(cb, lambda_ez, m_lambda_hy_x, ax, kx, cb_batched, i, z, y, x,     \
-             (dz), (dy), (dx), 2, true)
-// H-side raws: update signs follow hx -= cq*(dEy_dz - dEz_dy),
-// hy -= cq*(dEz_dx - dEx_dz), hz -= cq*(dEx_dy - dEy_dx); gate_dim/gate_lim
-// reproduce the forward H-update's half-cell inner guards.
+  raw_e_side(cb, lambda_ez, m_lambda_hy_x, ax, bx, kx, cb_batched, i, z, y, x, \
+             (dz), (dy), (dx), 2, true, advance_memory)
 #define RAW_EYZ(dz, dy, dx)                                                    \
-  raw_h_side(cq, lambda_hx, m_lambda_ey_z, azh, kzh, cq_batched, i, z, y, x,   \
-             (dz), (dy), (dx), 0, true, 0, nz - FD_PAD)
+  raw_h_side(cq, lambda_hx, m_lambda_ey_z, azh, bzh, kzh, cq_batched, i, z, y, \
+             x, (dz), (dy), (dx), 0, true, advance_memory, 0, nz - FD_PAD)
 #define RAW_EZY(dz, dy, dx)                                                    \
-  raw_h_side(cq, lambda_hx, m_lambda_ez_y, ayh, kyh, cq_batched, i, z, y, x,   \
-             (dz), (dy), (dx), 1, false, 1, ny - FD_PAD)
+  raw_h_side(cq, lambda_hx, m_lambda_ez_y, ayh, byh, kyh, cq_batched, i, z, y, \
+             x, (dz), (dy), (dx), 1, false, advance_memory, 1, ny - FD_PAD)
 #define RAW_EZX(dz, dy, dx)                                                    \
-  raw_h_side(cq, lambda_hy, m_lambda_ez_x, axh, kxh, cq_batched, i, z, y, x,   \
-             (dz), (dy), (dx), 2, true, 2, nx - FD_PAD)
+  raw_h_side(cq, lambda_hy, m_lambda_ez_x, axh, bxh, kxh, cq_batched, i, z, y, \
+             x, (dz), (dy), (dx), 2, true, advance_memory, 2, nx - FD_PAD)
 #define RAW_EXZ(dz, dy, dx)                                                    \
-  raw_h_side(cq, lambda_hy, m_lambda_ex_z, azh, kzh, cq_batched, i, z, y, x,   \
-             (dz), (dy), (dx), 0, false, 0, nz - FD_PAD)
+  raw_h_side(cq, lambda_hy, m_lambda_ex_z, azh, bzh, kzh, cq_batched, i, z, y, \
+             x, (dz), (dy), (dx), 0, false, advance_memory, 0, nz - FD_PAD)
 #define RAW_EXY(dz, dy, dx)                                                    \
-  raw_h_side(cq, lambda_hz, m_lambda_ex_y, ayh, kyh, cq_batched, i, z, y, x,   \
-             (dz), (dy), (dx), 1, true, 1, ny - FD_PAD)
+  raw_h_side(cq, lambda_hz, m_lambda_ex_y, ayh, byh, kyh, cq_batched, i, z, y, \
+             x, (dz), (dy), (dx), 1, true, advance_memory, 1, ny - FD_PAD)
 #define RAW_EYX(dz, dy, dx)                                                    \
-  raw_h_side(cq, lambda_hz, m_lambda_ey_x, axh, kxh, cq_batched, i, z, y, x,   \
-             (dz), (dy), (dx), 2, false, 2, nx - FD_PAD)
+  raw_h_side(cq, lambda_hz, m_lambda_ey_x, axh, bxh, kxh, cq_batched, i, z, y, \
+             x, (dz), (dy), (dx), 2, false, advance_memory, 2, nx - FD_PAD)
 
-// Adjoint of the forward E-update, applied to the adjoint fields.  The memory
-// adjoints were advanced to this time step by backward_kernel_e_mem_adj_3d.
-// The scatters are the multi-point transposes of the forward staggered
-// derivatives (DIFF*_ADJ), which reduce to single-neighbour gathers for
-// TIDE_STENCIL==2 and to the weighted multi-neighbour transposes for 4/6/8.
-__global__ void backward_kernel_e_adj_3d(
+// Fused adjoint of the forward E-update. Current memory states are immutable
+// for the launch; next states are written to a disjoint ping-pong buffer.
+__global__ void backward_kernel_e_adj_fused_3d(
     TIDE_DTYPE const *__restrict const cb,
     TIDE_DTYPE const *__restrict const lambda_ex,
     TIDE_DTYPE const *__restrict const lambda_ey,
@@ -1506,25 +1503,50 @@ __global__ void backward_kernel_e_adj_3d(
     TIDE_DTYPE const *__restrict const m_lambda_hx_z,
     TIDE_DTYPE const *__restrict const m_lambda_hx_y,
     TIDE_DTYPE const *__restrict const m_lambda_hy_x,
+    TIDE_DTYPE *__restrict const next_m_lambda_hy_z,
+    TIDE_DTYPE *__restrict const next_m_lambda_hz_y,
+    TIDE_DTYPE *__restrict const next_m_lambda_hz_x,
+    TIDE_DTYPE *__restrict const next_m_lambda_hx_z,
+    TIDE_DTYPE *__restrict const next_m_lambda_hx_y,
+    TIDE_DTYPE *__restrict const next_m_lambda_hy_x,
     TIDE_DTYPE const *__restrict const az,
+    TIDE_DTYPE const *__restrict const bz,
     TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const by,
     TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const bx,
     TIDE_DTYPE const *__restrict const kz,
     TIDE_DTYPE const *__restrict const ky,
     TIDE_DTYPE const *__restrict const kx) {
   int64_t i = 0;
   LinearCellIndex3D idx{};
-  if (!current_cell_index_3d(&idx, &i)) {
+  if (!current_cell_index_3d(&idx, &i) || !is_active_cell_3d(idx)) {
     return;
   }
-  if (!is_active_cell_3d(idx)) {
-    return;
-  }
+  int const j = idx.j;
   int const z = idx.z;
   int const y = idx.y;
   int const x = idx.x;
-
-  // Curl transposes (each thread writes only its own cell).
+  bool const advance_memory = true;
+  TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];
+  TIDE_DTYPE const q_ex = cb_val * lambda_ex[i];
+  TIDE_DTYPE const q_ey = cb_val * lambda_ey[i];
+  TIDE_DTYPE const q_ez = cb_val * lambda_ez[i];
+  bool const pml_z = z < pml_z0 || z >= pml_z1;
+  bool const pml_y = y < pml_y0 || y >= pml_y1;
+  bool const pml_x = x < pml_x0 || x >= pml_x1;
+  next_m_lambda_hy_z[i] =
+      pml_z ? bz[z] * m_lambda_hy_z[i] + q_ex : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_hx_z[i] =
+      pml_z ? bz[z] * m_lambda_hx_z[i] - q_ey : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_hz_y[i] =
+      pml_y ? by[y] * m_lambda_hz_y[i] - q_ex : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_hx_y[i] =
+      pml_y ? by[y] * m_lambda_hx_y[i] + q_ez : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_hz_x[i] =
+      pml_x ? bx[x] * m_lambda_hz_x[i] + q_ey : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_hy_x[i] =
+      pml_x ? bx[x] * m_lambda_hy_x[i] - q_ez : static_cast<TIDE_DTYPE>(0);
   lambda_hx[i] += DIFFZ1_ADJ(RAW_HX_Z, RAW_ONE) + DIFFY1_ADJ(RAW_HX_Y, RAW_ONE);
   lambda_hy[i] += DIFFZ1_ADJ(RAW_HY_Z, RAW_ONE) + DIFFX1_ADJ(RAW_HY_X, RAW_ONE);
   lambda_hz[i] += DIFFY1_ADJ(RAW_HZ_Y, RAW_ONE) + DIFFX1_ADJ(RAW_HZ_X, RAW_ONE);
@@ -1583,11 +1605,128 @@ __global__ void backward_kernel_h_mem_adj_3d(
   }
 }
 
-// Adjoint of the forward H-update, applied to the adjoint fields.  Also
-// applies the ca scaling of lambda_E (lambda_E_pre = ca*lambda_E).  The memory
-// adjoints were advanced by backward_kernel_h_mem_adj_3d; the scatters are the
-// multi-point transposes of the half-cell staggered derivatives (DIFF*H1_ADJ).
-__global__ void backward_kernel_h_adj_3d(
+// Fused adjoint of the forward H-update, including its memory recurrences.
+__global__ void backward_kernel_h_adj_fused_3d(
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cq,
+    TIDE_DTYPE const *__restrict const lambda_hx,
+    TIDE_DTYPE const *__restrict const lambda_hy,
+    TIDE_DTYPE const *__restrict const lambda_hz,
+    TIDE_DTYPE *__restrict const lambda_ex,
+    TIDE_DTYPE *__restrict const lambda_ey,
+    TIDE_DTYPE *__restrict const lambda_ez,
+    TIDE_DTYPE const *__restrict const m_lambda_ey_z,
+    TIDE_DTYPE const *__restrict const m_lambda_ez_y,
+    TIDE_DTYPE const *__restrict const m_lambda_ez_x,
+    TIDE_DTYPE const *__restrict const m_lambda_ex_z,
+    TIDE_DTYPE const *__restrict const m_lambda_ex_y,
+    TIDE_DTYPE const *__restrict const m_lambda_ey_x,
+    TIDE_DTYPE *__restrict const next_m_lambda_ey_z,
+    TIDE_DTYPE *__restrict const next_m_lambda_ez_y,
+    TIDE_DTYPE *__restrict const next_m_lambda_ez_x,
+    TIDE_DTYPE *__restrict const next_m_lambda_ex_z,
+    TIDE_DTYPE *__restrict const next_m_lambda_ex_y,
+    TIDE_DTYPE *__restrict const next_m_lambda_ey_x,
+    TIDE_DTYPE const *__restrict const azh,
+    TIDE_DTYPE const *__restrict const bzh,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const kzh,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kxh) {
+  int64_t i = 0;
+  LinearCellIndex3D idx{};
+  if (!current_cell_index_3d(&idx, &i) || !is_active_cell_3d(idx)) {
+    return;
+  }
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
+  bool const advance_memory = true;
+  int const pml_z1h = pml_z1 > pml_z0 ? pml_z1 - 1 : pml_z0;
+  int const pml_y1h = pml_y1 > pml_y0 ? pml_y1 - 1 : pml_y0;
+  int const pml_x1h = pml_x1 > pml_x0 ? pml_x1 - 1 : pml_x0;
+  bool const pml_z = z < pml_z0 || z >= pml_z1h;
+  bool const pml_y = y < pml_y0 || y >= pml_y1h;
+  bool const pml_x = x < pml_x0 || x >= pml_x1h;
+  TIDE_DTYPE const cq_val = cq_batched ? cq[i] : cq[j];
+  next_m_lambda_ey_z[i] =
+      z < nz - FD_PAD && pml_z
+          ? bzh[z] * m_lambda_ey_z[i] - cq_val * lambda_hx[i]
+          : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_ex_z[i] =
+      z < nz - FD_PAD && pml_z
+          ? bzh[z] * m_lambda_ex_z[i] + cq_val * lambda_hy[i]
+          : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_ez_y[i] =
+      y < ny - FD_PAD && pml_y
+          ? byh[y] * m_lambda_ez_y[i] + cq_val * lambda_hx[i]
+          : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_ex_y[i] =
+      y < ny - FD_PAD && pml_y
+          ? byh[y] * m_lambda_ex_y[i] - cq_val * lambda_hz[i]
+          : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_ez_x[i] =
+      x < nx - FD_PAD && pml_x
+          ? bxh[x] * m_lambda_ez_x[i] - cq_val * lambda_hy[i]
+          : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_ey_x[i] =
+      x < nx - FD_PAD && pml_x
+          ? bxh[x] * m_lambda_ey_x[i] + cq_val * lambda_hz[i]
+          : static_cast<TIDE_DTYPE>(0);
+  TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
+  lambda_ex[i] = ca_val * lambda_ex[i];
+  lambda_ey[i] = ca_val * lambda_ey[i];
+  lambda_ez[i] = ca_val * lambda_ez[i];
+  lambda_ey[i] += DIFFZH1_ADJ(RAW_EYZ, RAW_ONE) + DIFFXH1_ADJ(RAW_EYX, RAW_ONE);
+  lambda_ex[i] += DIFFZH1_ADJ(RAW_EXZ, RAW_ONE) + DIFFYH1_ADJ(RAW_EXY, RAW_ONE);
+  lambda_ez[i] += DIFFYH1_ADJ(RAW_EZY, RAW_ONE) + DIFFXH1_ADJ(RAW_EZX, RAW_ONE);
+}
+
+// Four-kernel fallback for larger grids.  The memory kernels advance the
+// recurrences first, so these spatial kernels consume the updated states
+// directly and avoid recomputing six neighbouring recurrences per cell.
+__global__ void backward_kernel_e_adj_unfused_3d(
+    TIDE_DTYPE const *__restrict const cb,
+    TIDE_DTYPE const *__restrict const lambda_ex,
+    TIDE_DTYPE const *__restrict const lambda_ey,
+    TIDE_DTYPE const *__restrict const lambda_ez,
+    TIDE_DTYPE *__restrict const lambda_hx,
+    TIDE_DTYPE *__restrict const lambda_hy,
+    TIDE_DTYPE *__restrict const lambda_hz,
+    TIDE_DTYPE const *__restrict const m_lambda_hy_z,
+    TIDE_DTYPE const *__restrict const m_lambda_hz_y,
+    TIDE_DTYPE const *__restrict const m_lambda_hz_x,
+    TIDE_DTYPE const *__restrict const m_lambda_hx_z,
+    TIDE_DTYPE const *__restrict const m_lambda_hx_y,
+    TIDE_DTYPE const *__restrict const m_lambda_hy_x,
+    TIDE_DTYPE const *__restrict const az,
+    TIDE_DTYPE const *__restrict const bz,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const kz,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kx) {
+  int64_t i = 0;
+  LinearCellIndex3D idx{};
+  if (!current_cell_index_3d(&idx, &i) || !is_active_cell_3d(idx)) {
+    return;
+  }
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
+  bool const advance_memory = false;
+  lambda_hx[i] += DIFFZ1_ADJ(RAW_HX_Z, RAW_ONE) + DIFFY1_ADJ(RAW_HX_Y, RAW_ONE);
+  lambda_hy[i] += DIFFZ1_ADJ(RAW_HY_Z, RAW_ONE) + DIFFX1_ADJ(RAW_HY_X, RAW_ONE);
+  lambda_hz[i] += DIFFY1_ADJ(RAW_HZ_Y, RAW_ONE) + DIFFX1_ADJ(RAW_HZ_X, RAW_ONE);
+}
+
+__global__ void backward_kernel_h_adj_unfused_3d(
     TIDE_DTYPE const *__restrict const ca,
     TIDE_DTYPE const *__restrict const cq,
     TIDE_DTYPE const *__restrict const lambda_hx,
@@ -1603,33 +1742,388 @@ __global__ void backward_kernel_h_adj_3d(
     TIDE_DTYPE const *__restrict const m_lambda_ex_y,
     TIDE_DTYPE const *__restrict const m_lambda_ey_x,
     TIDE_DTYPE const *__restrict const azh,
+    TIDE_DTYPE const *__restrict const bzh,
     TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const byh,
     TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const bxh,
     TIDE_DTYPE const *__restrict const kzh,
     TIDE_DTYPE const *__restrict const kyh,
     TIDE_DTYPE const *__restrict const kxh) {
   int64_t i = 0;
   LinearCellIndex3D idx{};
-  if (!current_cell_index_3d(&idx, &i)) {
-    return;
-  }
-  if (!is_active_cell_3d(idx)) {
+  if (!current_cell_index_3d(&idx, &i) || !is_active_cell_3d(idx)) {
     return;
   }
   int const j = idx.j;
   int const z = idx.z;
   int const y = idx.y;
   int const x = idx.x;
-
+  bool const advance_memory = false;
   TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
   lambda_ex[i] = ca_val * lambda_ex[i];
   lambda_ey[i] = ca_val * lambda_ey[i];
   lambda_ez[i] = ca_val * lambda_ez[i];
-
-  // Scatter transposes of the H-update.
   lambda_ey[i] += DIFFZH1_ADJ(RAW_EYZ, RAW_ONE) + DIFFXH1_ADJ(RAW_EYX, RAW_ONE);
   lambda_ex[i] += DIFFZH1_ADJ(RAW_EXZ, RAW_ONE) + DIFFYH1_ADJ(RAW_EXY, RAW_ONE);
   lambda_ez[i] += DIFFYH1_ADJ(RAW_EZY, RAW_ONE) + DIFFXH1_ADJ(RAW_EZX, RAW_ONE);
+}
+
+struct AdjointMemoryState3D {
+  TIDE_DTYPE *ey_z;
+  TIDE_DTYPE *ez_y;
+  TIDE_DTYPE *ez_x;
+  TIDE_DTYPE *ex_z;
+  TIDE_DTYPE *ex_y;
+  TIDE_DTYPE *ey_x;
+  TIDE_DTYPE *hz_y;
+  TIDE_DTYPE *hy_z;
+  TIDE_DTYPE *hx_z;
+  TIDE_DTYPE *hz_x;
+  TIDE_DTYPE *hy_x;
+  TIDE_DTYPE *hx_y;
+};
+
+struct AdjointFields3D {
+  TIDE_DTYPE *ex;
+  TIDE_DTYPE *ey;
+  TIDE_DTYPE *ez;
+  TIDE_DTYPE *hx;
+  TIDE_DTYPE *hy;
+  TIDE_DTYPE *hz;
+};
+
+#define APPLY_E_ADJOINT_LANE_3D(fields, current, next)                         \
+  do {                                                                         \
+    TIDE_DTYPE const *const lambda_ex = (fields).ex;                           \
+    TIDE_DTYPE const *const lambda_ey = (fields).ey;                           \
+    TIDE_DTYPE const *const lambda_ez = (fields).ez;                           \
+    TIDE_DTYPE *const lambda_hx = (fields).hx;                                 \
+    TIDE_DTYPE *const lambda_hy = (fields).hy;                                 \
+    TIDE_DTYPE *const lambda_hz = (fields).hz;                                 \
+    TIDE_DTYPE const *const m_lambda_hy_z = (current).hy_z;                    \
+    TIDE_DTYPE const *const m_lambda_hz_y = (current).hz_y;                    \
+    TIDE_DTYPE const *const m_lambda_hz_x = (current).hz_x;                    \
+    TIDE_DTYPE const *const m_lambda_hx_z = (current).hx_z;                    \
+    TIDE_DTYPE const *const m_lambda_hx_y = (current).hx_y;                    \
+    TIDE_DTYPE const *const m_lambda_hy_x = (current).hy_x;                    \
+    TIDE_DTYPE *const next_m_lambda_hy_z = (next).hy_z;                        \
+    TIDE_DTYPE *const next_m_lambda_hz_y = (next).hz_y;                        \
+    TIDE_DTYPE *const next_m_lambda_hz_x = (next).hz_x;                        \
+    TIDE_DTYPE *const next_m_lambda_hx_z = (next).hx_z;                        \
+    TIDE_DTYPE *const next_m_lambda_hx_y = (next).hx_y;                        \
+    TIDE_DTYPE *const next_m_lambda_hy_x = (next).hy_x;                        \
+    bool const advance_memory = true;                                          \
+    TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];                      \
+    TIDE_DTYPE const q_ex = cb_val * lambda_ex[i];                             \
+    TIDE_DTYPE const q_ey = cb_val * lambda_ey[i];                             \
+    TIDE_DTYPE const q_ez = cb_val * lambda_ez[i];                             \
+    bool const pml_z = z < pml_z0 || z >= pml_z1;                             \
+    bool const pml_y = y < pml_y0 || y >= pml_y1;                             \
+    bool const pml_x = x < pml_x0 || x >= pml_x1;                             \
+    next_m_lambda_hy_z[i] =                                                    \
+        pml_z ? bz[z] * m_lambda_hy_z[i] + q_ex : (TIDE_DTYPE)0;              \
+    next_m_lambda_hx_z[i] =                                                    \
+        pml_z ? bz[z] * m_lambda_hx_z[i] - q_ey : (TIDE_DTYPE)0;              \
+    next_m_lambda_hz_y[i] =                                                    \
+        pml_y ? by[y] * m_lambda_hz_y[i] - q_ex : (TIDE_DTYPE)0;              \
+    next_m_lambda_hx_y[i] =                                                    \
+        pml_y ? by[y] * m_lambda_hx_y[i] + q_ez : (TIDE_DTYPE)0;              \
+    next_m_lambda_hz_x[i] =                                                    \
+        pml_x ? bx[x] * m_lambda_hz_x[i] + q_ey : (TIDE_DTYPE)0;              \
+    next_m_lambda_hy_x[i] =                                                    \
+        pml_x ? bx[x] * m_lambda_hy_x[i] - q_ez : (TIDE_DTYPE)0;              \
+    lambda_hx[i] +=                                                            \
+        DIFFZ1_ADJ(RAW_HX_Z, RAW_ONE) + DIFFY1_ADJ(RAW_HX_Y, RAW_ONE);        \
+    lambda_hy[i] +=                                                            \
+        DIFFZ1_ADJ(RAW_HY_Z, RAW_ONE) + DIFFX1_ADJ(RAW_HY_X, RAW_ONE);        \
+    lambda_hz[i] +=                                                            \
+        DIFFY1_ADJ(RAW_HZ_Y, RAW_ONE) + DIFFX1_ADJ(RAW_HZ_X, RAW_ONE);        \
+  } while (false)
+
+#define APPLY_H_ADJOINT_LANE_3D(fields, current, next)                         \
+  do {                                                                         \
+    TIDE_DTYPE const *const lambda_hx = (fields).hx;                           \
+    TIDE_DTYPE const *const lambda_hy = (fields).hy;                           \
+    TIDE_DTYPE const *const lambda_hz = (fields).hz;                           \
+    TIDE_DTYPE *const lambda_ex = (fields).ex;                                 \
+    TIDE_DTYPE *const lambda_ey = (fields).ey;                                 \
+    TIDE_DTYPE *const lambda_ez = (fields).ez;                                 \
+    TIDE_DTYPE const *const m_lambda_ey_z = (current).ey_z;                    \
+    TIDE_DTYPE const *const m_lambda_ez_y = (current).ez_y;                    \
+    TIDE_DTYPE const *const m_lambda_ez_x = (current).ez_x;                    \
+    TIDE_DTYPE const *const m_lambda_ex_z = (current).ex_z;                    \
+    TIDE_DTYPE const *const m_lambda_ex_y = (current).ex_y;                    \
+    TIDE_DTYPE const *const m_lambda_ey_x = (current).ey_x;                    \
+    TIDE_DTYPE *const next_m_lambda_ey_z = (next).ey_z;                        \
+    TIDE_DTYPE *const next_m_lambda_ez_y = (next).ez_y;                        \
+    TIDE_DTYPE *const next_m_lambda_ez_x = (next).ez_x;                        \
+    TIDE_DTYPE *const next_m_lambda_ex_z = (next).ex_z;                        \
+    TIDE_DTYPE *const next_m_lambda_ex_y = (next).ex_y;                        \
+    TIDE_DTYPE *const next_m_lambda_ey_x = (next).ey_x;                        \
+    bool const advance_memory = true;                                          \
+    int const pml_z1h = pml_z1 > pml_z0 ? pml_z1 - 1 : pml_z0;                \
+    int const pml_y1h = pml_y1 > pml_y0 ? pml_y1 - 1 : pml_y0;                \
+    int const pml_x1h = pml_x1 > pml_x0 ? pml_x1 - 1 : pml_x0;                \
+    bool const pml_z = z < pml_z0 || z >= pml_z1h;                            \
+    bool const pml_y = y < pml_y0 || y >= pml_y1h;                            \
+    bool const pml_x = x < pml_x0 || x >= pml_x1h;                            \
+    TIDE_DTYPE const cq_val = cq_batched ? cq[i] : cq[j];                      \
+    next_m_lambda_ey_z[i] =                                                    \
+        z < nz - FD_PAD && pml_z                                               \
+            ? bzh[z] * m_lambda_ey_z[i] - cq_val * lambda_hx[i]               \
+            : (TIDE_DTYPE)0;                                                   \
+    next_m_lambda_ex_z[i] =                                                    \
+        z < nz - FD_PAD && pml_z                                               \
+            ? bzh[z] * m_lambda_ex_z[i] + cq_val * lambda_hy[i]               \
+            : (TIDE_DTYPE)0;                                                   \
+    next_m_lambda_ez_y[i] =                                                    \
+        y < ny - FD_PAD && pml_y                                               \
+            ? byh[y] * m_lambda_ez_y[i] + cq_val * lambda_hx[i]               \
+            : (TIDE_DTYPE)0;                                                   \
+    next_m_lambda_ex_y[i] =                                                    \
+        y < ny - FD_PAD && pml_y                                               \
+            ? byh[y] * m_lambda_ex_y[i] - cq_val * lambda_hz[i]               \
+            : (TIDE_DTYPE)0;                                                   \
+    next_m_lambda_ez_x[i] =                                                    \
+        x < nx - FD_PAD && pml_x                                               \
+            ? bxh[x] * m_lambda_ez_x[i] - cq_val * lambda_hy[i]               \
+            : (TIDE_DTYPE)0;                                                   \
+    next_m_lambda_ey_x[i] =                                                    \
+        x < nx - FD_PAD && pml_x                                               \
+            ? bxh[x] * m_lambda_ey_x[i] + cq_val * lambda_hz[i]               \
+            : (TIDE_DTYPE)0;                                                   \
+    TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];                      \
+    lambda_ex[i] = ca_val * lambda_ex[i];                                      \
+    lambda_ey[i] = ca_val * lambda_ey[i];                                      \
+    lambda_ez[i] = ca_val * lambda_ez[i];                                      \
+    lambda_ey[i] +=                                                            \
+        DIFFZH1_ADJ(RAW_EYZ, RAW_ONE) + DIFFXH1_ADJ(RAW_EYX, RAW_ONE);        \
+    lambda_ex[i] +=                                                            \
+        DIFFZH1_ADJ(RAW_EXZ, RAW_ONE) + DIFFYH1_ADJ(RAW_EXY, RAW_ONE);        \
+    lambda_ez[i] +=                                                            \
+        DIFFYH1_ADJ(RAW_EZY, RAW_ONE) + DIFFXH1_ADJ(RAW_EZX, RAW_ONE);        \
+  } while (false)
+
+__global__ void backward_kernel_e_adj_fused_dual_3d(
+    TIDE_DTYPE const *__restrict const cb, AdjointFields3D const first_fields,
+    AdjointMemoryState3D const first_current,
+    AdjointMemoryState3D const first_next,
+    AdjointFields3D const second_fields,
+    AdjointMemoryState3D const second_current,
+    AdjointMemoryState3D const second_next,
+    TIDE_DTYPE const *__restrict const az,
+    TIDE_DTYPE const *__restrict const bz,
+    TIDE_DTYPE const *__restrict const ay,
+    TIDE_DTYPE const *__restrict const by,
+    TIDE_DTYPE const *__restrict const ax,
+    TIDE_DTYPE const *__restrict const bx,
+    TIDE_DTYPE const *__restrict const kz,
+    TIDE_DTYPE const *__restrict const ky,
+    TIDE_DTYPE const *__restrict const kx) {
+  int64_t i = 0;
+  LinearCellIndex3D idx{};
+  if (!current_cell_index_3d(&idx, &i) || !is_active_cell_3d(idx)) {
+    return;
+  }
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
+  APPLY_E_ADJOINT_LANE_3D(first_fields, first_current, first_next);
+  APPLY_E_ADJOINT_LANE_3D(second_fields, second_current, second_next);
+}
+
+__global__ void backward_kernel_h_adj_fused_dual_3d(
+    TIDE_DTYPE const *__restrict const ca,
+    TIDE_DTYPE const *__restrict const cq, AdjointFields3D const first_fields,
+    AdjointMemoryState3D const first_current,
+    AdjointMemoryState3D const first_next,
+    AdjointFields3D const second_fields,
+    AdjointMemoryState3D const second_current,
+    AdjointMemoryState3D const second_next,
+    TIDE_DTYPE const *__restrict const azh,
+    TIDE_DTYPE const *__restrict const bzh,
+    TIDE_DTYPE const *__restrict const ayh,
+    TIDE_DTYPE const *__restrict const byh,
+    TIDE_DTYPE const *__restrict const axh,
+    TIDE_DTYPE const *__restrict const bxh,
+    TIDE_DTYPE const *__restrict const kzh,
+    TIDE_DTYPE const *__restrict const kyh,
+    TIDE_DTYPE const *__restrict const kxh) {
+  int64_t i = 0;
+  LinearCellIndex3D idx{};
+  if (!current_cell_index_3d(&idx, &i) || !is_active_cell_3d(idx)) {
+    return;
+  }
+  int const j = idx.j;
+  int const z = idx.z;
+  int const y = idx.y;
+  int const x = idx.x;
+  APPLY_H_ADJOINT_LANE_3D(first_fields, first_current, first_next);
+  APPLY_H_ADJOINT_LANE_3D(second_fields, second_current, second_next);
+}
+
+static inline void swap_adjoint_memory_3d(TIDE_DTYPE *&current,
+                                          TIDE_DTYPE *&next) {
+  TIDE_DTYPE *const tmp = current;
+  current = next;
+  next = tmp;
+}
+
+static inline void launch_backward_step_3d(
+    bool const use_fused, int64_t const blocks_cells,
+    int const threads_cells, cudaStream_t const stream,
+    TIDE_DTYPE const *const ca,
+    TIDE_DTYPE const *const cb,
+    TIDE_DTYPE const *const cq, TIDE_DTYPE *const lambda_ex,
+    TIDE_DTYPE *const lambda_ey, TIDE_DTYPE *const lambda_ez,
+    TIDE_DTYPE *const lambda_hx, TIDE_DTYPE *const lambda_hy,
+    TIDE_DTYPE *const lambda_hz, AdjointMemoryState3D &current,
+    AdjointMemoryState3D &next, TIDE_DTYPE const *const az,
+    TIDE_DTYPE const *const bz, TIDE_DTYPE const *const azh,
+    TIDE_DTYPE const *const bzh, TIDE_DTYPE const *const ay,
+    TIDE_DTYPE const *const by, TIDE_DTYPE const *const ayh,
+    TIDE_DTYPE const *const byh, TIDE_DTYPE const *const ax,
+    TIDE_DTYPE const *const bx, TIDE_DTYPE const *const axh,
+    TIDE_DTYPE const *const bxh, TIDE_DTYPE const *const kz,
+    TIDE_DTYPE const *const kzh, TIDE_DTYPE const *const ky,
+    TIDE_DTYPE const *const kyh, TIDE_DTYPE const *const kx,
+    TIDE_DTYPE const *const kxh) {
+  if (!use_fused) {
+    backward_kernel_e_mem_adj_3d<<<(unsigned)blocks_cells, threads_cells, 0,
+                                  stream>>>(
+        cb, lambda_ex, lambda_ey, lambda_ez, current.hy_z, current.hz_y,
+        current.hz_x, current.hx_z, current.hx_y, current.hy_x, bz, by, bx);
+    backward_kernel_e_adj_unfused_3d<<<(unsigned)blocks_cells, threads_cells, 0,
+                                      stream>>>(
+        cb, lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
+        current.hy_z, current.hz_y, current.hz_x, current.hx_z, current.hx_y,
+        current.hy_x, az, bz, ay, by, ax, bx, kz, ky, kx);
+    backward_kernel_h_mem_adj_3d<<<(unsigned)blocks_cells, threads_cells, 0,
+                                  stream>>>(
+        cq, lambda_hx, lambda_hy, lambda_hz, current.ey_z, current.ez_y,
+        current.ez_x, current.ex_z, current.ex_y, current.ey_x, bzh, byh, bxh);
+    backward_kernel_h_adj_unfused_3d<<<(unsigned)blocks_cells, threads_cells, 0,
+                                      stream>>>(
+        ca, cq, lambda_hx, lambda_hy, lambda_hz, lambda_ex, lambda_ey,
+        lambda_ez, current.ey_z, current.ez_y, current.ez_x, current.ex_z,
+        current.ex_y, current.ey_x, azh, bzh, ayh, byh, axh, bxh, kzh, kyh,
+        kxh);
+    return;
+  }
+  backward_kernel_e_adj_fused_3d<<<(unsigned)blocks_cells, threads_cells, 0,
+                                    stream>>>(
+      cb, lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
+      current.hy_z, current.hz_y, current.hz_x, current.hx_z, current.hx_y,
+      current.hy_x, next.hy_z, next.hz_y, next.hz_x, next.hx_z, next.hx_y,
+      next.hy_x, az, bz, ay, by, ax, bx, kz, ky, kx);
+  swap_adjoint_memory_3d(current.hy_z, next.hy_z);
+  swap_adjoint_memory_3d(current.hz_y, next.hz_y);
+  swap_adjoint_memory_3d(current.hz_x, next.hz_x);
+  swap_adjoint_memory_3d(current.hx_z, next.hx_z);
+  swap_adjoint_memory_3d(current.hx_y, next.hx_y);
+  swap_adjoint_memory_3d(current.hy_x, next.hy_x);
+  backward_kernel_h_adj_fused_3d<<<(unsigned)blocks_cells, threads_cells, 0,
+                                    stream>>>(
+      ca, cq, lambda_hx, lambda_hy, lambda_hz, lambda_ex, lambda_ey, lambda_ez,
+      current.ey_z, current.ez_y, current.ez_x, current.ex_z, current.ex_y,
+      current.ey_x, next.ey_z, next.ez_y, next.ez_x, next.ex_z, next.ex_y,
+      next.ey_x, azh, bzh, ayh, byh, axh, bxh, kzh, kyh, kxh);
+  swap_adjoint_memory_3d(current.ey_z, next.ey_z);
+  swap_adjoint_memory_3d(current.ez_y, next.ez_y);
+  swap_adjoint_memory_3d(current.ez_x, next.ez_x);
+  swap_adjoint_memory_3d(current.ex_z, next.ex_z);
+  swap_adjoint_memory_3d(current.ex_y, next.ex_y);
+  swap_adjoint_memory_3d(current.ey_x, next.ey_x);
+}
+
+static inline void launch_backward_step_dual_3d(
+    bool const use_fused, int64_t const blocks_cells,
+    int const threads_cells, cudaStream_t const stream,
+    TIDE_DTYPE const *const ca, TIDE_DTYPE const *const cb,
+    TIDE_DTYPE const *const cq, AdjointFields3D const first_fields,
+    AdjointMemoryState3D &first_current, AdjointMemoryState3D &first_next,
+    AdjointFields3D const second_fields,
+    AdjointMemoryState3D &second_current, AdjointMemoryState3D &second_next,
+    TIDE_DTYPE const *const az, TIDE_DTYPE const *const bz,
+    TIDE_DTYPE const *const azh, TIDE_DTYPE const *const bzh,
+    TIDE_DTYPE const *const ay, TIDE_DTYPE const *const by,
+    TIDE_DTYPE const *const ayh, TIDE_DTYPE const *const byh,
+    TIDE_DTYPE const *const ax, TIDE_DTYPE const *const bx,
+    TIDE_DTYPE const *const axh, TIDE_DTYPE const *const bxh,
+    TIDE_DTYPE const *const kz, TIDE_DTYPE const *const kzh,
+    TIDE_DTYPE const *const ky, TIDE_DTYPE const *const kyh,
+    TIDE_DTYPE const *const kx, TIDE_DTYPE const *const kxh) {
+  if (!use_fused) {
+    launch_backward_step_3d(
+        false, blocks_cells, threads_cells, stream, ca, cb, cq, first_fields.ex,
+        first_fields.ey, first_fields.ez, first_fields.hx, first_fields.hy,
+        first_fields.hz, first_current, first_next, az, bz, azh, bzh, ay, by,
+        ayh, byh, ax, bx, axh, bxh, kz, kzh, ky, kyh, kx, kxh);
+    launch_backward_step_3d(
+        false, blocks_cells, threads_cells, stream, ca, cb, cq,
+        second_fields.ex, second_fields.ey, second_fields.ez, second_fields.hx,
+        second_fields.hy, second_fields.hz, second_current, second_next, az, bz,
+        azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh, kz, kzh, ky, kyh, kx,
+        kxh);
+    return;
+  }
+  backward_kernel_e_adj_fused_dual_3d<<<(unsigned)blocks_cells, threads_cells,
+                                       0, stream>>>(
+      cb, first_fields, first_current, first_next, second_fields, second_current,
+      second_next, az, bz, ay, by, ax, bx, kz, ky, kx);
+  swap_adjoint_memory_3d(first_current.hy_z, first_next.hy_z);
+  swap_adjoint_memory_3d(first_current.hz_y, first_next.hz_y);
+  swap_adjoint_memory_3d(first_current.hz_x, first_next.hz_x);
+  swap_adjoint_memory_3d(first_current.hx_z, first_next.hx_z);
+  swap_adjoint_memory_3d(first_current.hx_y, first_next.hx_y);
+  swap_adjoint_memory_3d(first_current.hy_x, first_next.hy_x);
+  swap_adjoint_memory_3d(second_current.hy_z, second_next.hy_z);
+  swap_adjoint_memory_3d(second_current.hz_y, second_next.hz_y);
+  swap_adjoint_memory_3d(second_current.hz_x, second_next.hz_x);
+  swap_adjoint_memory_3d(second_current.hx_z, second_next.hx_z);
+  swap_adjoint_memory_3d(second_current.hx_y, second_next.hx_y);
+  swap_adjoint_memory_3d(second_current.hy_x, second_next.hy_x);
+  backward_kernel_h_adj_fused_dual_3d<<<(unsigned)blocks_cells, threads_cells,
+                                       0, stream>>>(
+      ca, cq, first_fields, first_current, first_next, second_fields,
+      second_current, second_next, azh, bzh, ayh, byh, axh, bxh, kzh, kyh,
+      kxh);
+  swap_adjoint_memory_3d(first_current.ey_z, first_next.ey_z);
+  swap_adjoint_memory_3d(first_current.ez_y, first_next.ez_y);
+  swap_adjoint_memory_3d(first_current.ez_x, first_next.ez_x);
+  swap_adjoint_memory_3d(first_current.ex_z, first_next.ex_z);
+  swap_adjoint_memory_3d(first_current.ex_y, first_next.ex_y);
+  swap_adjoint_memory_3d(first_current.ey_x, first_next.ey_x);
+  swap_adjoint_memory_3d(second_current.ey_z, second_next.ey_z);
+  swap_adjoint_memory_3d(second_current.ez_y, second_next.ez_y);
+  swap_adjoint_memory_3d(second_current.ez_x, second_next.ez_x);
+  swap_adjoint_memory_3d(second_current.ex_z, second_next.ex_z);
+  swap_adjoint_memory_3d(second_current.ex_y, second_next.ex_y);
+  swap_adjoint_memory_3d(second_current.ey_x, second_next.ey_x);
+}
+
+static inline void copy_adjoint_memory_if_needed_3d(
+    cudaStream_t const stream, size_t const bytes,
+    AdjointMemoryState3D const &original,
+    AdjointMemoryState3D const &current) {
+  TIDE_DTYPE *const originals[12] = {
+      original.ey_z, original.ez_y, original.ez_x, original.ex_z,
+      original.ex_y, original.ey_x, original.hz_y, original.hy_z,
+      original.hx_z, original.hz_x, original.hy_x, original.hx_y};
+  TIDE_DTYPE *const currents[12] = {
+      current.ey_z, current.ez_y, current.ez_x, current.ex_z,
+      current.ex_y, current.ey_x, current.hz_y, current.hy_z,
+      current.hx_z, current.hz_x, current.hy_x, current.hx_y};
+  for (int i = 0; i < 12; ++i) {
+    if (originals[i] != currents[i]) {
+      tide::cuda_check_or_abort(
+          cudaMemcpyAsync(originals[i], currents[i], bytes,
+                          cudaMemcpyDeviceToDevice, stream),
+          __FILE__, __LINE__);
+    }
+  }
 }
 
 template <typename SnapshotT>
@@ -1674,6 +2168,8 @@ __global__ void coeff_grad_3d(
     TIDE_DTYPE const scaled = acc_ca * (TIDE_DTYPE)step_ratio_eff;
     if (ca_batched) {
       grad_ca[i] += scaled;
+    } else if (n_shots == 1) {
+      grad_ca[j] += scaled;
     } else if (grad_ca_shot != nullptr) {
       grad_ca_shot[i] += scaled;
     } else {
@@ -1689,6 +2185,8 @@ __global__ void coeff_grad_3d(
     TIDE_DTYPE const scaled = acc_cb * (TIDE_DTYPE)step_ratio_eff;
     if (cb_batched) {
       grad_cb[i] += scaled;
+    } else if (n_shots == 1) {
+      grad_cb[j] += scaled;
     } else if (grad_cb_shot != nullptr) {
       grad_cb_shot[i] += scaled;
     } else {
@@ -1746,6 +2244,8 @@ __global__ void coeff_grad_eonly_3d(
     TIDE_DTYPE const scaled = acc_ca * (TIDE_DTYPE)step_ratio_eff;
     if (ca_batched) {
       grad_ca[i] += scaled;
+    } else if (n_shots == 1) {
+      grad_ca[j] += scaled;
     } else if (grad_ca_shot != nullptr) {
       grad_ca_shot[i] += scaled;
     } else {
@@ -1768,6 +2268,8 @@ __global__ void coeff_grad_eonly_3d(
     TIDE_DTYPE const scaled = acc_cb * (TIDE_DTYPE)step_ratio_eff;
     if (cb_batched) {
       grad_cb[i] += scaled;
+    } else if (n_shots == 1) {
+      grad_cb[j] += scaled;
     } else if (grad_cb_shot != nullptr) {
       grad_cb_shot[i] += scaled;
     } else {
@@ -1782,21 +2284,38 @@ __global__ void born_bggrad_prepare_direct_3d(
     TIDE_DTYPE const *__restrict const lambda_ex,
     TIDE_DTYPE const *__restrict const lambda_ey,
     TIDE_DTYPE const *__restrict const lambda_ez,
+    TIDE_DTYPE const *__restrict const eta_ex,
+    TIDE_DTYPE const *__restrict const eta_ey,
+    TIDE_DTYPE const *__restrict const eta_ez,
     SnapshotT const *__restrict const dex_store,
     SnapshotT const *__restrict const dey_store,
     SnapshotT const *__restrict const dez_store,
     SnapshotT const *__restrict const dcurl_x_store,
     SnapshotT const *__restrict const dcurl_y_store,
     SnapshotT const *__restrict const dcurl_z_store,
+    SnapshotT const *__restrict const ex_store,
+    SnapshotT const *__restrict const ey_store,
+    SnapshotT const *__restrict const ez_store,
+    SnapshotT const *__restrict const curl_x_store,
+    SnapshotT const *__restrict const curl_y_store,
+    SnapshotT const *__restrict const curl_z_store,
     TIDE_DTYPE *__restrict const grad_ca,
     TIDE_DTYPE *__restrict const grad_cb,
+    TIDE_DTYPE *__restrict const grad_dca,
+    TIDE_DTYPE *__restrict const grad_dcb,
     TIDE_DTYPE *__restrict const grad_ca_shot,
     TIDE_DTYPE *__restrict const grad_cb_shot,
+    TIDE_DTYPE *__restrict const grad_dca_shot,
+    TIDE_DTYPE *__restrict const grad_dcb_shot,
     TIDE_DTYPE *__restrict const eta_source_ex,
     TIDE_DTYPE *__restrict const eta_source_ey,
     TIDE_DTYPE *__restrict const eta_source_ez,
     bool const direct_ca_step,
     bool const direct_cb_step,
+    bool const grad_ca_step,
+    bool const grad_cb_step,
+    bool const grad_dca_step,
+    bool const grad_dcb_step,
     int64_t const step_ratio_eff) {
   int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
   int64_t total = n_shots * shot_numel;
@@ -1819,11 +2338,20 @@ __global__ void born_bggrad_prepare_direct_3d(
   eta_source_ey[i] = dca_val * ley_curr;
   eta_source_ez[i] = dca_val * lez_curr;
 
-  if (direct_ca_step && grad_ca != nullptr && dex_store != nullptr &&
-      dey_store != nullptr && dez_store != nullptr) {
-    TIDE_DTYPE const acc_ca = lex_curr * decode_snapshot(dex_store[i]) +
-                              ley_curr * decode_snapshot(dey_store[i]) +
-                              lez_curr * decode_snapshot(dez_store[i]);
+  if ((direct_ca_step || grad_ca_step) && grad_ca != nullptr) {
+    TIDE_DTYPE acc_ca = 0;
+    if (direct_ca_step && dex_store != nullptr && dey_store != nullptr &&
+        dez_store != nullptr) {
+      acc_ca += lex_curr * decode_snapshot(dex_store[i]) +
+                ley_curr * decode_snapshot(dey_store[i]) +
+                lez_curr * decode_snapshot(dez_store[i]);
+    }
+    if (grad_ca_step && ex_store != nullptr && ey_store != nullptr &&
+        ez_store != nullptr) {
+      acc_ca += eta_ex[i] * decode_snapshot(ex_store[i]) +
+                eta_ey[i] * decode_snapshot(ey_store[i]) +
+                eta_ez[i] * decode_snapshot(ez_store[i]);
+    }
     TIDE_DTYPE const scaled = acc_ca * (TIDE_DTYPE)step_ratio_eff;
     if (ca_batched) {
       grad_ca[i] += scaled;
@@ -1834,11 +2362,20 @@ __global__ void born_bggrad_prepare_direct_3d(
     }
   }
 
-  if (direct_cb_step && grad_cb != nullptr && dcurl_x_store != nullptr &&
-      dcurl_y_store != nullptr && dcurl_z_store != nullptr) {
-    TIDE_DTYPE const acc_cb = lex_curr * decode_snapshot(dcurl_x_store[i]) +
-                              ley_curr * decode_snapshot(dcurl_y_store[i]) +
-                              lez_curr * decode_snapshot(dcurl_z_store[i]);
+  if ((direct_cb_step || grad_cb_step) && grad_cb != nullptr) {
+    TIDE_DTYPE acc_cb = 0;
+    if (direct_cb_step && dcurl_x_store != nullptr &&
+        dcurl_y_store != nullptr && dcurl_z_store != nullptr) {
+      acc_cb += lex_curr * decode_snapshot(dcurl_x_store[i]) +
+                ley_curr * decode_snapshot(dcurl_y_store[i]) +
+                lez_curr * decode_snapshot(dcurl_z_store[i]);
+    }
+    if (grad_cb_step && curl_x_store != nullptr && curl_y_store != nullptr &&
+        curl_z_store != nullptr) {
+      acc_cb += eta_ex[i] * decode_snapshot(curl_x_store[i]) +
+                eta_ey[i] * decode_snapshot(curl_y_store[i]) +
+                eta_ez[i] * decode_snapshot(curl_z_store[i]);
+    }
     TIDE_DTYPE const scaled = acc_cb * (TIDE_DTYPE)step_ratio_eff;
     if (cb_batched) {
       grad_cb[i] += scaled;
@@ -1846,6 +2383,38 @@ __global__ void born_bggrad_prepare_direct_3d(
       grad_cb_shot[i] += scaled;
     } else {
       atomic_add_tide(&grad_cb[j], scaled);
+    }
+  }
+
+  if (grad_dca_step && grad_dca != nullptr && ex_store != nullptr &&
+      ey_store != nullptr && ez_store != nullptr) {
+    TIDE_DTYPE const scaled =
+        (lex_curr * decode_snapshot(ex_store[i]) +
+         ley_curr * decode_snapshot(ey_store[i]) +
+         lez_curr * decode_snapshot(ez_store[i])) *
+        (TIDE_DTYPE)step_ratio_eff;
+    if (ca_batched) {
+      grad_dca[i] += scaled;
+    } else if (grad_dca_shot != nullptr) {
+      grad_dca_shot[i] += scaled;
+    } else {
+      atomic_add_tide(&grad_dca[j], scaled);
+    }
+  }
+
+  if (grad_dcb_step && grad_dcb != nullptr && curl_x_store != nullptr &&
+      curl_y_store != nullptr && curl_z_store != nullptr) {
+    TIDE_DTYPE const scaled =
+        (lex_curr * decode_snapshot(curl_x_store[i]) +
+         ley_curr * decode_snapshot(curl_y_store[i]) +
+         lez_curr * decode_snapshot(curl_z_store[i])) *
+        (TIDE_DTYPE)step_ratio_eff;
+    if (cb_batched) {
+      grad_dcb[i] += scaled;
+    } else if (grad_dcb_shot != nullptr) {
+      grad_dcb_shot[i] += scaled;
+    } else {
+      atomic_add_tide(&grad_dcb[j], scaled);
     }
   }
 }
@@ -1954,9 +2523,9 @@ __global__ void add_eta_source_3d(
     TIDE_DTYPE *__restrict const eta_ex,
     TIDE_DTYPE *__restrict const eta_ey,
     TIDE_DTYPE *__restrict const eta_ez,
-    TIDE_DTYPE const *__restrict const eta_source_ex,
-    TIDE_DTYPE const *__restrict const eta_source_ey,
-    TIDE_DTYPE const *__restrict const eta_source_ez) {
+    TIDE_DTYPE *__restrict const eta_source_ex,
+    TIDE_DTYPE *__restrict const eta_source_ey,
+    TIDE_DTYPE *__restrict const eta_source_ez) {
   int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
   int64_t total = n_shots * shot_numel;
   if (i >= total) {
@@ -1965,6 +2534,9 @@ __global__ void add_eta_source_3d(
   eta_ex[i] += eta_source_ex[i];
   eta_ey[i] += eta_source_ey[i];
   eta_ez[i] += eta_source_ez[i];
+  eta_source_ex[i] = static_cast<TIDE_DTYPE>(0);
+  eta_source_ey[i] = static_cast<TIDE_DTYPE>(0);
+  eta_source_ez[i] = static_cast<TIDE_DTYPE>(0);
 }
 
 __global__ void combine_grad_shot_3d(TIDE_DTYPE *__restrict const grad,
@@ -3845,6 +4417,7 @@ extern "C" void FUNC(backward)(
     TIDE_DTYPE *const m_lambda_hz_x,
     TIDE_DTYPE *const m_lambda_hy_x,
     TIDE_DTYPE *const m_lambda_hx_y,
+    TIDE_DTYPE *const adjoint_memory_scratch,
     TIDE_DTYPE *const store_1,
     TIDE_DTYPE *const store_2,
     char **store_filenames_1,
@@ -3999,6 +4572,31 @@ extern "C" void FUNC(backward)(
   ScalarLaunchConfig3D const launch_cfg = make_scalar_launch_config_3d(
       n_shots_h, nz_h, ny_h, nx_h, n_sources_per_shot_h,
       n_receivers_per_shot_h, n_threads, false);
+  size_t const adjoint_state_numel = (size_t)n_shots_h * shot_numel_h;
+  size_t const adjoint_state_bytes =
+      adjoint_state_numel * sizeof(TIDE_DTYPE);
+  AdjointMemoryState3D const original_adjoint_memory{
+      m_lambda_ey_z, m_lambda_ez_y, m_lambda_ez_x, m_lambda_ex_z,
+      m_lambda_ex_y, m_lambda_ey_x, m_lambda_hz_y, m_lambda_hy_z,
+      m_lambda_hx_z, m_lambda_hz_x, m_lambda_hy_x, m_lambda_hx_y};
+  AdjointMemoryState3D current_adjoint_memory = original_adjoint_memory;
+  AdjointMemoryState3D next_adjoint_memory{
+      adjoint_memory_scratch,
+      adjoint_memory_scratch + adjoint_state_numel,
+      adjoint_memory_scratch + 2 * adjoint_state_numel,
+      adjoint_memory_scratch + 3 * adjoint_state_numel,
+      adjoint_memory_scratch + 4 * adjoint_state_numel,
+      adjoint_memory_scratch + 5 * adjoint_state_numel,
+      adjoint_memory_scratch + 6 * adjoint_state_numel,
+      adjoint_memory_scratch + 7 * adjoint_state_numel,
+      adjoint_memory_scratch + 8 * adjoint_state_numel,
+      adjoint_memory_scratch + 9 * adjoint_state_numel,
+      adjoint_memory_scratch + 10 * adjoint_state_numel,
+      adjoint_memory_scratch + 11 * adjoint_state_numel};
+  tide::cuda_check_or_abort(
+      cudaMemsetAsync(adjoint_memory_scratch, 0, 12 * adjoint_state_bytes,
+                      stream_compute),
+      __FILE__, __LINE__);
 
   void *const device_stores[6] = {store_1, store_3, store_5,
                                   store_7, store_9, store_11};
@@ -4298,29 +4896,12 @@ extern "C" void FUNC(backward)(
       }
     }
 
-    backward_kernel_e_mem_adj_3d<<<(unsigned)launch_cfg.blocks_cells,
-                                launch_cfg.threads_cells, 0,
-                                stream_compute>>>(
-        cb, lambda_ex, lambda_ey, lambda_ez, m_lambda_hy_z, m_lambda_hz_y,
-        m_lambda_hz_x, m_lambda_hx_z, m_lambda_hx_y, m_lambda_hy_x, bz, by, bx);
-    backward_kernel_e_adj_3d<<<(unsigned)launch_cfg.blocks_cells,
-                               launch_cfg.threads_cells, 0,
-                               stream_compute>>>(
-        cb, lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
-        m_lambda_hy_z, m_lambda_hz_y, m_lambda_hz_x, m_lambda_hx_z,
-        m_lambda_hx_y, m_lambda_hy_x, az, ay, ax, kz, ky, kx);
-    backward_kernel_h_mem_adj_3d<<<(unsigned)launch_cfg.blocks_cells,
-                                   launch_cfg.threads_cells, 0,
-                                   stream_compute>>>(
-        cq, lambda_hx, lambda_hy, lambda_hz, m_lambda_ey_z, m_lambda_ez_y,
-        m_lambda_ez_x, m_lambda_ex_z, m_lambda_ex_y, m_lambda_ey_x, bzh, byh,
-        bxh);
-    backward_kernel_h_adj_3d<<<(unsigned)launch_cfg.blocks_cells,
-                               launch_cfg.threads_cells, 0,
-                               stream_compute>>>(
-        ca, cq, lambda_hx, lambda_hy, lambda_hz, lambda_ex, lambda_ey,
-        lambda_ez, m_lambda_ey_z, m_lambda_ez_y, m_lambda_ez_x, m_lambda_ex_z,
-        m_lambda_ex_y, m_lambda_ey_x, azh, ayh, axh, kzh, kyh, kxh);
+    launch_backward_step_3d(
+        n_shots_h * shot_numel_h <= 32768, launch_cfg.blocks_cells,
+        launch_cfg.threads_cells, stream_compute, ca, cb, cq, lambda_ex,
+        lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
+        current_adjoint_memory, next_adjoint_memory, az, bz, azh, bzh, ay, by,
+        ayh, byh, ax, bx, axh, bxh, kz, kzh, ky, kyh, kx, kxh);
 
     if (n_receivers_per_shot_h > 0 && grad_r != nullptr && receivers_i != nullptr) {
       add_adjoint_receivers_component<<<(unsigned)launch_cfg.blocks_receivers,
@@ -4470,6 +5051,9 @@ extern "C" void FUNC(backward)(
     }
   }
 
+  copy_adjoint_memory_if_needed_3d(stream_compute, adjoint_state_bytes,
+                                   original_adjoint_memory,
+                                   current_adjoint_memory);
   if (reduce_grad_ca || reduce_grad_cb) {
     int const threads_reduce = 256;
     int64_t const blocks_reduce =
@@ -4554,6 +5138,7 @@ extern "C" void FUNC(born_backward_bggrad)(
     TIDE_DTYPE *const m_eta_hz_x,
     TIDE_DTYPE *const m_eta_hy_x,
     TIDE_DTYPE *const m_eta_hx_y,
+    TIDE_DTYPE *const adjoint_memory_scratch,
     void *const store_1,
     void *const store_2,
     char **store_filenames_1,
@@ -4793,6 +5378,48 @@ extern "C" void FUNC(born_backward_bggrad)(
   zero_tensor(eta_source_ex, state_count);
   zero_tensor(eta_source_ey, state_count);
   zero_tensor(eta_source_ez, state_count);
+  size_t const adjoint_state_bytes = state_count * sizeof(TIDE_DTYPE);
+  AdjointMemoryState3D const original_lambda_memory{
+      m_lambda_ey_z, m_lambda_ez_y, m_lambda_ez_x, m_lambda_ex_z,
+      m_lambda_ex_y, m_lambda_ey_x, m_lambda_hz_y, m_lambda_hy_z,
+      m_lambda_hx_z, m_lambda_hz_x, m_lambda_hy_x, m_lambda_hx_y};
+  AdjointMemoryState3D current_lambda_memory = original_lambda_memory;
+  AdjointMemoryState3D next_lambda_memory{
+      adjoint_memory_scratch,
+      adjoint_memory_scratch + state_count,
+      adjoint_memory_scratch + 2 * state_count,
+      adjoint_memory_scratch + 3 * state_count,
+      adjoint_memory_scratch + 4 * state_count,
+      adjoint_memory_scratch + 5 * state_count,
+      adjoint_memory_scratch + 6 * state_count,
+      adjoint_memory_scratch + 7 * state_count,
+      adjoint_memory_scratch + 8 * state_count,
+      adjoint_memory_scratch + 9 * state_count,
+      adjoint_memory_scratch + 10 * state_count,
+      adjoint_memory_scratch + 11 * state_count};
+  AdjointMemoryState3D const original_eta_memory{
+      m_eta_ey_z, m_eta_ez_y, m_eta_ez_x, m_eta_ex_z, m_eta_ex_y, m_eta_ey_x,
+      m_eta_hz_y, m_eta_hy_z, m_eta_hx_z, m_eta_hz_x, m_eta_hy_x,
+      m_eta_hx_y};
+  AdjointMemoryState3D current_eta_memory = original_eta_memory;
+  TIDE_DTYPE *const eta_scratch = adjoint_memory_scratch + 12 * state_count;
+  AdjointMemoryState3D next_eta_memory{
+      eta_scratch,
+      eta_scratch + state_count,
+      eta_scratch + 2 * state_count,
+      eta_scratch + 3 * state_count,
+      eta_scratch + 4 * state_count,
+      eta_scratch + 5 * state_count,
+      eta_scratch + 6 * state_count,
+      eta_scratch + 7 * state_count,
+      eta_scratch + 8 * state_count,
+      eta_scratch + 9 * state_count,
+      eta_scratch + 10 * state_count,
+      eta_scratch + 11 * state_count};
+  tide::cuda_check_or_abort(
+      cudaMemsetAsync(adjoint_memory_scratch, 0, 24 * adjoint_state_bytes,
+                      stream_compute),
+      __FILE__, __LINE__);
 
   size_t const src_count =
       (size_t)nt * (size_t)n_shots_h * (size_t)n_sources_per_shot_h;
@@ -4920,107 +5547,20 @@ extern "C" void FUNC(born_backward_bggrad)(
                   device_offset)
             : nullptr;
 
-    forward_kernel_h<<<(unsigned)launch_cfg.blocks_cells,
-                       launch_cfg.threads_cells, 0, stream_compute>>>(
-        cq,
-        lambda_ex,
-        lambda_ey,
-        lambda_ez,
-        lambda_hx,
-        lambda_hy,
-        lambda_hz,
-        m_lambda_ey_z,
-        m_lambda_ez_y,
-        m_lambda_ez_x,
-        m_lambda_ex_z,
-        m_lambda_ex_y,
-        m_lambda_ey_x,
-        azh,
-        bzh,
-        ayh,
-        byh,
-        axh,
-        bxh,
-        kzh,
-        kyh,
-        kxh);
-
-    forward_kernel_e<<<(unsigned)launch_cfg.blocks_cells,
-                       launch_cfg.threads_cells, 0, stream_compute>>>(
-        ca,
-        cb,
-        lambda_ex,
-        lambda_ey,
-        lambda_ez,
-        lambda_hx,
-        lambda_hy,
-        lambda_hz,
-        m_lambda_hy_z,
-        m_lambda_hz_y,
-        m_lambda_hz_x,
-        m_lambda_hx_z,
-        m_lambda_hx_y,
-        m_lambda_hy_x,
-        az,
-        bz,
-        ay,
-        by,
-        ax,
-        bx,
-        kz,
-        ky,
-        kx);
-
-    forward_kernel_h<<<(unsigned)launch_cfg.blocks_cells,
-                       launch_cfg.threads_cells, 0, stream_compute>>>(
-        cq,
-        eta_ex,
-        eta_ey,
-        eta_ez,
-        eta_hx,
-        eta_hy,
-        eta_hz,
-        m_eta_ey_z,
-        m_eta_ez_y,
-        m_eta_ez_x,
-        m_eta_ex_z,
-        m_eta_ex_y,
-        m_eta_ey_x,
-        azh,
-        bzh,
-        ayh,
-        byh,
-        axh,
-        bxh,
-        kzh,
-        kyh,
-        kxh);
-
-    forward_kernel_e<<<(unsigned)launch_cfg.blocks_cells,
-                       launch_cfg.threads_cells, 0, stream_compute>>>(
-        ca,
-        cb,
-        eta_ex,
-        eta_ey,
-        eta_ez,
-        eta_hx,
-        eta_hy,
-        eta_hz,
-        m_eta_hy_z,
-        m_eta_hz_y,
-        m_eta_hz_x,
-        m_eta_hx_z,
-        m_eta_hx_y,
-        m_eta_hy_x,
-        az,
-        bz,
-        ay,
-        by,
-        ax,
-        bx,
-        kz,
-        ky,
-        kx);
+    bool const use_fused_adjoint = n_shots_h * shot_numel_h <= 32768;
+    AdjointFields3D const lambda_fields{
+        lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz};
+    AdjointFields3D const eta_fields{
+        eta_ex, eta_ey, eta_ez, eta_hx, eta_hy, eta_hz};
+    launch_backward_step_dual_3d(
+        use_fused_adjoint, launch_cfg.blocks_cells, launch_cfg.threads_cells,
+        stream_compute, ca, cb, cq, lambda_fields, current_lambda_memory,
+        next_lambda_memory, eta_fields, current_eta_memory, next_eta_memory, az,
+        bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh, kz, kzh, ky, kyh,
+        kx, kxh);
+    add_eta_source_3d<<<(unsigned)launch_cfg.blocks_cells,
+                        launch_cfg.threads_cells, 0, stream_compute>>>(
+        eta_ex, eta_ey, eta_ez, eta_source_ex, eta_source_ey, eta_source_ez);
 
     if (n_receivers_per_shot_h > 0 && grad_r != nullptr &&
         receivers_i != nullptr) {
@@ -5041,21 +5581,38 @@ extern "C" void FUNC(born_backward_bggrad)(
                 lambda_ex,
                 lambda_ey,
                 lambda_ez,
+                eta_ex,
+                eta_ey,
+                eta_ez,
                 reinterpret_cast<__nv_bfloat16 const *>(dex_store),
                 reinterpret_cast<__nv_bfloat16 const *>(dey_store),
                 reinterpret_cast<__nv_bfloat16 const *>(dez_store),
                 reinterpret_cast<__nv_bfloat16 const *>(dcurl_x_store),
                 reinterpret_cast<__nv_bfloat16 const *>(dcurl_y_store),
                 reinterpret_cast<__nv_bfloat16 const *>(dcurl_z_store),
+                reinterpret_cast<__nv_bfloat16 const *>(ex_store),
+                reinterpret_cast<__nv_bfloat16 const *>(ey_store),
+                reinterpret_cast<__nv_bfloat16 const *>(ez_store),
+                reinterpret_cast<__nv_bfloat16 const *>(curl_x_store),
+                reinterpret_cast<__nv_bfloat16 const *>(curl_y_store),
+                reinterpret_cast<__nv_bfloat16 const *>(curl_z_store),
                 grad_ca,
                 grad_cb,
+                grad_dca,
+                grad_dcb,
                 grad_ca_shot,
                 grad_cb_shot,
+                grad_dca_shot,
+                grad_dcb_shot,
                 eta_source_ex,
                 eta_source_ey,
                 eta_source_ez,
                 direct_ca_step,
                 direct_cb_step,
+                grad_ca_step,
+                grad_cb_step,
+                grad_dca_step,
+                grad_dcb_step,
                 step_ratio_eff);
       } else {
         born_bggrad_prepare_direct_3d<TIDE_DTYPE>
@@ -5065,21 +5622,38 @@ extern "C" void FUNC(born_backward_bggrad)(
                 lambda_ex,
                 lambda_ey,
                 lambda_ez,
+                eta_ex,
+                eta_ey,
+                eta_ez,
                 reinterpret_cast<TIDE_DTYPE const *>(dex_store),
                 reinterpret_cast<TIDE_DTYPE const *>(dey_store),
                 reinterpret_cast<TIDE_DTYPE const *>(dez_store),
                 reinterpret_cast<TIDE_DTYPE const *>(dcurl_x_store),
                 reinterpret_cast<TIDE_DTYPE const *>(dcurl_y_store),
                 reinterpret_cast<TIDE_DTYPE const *>(dcurl_z_store),
+                reinterpret_cast<TIDE_DTYPE const *>(ex_store),
+                reinterpret_cast<TIDE_DTYPE const *>(ey_store),
+                reinterpret_cast<TIDE_DTYPE const *>(ez_store),
+                reinterpret_cast<TIDE_DTYPE const *>(curl_x_store),
+                reinterpret_cast<TIDE_DTYPE const *>(curl_y_store),
+                reinterpret_cast<TIDE_DTYPE const *>(curl_z_store),
                 grad_ca,
                 grad_cb,
+                grad_dca,
+                grad_dcb,
                 grad_ca_shot,
                 grad_cb_shot,
+                grad_dca_shot,
+                grad_dcb_shot,
                 eta_source_ex,
                 eta_source_ey,
                 eta_source_ez,
                 direct_ca_step,
                 direct_cb_step,
+                grad_ca_step,
+                grad_cb_step,
+                grad_dca_step,
+                grad_dcb_step,
                 step_ratio_eff);
       }
 
@@ -5100,56 +5674,7 @@ extern "C" void FUNC(born_backward_bggrad)(
           kyh,
           kxh);
 
-      if (storage_bf16) {
-        coeff_grad_3d<__nv_bfloat16>
-            <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
-               stream_compute>>>(
-                lambda_ex,
-                lambda_ey,
-                lambda_ez,
-                reinterpret_cast<__nv_bfloat16 const *>(ex_store),
-                reinterpret_cast<__nv_bfloat16 const *>(ey_store),
-                reinterpret_cast<__nv_bfloat16 const *>(ez_store),
-                reinterpret_cast<__nv_bfloat16 const *>(curl_x_store),
-                reinterpret_cast<__nv_bfloat16 const *>(curl_y_store),
-                reinterpret_cast<__nv_bfloat16 const *>(curl_z_store),
-                grad_dca,
-                grad_dcb,
-                grad_dca_shot,
-                grad_dcb_shot,
-                grad_dca_step,
-                grad_dcb_step,
-                step_ratio_eff);
-      } else {
-        coeff_grad_3d<TIDE_DTYPE>
-            <<<(unsigned)launch_cfg.blocks_cells, launch_cfg.threads_cells, 0,
-               stream_compute>>>(
-                lambda_ex,
-                lambda_ey,
-                lambda_ez,
-                reinterpret_cast<TIDE_DTYPE const *>(ex_store),
-                reinterpret_cast<TIDE_DTYPE const *>(ey_store),
-                reinterpret_cast<TIDE_DTYPE const *>(ez_store),
-                reinterpret_cast<TIDE_DTYPE const *>(curl_x_store),
-                reinterpret_cast<TIDE_DTYPE const *>(curl_y_store),
-                reinterpret_cast<TIDE_DTYPE const *>(curl_z_store),
-                grad_dca,
-                grad_dcb,
-                grad_dca_shot,
-                grad_dcb_shot,
-                grad_dca_step,
-                grad_dcb_step,
-                step_ratio_eff);
-      }
 
-      add_eta_source_3d<<<(unsigned)launch_cfg.blocks_cells,
-                          launch_cfg.threads_cells, 0, stream_compute>>>(
-          eta_ex,
-          eta_ey,
-          eta_ez,
-          eta_source_ex,
-          eta_source_ey,
-          eta_source_ez);
     }
 
     if (n_sources_per_shot_h > 0 && sources_i != nullptr) {
@@ -5175,6 +5700,11 @@ extern "C" void FUNC(born_backward_bggrad)(
       }
     }
   }
+  copy_adjoint_memory_if_needed_3d(stream_compute, adjoint_state_bytes,
+                                   original_lambda_memory,
+                                   current_lambda_memory);
+  copy_adjoint_memory_if_needed_3d(stream_compute, adjoint_state_bytes,
+                                   original_eta_memory, current_eta_memory);
 
   if (reduce_grad_ca || reduce_grad_cb || reduce_grad_dca || reduce_grad_dcb) {
     int const threads_reduce = 256;
@@ -5224,6 +5754,7 @@ extern "C" void FUNC(born_backward)(
     TIDE_DTYPE *const m_lambda_hz_x,
     TIDE_DTYPE *const m_lambda_hy_x,
     TIDE_DTYPE *const m_lambda_hx_y,
+    TIDE_DTYPE *const adjoint_memory_scratch,
     void *const store_1,
     void *const store_2,
     char **store_filenames_1,
@@ -5378,6 +5909,31 @@ extern "C" void FUNC(born_backward)(
   ScalarLaunchConfig3D const launch_cfg = make_scalar_launch_config_3d(
       n_shots_h, nz_h, ny_h, nx_h, n_sources_per_shot_h,
       n_receivers_per_shot_h, n_threads, false);
+  size_t const adjoint_state_numel = (size_t)n_shots_h * shot_numel_h;
+  size_t const adjoint_state_bytes =
+      adjoint_state_numel * sizeof(TIDE_DTYPE);
+  AdjointMemoryState3D const original_adjoint_memory{
+      m_lambda_ey_z, m_lambda_ez_y, m_lambda_ez_x, m_lambda_ex_z,
+      m_lambda_ex_y, m_lambda_ey_x, m_lambda_hz_y, m_lambda_hy_z,
+      m_lambda_hx_z, m_lambda_hz_x, m_lambda_hy_x, m_lambda_hx_y};
+  AdjointMemoryState3D current_adjoint_memory = original_adjoint_memory;
+  AdjointMemoryState3D next_adjoint_memory{
+      adjoint_memory_scratch,
+      adjoint_memory_scratch + adjoint_state_numel,
+      adjoint_memory_scratch + 2 * adjoint_state_numel,
+      adjoint_memory_scratch + 3 * adjoint_state_numel,
+      adjoint_memory_scratch + 4 * adjoint_state_numel,
+      adjoint_memory_scratch + 5 * adjoint_state_numel,
+      adjoint_memory_scratch + 6 * adjoint_state_numel,
+      adjoint_memory_scratch + 7 * adjoint_state_numel,
+      adjoint_memory_scratch + 8 * adjoint_state_numel,
+      adjoint_memory_scratch + 9 * adjoint_state_numel,
+      adjoint_memory_scratch + 10 * adjoint_state_numel,
+      adjoint_memory_scratch + 11 * adjoint_state_numel};
+  tide::cuda_check_or_abort(
+      cudaMemsetAsync(adjoint_memory_scratch, 0, 12 * adjoint_state_bytes,
+                      stream_compute),
+      __FILE__, __LINE__);
 
   if (grad_f != nullptr && nt > 0 && n_shots_h > 0 && n_sources_per_shot_h > 0) {
     tide::cuda_check_or_abort(
@@ -5460,56 +6016,12 @@ extern "C" void FUNC(born_backward)(
                   reinterpret_cast<uint8_t *>(store_11) + device_offset)
             : nullptr;
 
-    forward_kernel_h<<<(unsigned)launch_cfg.blocks_cells,
-                       launch_cfg.threads_cells, 0, stream_compute>>>(
-        cq,
-        lambda_ex,
-        lambda_ey,
-        lambda_ez,
-        lambda_hx,
-        lambda_hy,
-        lambda_hz,
-        m_lambda_ey_z,
-        m_lambda_ez_y,
-        m_lambda_ez_x,
-        m_lambda_ex_z,
-        m_lambda_ex_y,
-        m_lambda_ey_x,
-        azh,
-        bzh,
-        ayh,
-        byh,
-        axh,
-        bxh,
-        kzh,
-        kyh,
-        kxh);
-
-    forward_kernel_e<<<(unsigned)launch_cfg.blocks_cells,
-                       launch_cfg.threads_cells, 0, stream_compute>>>(
-        ca,
-        cb,
-        lambda_ex,
-        lambda_ey,
-        lambda_ez,
-        lambda_hx,
-        lambda_hy,
-        lambda_hz,
-        m_lambda_hy_z,
-        m_lambda_hz_y,
-        m_lambda_hz_x,
-        m_lambda_hx_z,
-        m_lambda_hx_y,
-        m_lambda_hy_x,
-        az,
-        bz,
-        ay,
-        by,
-        ax,
-        bx,
-        kz,
-        ky,
-        kx);
+    launch_backward_step_3d(
+        n_shots_h * shot_numel_h <= 32768, launch_cfg.blocks_cells,
+        launch_cfg.threads_cells, stream_compute, ca, cb, cq, lambda_ex,
+        lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
+        current_adjoint_memory, next_adjoint_memory, az, bz, azh, bzh, ay, by,
+        ayh, byh, ax, bx, axh, bxh, kz, kzh, ky, kyh, kx, kxh);
 
     if (n_receivers_per_shot_h > 0 && grad_r != nullptr &&
         receivers_i != nullptr) {
@@ -5574,6 +6086,9 @@ extern "C" void FUNC(born_backward)(
       }
     }
   }
+  copy_adjoint_memory_if_needed_3d(stream_compute, adjoint_state_bytes,
+                                   original_adjoint_memory,
+                                   current_adjoint_memory);
 
   if (reduce_grad_ca || reduce_grad_cb) {
     int const threads_reduce = 256;

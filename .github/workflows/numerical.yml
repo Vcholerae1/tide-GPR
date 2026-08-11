@@ -1,0 +1,41 @@
+name: Numerical CUDA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cuda:
+    runs-on: [self-hosted, linux, x64, gpu]
+    env:
+      TIDE_REQUIRE_CUDA: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: "latest"
+
+      - name: Install development environment
+        run: uv sync --group dev
+
+      - name: CUDA numerical suite
+        run: uv run pytest -q -m cuda
+
+      - name: CUDA runtime benchmark
+        run: >-
+          uv run python benchmarks/maxwell_runtime.py
+          --dimension 3 --device cuda:0 --shape 24,28,32 --nt 400
+          --shots 4 --receivers 16 --backward --warmup 2 --repeats 7
+          --output artifacts/benchmarks/maxwell3d-cuda.json
+
+      - name: Upload numerical artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: numerical-cuda
+          path: artifacts/
+          if-no-files-found: ignore

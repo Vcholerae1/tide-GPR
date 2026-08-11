@@ -946,49 +946,13 @@ static inline void launch_coeff_grad_kernel(
 // the memory transposition were wrong.
 // ---------------------------------------------------------------------------
 
-// Adjoint of the forward E-update's PML memory recurrences (m_hz_x, m_hx_z).
-// The C-PML memory couples time steps: m(t) = b*m(t-1) + a*raw(t), so its
-// transpose is the backward recurrence  lam_m(t) = lam_used(t) + b*lam_m(t+1)
-// carried through the reverse time loop (not a pure accumulator).  Runs
-// before the E-adjoint scatter so neighbouring threads see the updated value.
-__global__ __launch_bounds__(256) void backward_kernel_e_mem_adj(
-    TIDE_DTYPE const *__restrict const cb,
-    TIDE_DTYPE const *__restrict const lambda_ey,
-    TIDE_DTYPE *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE *__restrict const m_lambda_hz_x,
-    TIDE_DTYPE const *__restrict const by,
-    TIDE_DTYPE const *__restrict const bx) {
-  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
-  int64_t shot_idx =
-      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
-  if (shot_idx >= n_shots || y < kFdPad || x < kFdPad ||
-      y >= ny - kFdPad + 1 || x >= nx - kFdPad + 1) {
-    return;
-  }
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_idx * shot_numel + j;
-  TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];
-  TIDE_DTYPE const q = cb_val * lambda_ey[i];
-  if (x < pml_x0 || x >= pml_x1) {
-    // m_hz_x adjoint: lam_used = +q (curl term +dhz_dx).
-    m_lambda_hz_x[i] = bx[x] * m_lambda_hz_x[i] + q;
-  }
-  if (y < pml_y0 || y >= pml_y1) {
-    // m_hx_z adjoint: lam_used = -q (curl term -dhx_dz).
-    m_lambda_hx_z[i] = by[y] * m_lambda_hx_z[i] - q;
-  }
-}
-
-// Adjoint of the forward E-update (Ey), applied to the adjoint fields.
-// The scatters use the full multi-point transpose (DiffAdjoint), which reduces
-// to the single-neighbour gather for TIDE_STENCIL==2 and to the weighted
-// multi-neighbour transpose for stencils 4/6/8.
-//
-// Raw accessors:  raw[k] = lam_raw at cell k (the adjoint of the staggered
-// derivative output), 0 outside the forward E-update's active box.
-struct RawXAcc {
-  TIDE_DTYPE const *cb, *lambda_ey, *m_hz_x, *ax, *kx;
+// Fused adjoints for one E or H phase. The current C-PML adjoint memories are
+// immutable for the duration of the kernel, while the next memories are
+// written to a disjoint ping-pong buffer. Raw accessors reconstruct a
+// neighbour's next memory value from the immutable current state, avoiding the
+// grid-wide race that an in-place fusion would create.
+struct FusedRawXAcc {
+  TIDE_DTYPE const *cb, *lambda_ey, *m_hz_x, *ax, *bx, *kx;
   int nx, pml_x0, pml_x1;
   bool cb_batched;
   __device__ __forceinline__ TIDE_DTYPE operator()(int64_t base, int y,
@@ -1000,13 +964,16 @@ struct RawXAcc {
     int64_t const j = y * nx + x;
     int64_t const i = base + j;
     TIDE_DTYPE const q = (cb_batched ? cb[i] : cb[j]) * lambda_ey[i];
-    bool const pml = x < pml_x0 || x >= pml_x1;
-    return pml ? (ax[x] * m_hz_x[i] + q / kx[x]) : q;
+    if (x >= pml_x0 && x < pml_x1) {
+      return q;
+    }
+    TIDE_DTYPE const m_next = bx[x] * m_hz_x[i] + q;
+    return ax[x] * m_next + q / kx[x];
   }
 };
 
-struct RawYAcc {
-  TIDE_DTYPE const *cb, *lambda_ey, *m_hx_z, *ay, *ky;
+struct FusedRawYAcc {
+  TIDE_DTYPE const *cb, *lambda_ey, *m_hx_z, *ay, *by, *ky;
   int ny, pml_y0, pml_y1;
   bool cb_batched;
   __device__ __forceinline__ TIDE_DTYPE operator()(int64_t base, int y,
@@ -1018,42 +985,39 @@ struct RawYAcc {
     int64_t const j = y * nx + x;
     int64_t const i = base + j;
     TIDE_DTYPE const q = (cb_batched ? cb[i] : cb[j]) * lambda_ey[i];
-    bool const pml = y < pml_y0 || y >= pml_y1;
-    // lam_used = -q (curl term -dhx_dz).
-    return pml ? (ay[y] * m_hx_z[i] - q / ky[y]) : (-q);
+    if (y >= pml_y0 && y < pml_y1) {
+      return -q;
+    }
+    TIDE_DTYPE const m_next = by[y] * m_hx_z[i] - q;
+    return ay[y] * m_next - q / ky[y];
   }
 };
 
-__global__ __launch_bounds__(256) void backward_kernel_e_adj(
-    TIDE_DTYPE const *__restrict const cb,
-    TIDE_DTYPE const *__restrict const lambda_ey,
-    TIDE_DTYPE *__restrict const lambda_hx,
-    TIDE_DTYPE *__restrict const lambda_hz,
-    TIDE_DTYPE const *__restrict const m_lambda_hx_z,
-    TIDE_DTYPE const *__restrict const m_lambda_hz_x,
-    TIDE_DTYPE const *__restrict const ay,
-    TIDE_DTYPE const *__restrict const ax,
-    TIDE_DTYPE const *__restrict const ky,
-    TIDE_DTYPE const *__restrict const kx) {
-  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
-  int64_t shot_idx =
-      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
-  if (shot_idx >= n_shots || y < kFdPad || x < kFdPad ||
-      y >= ny - kFdPad + 1 || x >= nx - kFdPad + 1) {
-    return;
-  }
+__device__ __forceinline__ void apply_backward_e_adj_cell(
+    TIDE_DTYPE const *const cb, TIDE_DTYPE const *const lambda_ey,
+    TIDE_DTYPE *const lambda_hx, TIDE_DTYPE *const lambda_hz,
+    TIDE_DTYPE const *const m_lambda_hx_z,
+    TIDE_DTYPE const *const m_lambda_hz_x,
+    TIDE_DTYPE *const m_lambda_hx_z_next,
+    TIDE_DTYPE *const m_lambda_hz_x_next, TIDE_DTYPE const *const ay,
+    TIDE_DTYPE const *const by, TIDE_DTYPE const *const ax,
+    TIDE_DTYPE const *const bx, TIDE_DTYPE const *const ky,
+    TIDE_DTYPE const *const kx, int64_t const shot_idx, int64_t const y,
+    int64_t const x) {
   int64_t const j = y * nx + x;
   int64_t const i = shot_idx * shot_numel + j;
-
-  RawXAcc raw_x{cb, lambda_ey, m_lambda_hz_x, ax, kx, (int)nx,
-                (int)pml_x0, (int)pml_x1, cb_batched};
-  RawYAcc raw_y{cb, lambda_ey, m_lambda_hx_z, ay, ky, (int)ny,
-                (int)pml_y0, (int)pml_y1, cb_batched};
+  TIDE_DTYPE const q = (cb_batched ? cb[i] : cb[j]) * lambda_ey[i];
+  bool const pml_x = x < pml_x0 || x >= pml_x1;
+  bool const pml_y = y < pml_y0 || y >= pml_y1;
+  m_lambda_hz_x_next[i] =
+      pml_x ? bx[x] * m_lambda_hz_x[i] + q : static_cast<TIDE_DTYPE>(0);
+  m_lambda_hx_z_next[i] =
+      pml_y ? by[y] * m_lambda_hx_z[i] - q : static_cast<TIDE_DTYPE>(0);
+  FusedRawXAcc raw_x{cb, lambda_ey, m_lambda_hz_x, ax, bx, kx, (int)nx,
+                    (int)pml_x0, (int)pml_x1, cb_batched};
+  FusedRawYAcc raw_y{cb, lambda_ey, m_lambda_hx_z, ay, by, ky, (int)ny,
+                    (int)pml_y0, (int)pml_y1, cb_batched};
   ::tide::ConstAccessor ones;
-
-  // Curl transpose: lambda_hz[j] += diff_x1_ADJ(raw_x)[j],
-  //                  lambda_hx[j] += diff_y1_ADJ(raw_y)[j].
   lambda_hz[i] += ::tide::DiffAdjoint<TIDE_STENCIL>::diff_x1_adj(
       raw_x, ones, shot_idx * shot_numel, (int)y, (int)x, (int)nx,
       static_cast<TIDE_DTYPE>(rdx));
@@ -1062,122 +1026,253 @@ __global__ __launch_bounds__(256) void backward_kernel_e_adj(
       static_cast<TIDE_DTYPE>(rdy));
 }
 
-// Adjoint of the forward H-update's PML memory recurrences (m_ey_z, m_ey_x).
-// Uses the lambda_hx/lambda_hz already updated by the E-adjoint (they are the
-// adjoints of the half-staggered H fields at this time step).  Runs before
-// the H-adjoint scatter so neighbouring threads see the updated value.
-__global__ __launch_bounds__(256) void backward_kernel_h_mem_adj(
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const m_lambda_ey_x,
-    TIDE_DTYPE *__restrict const m_lambda_ey_z,
-    TIDE_DTYPE const *__restrict const byh,
-    TIDE_DTYPE const *__restrict const bxh) {
-  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
-  int64_t shot_idx =
-      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
+__global__ __launch_bounds__(256) void backward_kernel_e_adj_fused(
+    TIDE_DTYPE const *cb, TIDE_DTYPE const *lambda_ey,
+    TIDE_DTYPE *lambda_hx, TIDE_DTYPE *lambda_hz,
+    TIDE_DTYPE const *m_lambda_hx_z, TIDE_DTYPE const *m_lambda_hz_x,
+    TIDE_DTYPE *m_lambda_hx_z_next, TIDE_DTYPE *m_lambda_hz_x_next,
+    TIDE_DTYPE const *ay, TIDE_DTYPE const *by, TIDE_DTYPE const *ax,
+    TIDE_DTYPE const *bx, TIDE_DTYPE const *ky, TIDE_DTYPE const *kx) {
+  int64_t const x =
+      (int64_t)blockIdx.x * blockDim.x + (int64_t)threadIdx.x;
+  int64_t const y =
+      (int64_t)blockIdx.y * blockDim.y + (int64_t)threadIdx.y;
+  int64_t const shot_idx =
+      (int64_t)blockIdx.z * blockDim.z + (int64_t)threadIdx.z;
   if (shot_idx >= n_shots || y < kFdPad || x < kFdPad ||
       y >= ny - kFdPad + 1 || x >= nx - kFdPad + 1) {
     return;
   }
-  int64_t const j = y * nx + x;
-  int64_t const i = shot_idx * shot_numel + j;
-  TIDE_DTYPE const cq_val = cq_batched ? cq[i] : cq[j];
-  if (y < ny - kFdPad && (y < pml_y0 || y >= pml_y1)) {
-    // m_ey_z adjoint: lam_used = -cq*lambda_hx (hx update has -cq*dey_dz).
-    m_lambda_ey_z[i] = byh[y] * m_lambda_ey_z[i] - cq_val * lambda_hx[i];
-  }
-  if (x < nx - kFdPad && (x < pml_x0 || x >= pml_x1)) {
-    // m_ey_x adjoint: lam_used = +cq*lambda_hz (hz update has +cq*dey_dx).
-    m_lambda_ey_x[i] = bxh[x] * m_lambda_ey_x[i] + cq_val * lambda_hz[i];
-  }
+  apply_backward_e_adj_cell(
+      cb, lambda_ey, lambda_hx, lambda_hz, m_lambda_hx_z, m_lambda_hz_x,
+      m_lambda_hx_z_next, m_lambda_hz_x_next, ay, by, ax, bx, ky, kx,
+      shot_idx, y, x);
 }
 
-// Adjoint of the forward H-update (Hx/Hz), applied to the adjoint fields.
-// Also applies the ca scaling of lambda_ey (the transpose of ey->ca*ey+b*curl
-// is lambda_ey_pre = ca*lambda_ey; this kernel owns lambda_ey exclusively).
-// The scatters use the full multi-point transpose (DiffAdjoint) with the
-// half-cell (h1) operators; raw accessors gate on the forward H-update's inner
-// half-cell guards.
-struct RawEyZAcc {
-  TIDE_DTYPE const *cq, *lambda_hx, *m_ey_z, *ayh, *kyh;
-  int ny, pml_y0, pml_y1;
+__global__ __launch_bounds__(256) void backward_kernel_e_adj_fused_dual(
+    TIDE_DTYPE const *cb, TIDE_DTYPE const *lambda_ey,
+    TIDE_DTYPE *lambda_hx, TIDE_DTYPE *lambda_hz,
+    TIDE_DTYPE const *m_lambda_hx_z, TIDE_DTYPE const *m_lambda_hz_x,
+    TIDE_DTYPE *m_lambda_hx_z_next, TIDE_DTYPE *m_lambda_hz_x_next,
+    TIDE_DTYPE const *eta_ey, TIDE_DTYPE *eta_hx, TIDE_DTYPE *eta_hz,
+    TIDE_DTYPE const *m_eta_hx_z, TIDE_DTYPE const *m_eta_hz_x,
+    TIDE_DTYPE *m_eta_hx_z_next, TIDE_DTYPE *m_eta_hz_x_next,
+    TIDE_DTYPE const *ay, TIDE_DTYPE const *by, TIDE_DTYPE const *ax,
+    TIDE_DTYPE const *bx, TIDE_DTYPE const *ky, TIDE_DTYPE const *kx) {
+  int64_t const x =
+      (int64_t)blockIdx.x * blockDim.x + (int64_t)threadIdx.x;
+  int64_t const y =
+      (int64_t)blockIdx.y * blockDim.y + (int64_t)threadIdx.y;
+  int64_t const shot_idx =
+      (int64_t)blockIdx.z * blockDim.z + (int64_t)threadIdx.z;
+  if (shot_idx >= n_shots || y < kFdPad || x < kFdPad ||
+      y >= ny - kFdPad + 1 || x >= nx - kFdPad + 1) {
+    return;
+  }
+  apply_backward_e_adj_cell(
+      cb, lambda_ey, lambda_hx, lambda_hz, m_lambda_hx_z, m_lambda_hz_x,
+      m_lambda_hx_z_next, m_lambda_hz_x_next, ay, by, ax, bx, ky, kx,
+      shot_idx, y, x);
+  apply_backward_e_adj_cell(
+      cb, eta_ey, eta_hx, eta_hz, m_eta_hx_z, m_eta_hz_x,
+      m_eta_hx_z_next, m_eta_hz_x_next, ay, by, ax, bx, ky, kx, shot_idx, y,
+      x);
+}
+
+struct FusedRawEyZAcc {
+  TIDE_DTYPE const *cq, *lambda_hx, *m_ey_z, *ayh, *byh, *kyh;
+  int ny, pml_y0, pml_y1h;
   bool cq_batched;
   __device__ __forceinline__ TIDE_DTYPE operator()(int64_t base, int y,
                                                    int x) const {
-    if (y < kFdPad || y >= ny - kFdPad + 1 || x < kFdPad ||
-        x >= nx - kFdPad + 1 || y >= ny - kFdPad) {
+    if (y < kFdPad || y >= ny - kFdPad || x < kFdPad ||
+        x >= nx - kFdPad + 1) {
       return static_cast<TIDE_DTYPE>(0);
     }
     int64_t const j = y * nx + x;
     int64_t const i = base + j;
     TIDE_DTYPE const adj = -(cq_batched ? cq[i] : cq[j]) * lambda_hx[i];
-    bool const pml = y < pml_y0 || y >= pml_y1;
-    return pml ? (ayh[y] * m_ey_z[i] + adj / kyh[y]) : adj;
+    if (y >= pml_y0 && y < pml_y1h) {
+      return adj;
+    }
+    TIDE_DTYPE const m_next = byh[y] * m_ey_z[i] + adj;
+    return ayh[y] * m_next + adj / kyh[y];
   }
 };
 
-struct RawEyXAcc {
-  TIDE_DTYPE const *cq, *lambda_hz, *m_ey_x, *axh, *kxh;
-  int nx, pml_x0, pml_x1;
+struct FusedRawEyXAcc {
+  TIDE_DTYPE const *cq, *lambda_hz, *m_ey_x, *axh, *bxh, *kxh;
+  int nx, pml_x0, pml_x1h;
   bool cq_batched;
   __device__ __forceinline__ TIDE_DTYPE operator()(int64_t base, int y,
                                                    int x) const {
     if (y < kFdPad || y >= ny - kFdPad + 1 || x < kFdPad ||
-        x >= nx - kFdPad + 1 || x >= nx - kFdPad) {
+        x >= nx - kFdPad) {
       return static_cast<TIDE_DTYPE>(0);
     }
     int64_t const j = y * nx + x;
     int64_t const i = base + j;
     TIDE_DTYPE const adj = (cq_batched ? cq[i] : cq[j]) * lambda_hz[i];
-    bool const pml = x < pml_x0 || x >= pml_x1;
-    return pml ? (axh[x] * m_ey_x[i] + adj / kxh[x]) : adj;
+    if (x >= pml_x0 && x < pml_x1h) {
+      return adj;
+    }
+    TIDE_DTYPE const m_next = bxh[x] * m_ey_x[i] + adj;
+    return axh[x] * m_next + adj / kxh[x];
   }
 };
 
-__global__ __launch_bounds__(256) void backward_kernel_h_adj(
-    TIDE_DTYPE const *__restrict const ca,
-    TIDE_DTYPE const *__restrict const cq,
-    TIDE_DTYPE const *__restrict const lambda_hx,
-    TIDE_DTYPE const *__restrict const lambda_hz,
-    TIDE_DTYPE *__restrict const lambda_ey,
-    TIDE_DTYPE const *__restrict const m_lambda_ey_x,
-    TIDE_DTYPE const *__restrict const m_lambda_ey_z,
-    TIDE_DTYPE const *__restrict const ayh,
-    TIDE_DTYPE const *__restrict const axh,
-    TIDE_DTYPE const *__restrict const kyh,
-    TIDE_DTYPE const *__restrict const kxh) {
-  int64_t x = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  int64_t y = (int64_t)blockIdx.y * (int64_t)blockDim.y + (int64_t)threadIdx.y;
-  int64_t shot_idx =
-      (int64_t)blockIdx.z * (int64_t)blockDim.z + (int64_t)threadIdx.z;
-  if (shot_idx >= n_shots || y < kFdPad || x < kFdPad ||
-      y >= ny - kFdPad + 1 || x >= nx - kFdPad + 1) {
-    return;
-  }
+__device__ __forceinline__ void apply_backward_h_adj_cell(
+    TIDE_DTYPE const *const ca, TIDE_DTYPE const *const cq,
+    TIDE_DTYPE const *const lambda_hx, TIDE_DTYPE const *const lambda_hz,
+    TIDE_DTYPE *const lambda_ey, TIDE_DTYPE const *const m_lambda_ey_x,
+    TIDE_DTYPE const *const m_lambda_ey_z,
+    TIDE_DTYPE *const m_lambda_ey_x_next,
+    TIDE_DTYPE *const m_lambda_ey_z_next, TIDE_DTYPE const *const ayh,
+    TIDE_DTYPE const *const byh, TIDE_DTYPE const *const axh,
+    TIDE_DTYPE const *const bxh, TIDE_DTYPE const *const kyh,
+    TIDE_DTYPE const *const kxh, int64_t const shot_idx, int64_t const y,
+    int64_t const x) {
   int64_t const j = y * nx + x;
   int64_t const i = shot_idx * shot_numel + j;
-
-  // lambda_ey_pre = ca * lambda_ey (transpose of the ca term in the E-update).
+  TIDE_DTYPE const cq_val = cq_batched ? cq[i] : cq[j];
+  int const pml_y1h = pml_y1 > pml_y0 ? (int)pml_y1 - 1 : (int)pml_y0;
+  int const pml_x1h = pml_x1 > pml_x0 ? (int)pml_x1 - 1 : (int)pml_x0;
+  bool const pml_y = y < pml_y0 || y >= pml_y1h;
+  bool const pml_x = x < pml_x0 || x >= pml_x1h;
+  TIDE_DTYPE const adj_y = -cq_val * lambda_hx[i];
+  TIDE_DTYPE const adj_x = cq_val * lambda_hz[i];
+  m_lambda_ey_z_next[i] =
+      y < ny - kFdPad && pml_y
+          ? byh[y] * m_lambda_ey_z[i] + adj_y
+          : static_cast<TIDE_DTYPE>(0);
+  m_lambda_ey_x_next[i] =
+      x < nx - kFdPad && pml_x
+          ? bxh[x] * m_lambda_ey_x[i] + adj_x
+          : static_cast<TIDE_DTYPE>(0);
   TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
   lambda_ey[i] = ca_val * lambda_ey[i];
-
-  RawEyZAcc raw_eyz{cq, lambda_hx, m_lambda_ey_z, ayh, kyh, (int)ny,
-                    (int)pml_y0, (int)pml_y1, cq_batched};
-  RawEyXAcc raw_eyx{cq, lambda_hz, m_lambda_ey_x, axh, kxh, (int)nx,
-                    (int)pml_x0, (int)pml_x1, cq_batched};
+  FusedRawEyZAcc raw_eyz{cq, lambda_hx, m_lambda_ey_z, ayh, byh, kyh,
+                        (int)ny, (int)pml_y0, pml_y1h, cq_batched};
+  FusedRawEyXAcc raw_eyx{cq, lambda_hz, m_lambda_ey_x, axh, bxh, kxh,
+                        (int)nx, (int)pml_x0, pml_x1h, cq_batched};
   ::tide::ConstAccessor ones;
-
-  // Scatter transpose of the H-update: lambda_ey[j] +=
-  //   diff_yh1_ADJ(raw_eyz)[j] + diff_xh1_ADJ(raw_eyx)[j]
   lambda_ey[i] += ::tide::DiffAdjoint<TIDE_STENCIL>::diff_yh1_adj(
                       raw_eyz, ones, shot_idx * shot_numel, (int)y, (int)x,
                       (int)nx, static_cast<TIDE_DTYPE>(rdy)) +
                   ::tide::DiffAdjoint<TIDE_STENCIL>::diff_xh1_adj(
                       raw_eyx, ones, shot_idx * shot_numel, (int)y, (int)x,
                       (int)nx, static_cast<TIDE_DTYPE>(rdx));
+}
+
+__global__ __launch_bounds__(256) void backward_kernel_h_adj_fused(
+    TIDE_DTYPE const *ca, TIDE_DTYPE const *cq, TIDE_DTYPE const *lambda_hx,
+    TIDE_DTYPE const *lambda_hz, TIDE_DTYPE *lambda_ey,
+    TIDE_DTYPE const *m_lambda_ey_x, TIDE_DTYPE const *m_lambda_ey_z,
+    TIDE_DTYPE *m_lambda_ey_x_next, TIDE_DTYPE *m_lambda_ey_z_next,
+    TIDE_DTYPE const *ayh, TIDE_DTYPE const *byh, TIDE_DTYPE const *axh,
+    TIDE_DTYPE const *bxh, TIDE_DTYPE const *kyh, TIDE_DTYPE const *kxh) {
+  int64_t const x =
+      (int64_t)blockIdx.x * blockDim.x + (int64_t)threadIdx.x;
+  int64_t const y =
+      (int64_t)blockIdx.y * blockDim.y + (int64_t)threadIdx.y;
+  int64_t const shot_idx =
+      (int64_t)blockIdx.z * blockDim.z + (int64_t)threadIdx.z;
+  if (shot_idx >= n_shots || y < kFdPad || x < kFdPad ||
+      y >= ny - kFdPad + 1 || x >= nx - kFdPad + 1) {
+    return;
+  }
+  apply_backward_h_adj_cell(
+      ca, cq, lambda_hx, lambda_hz, lambda_ey, m_lambda_ey_x,
+      m_lambda_ey_z, m_lambda_ey_x_next, m_lambda_ey_z_next, ayh, byh, axh,
+      bxh, kyh, kxh, shot_idx, y, x);
+}
+
+__global__ __launch_bounds__(256) void backward_kernel_h_adj_fused_dual(
+    TIDE_DTYPE const *ca, TIDE_DTYPE const *cq, TIDE_DTYPE const *lambda_hx,
+    TIDE_DTYPE const *lambda_hz, TIDE_DTYPE *lambda_ey,
+    TIDE_DTYPE const *m_lambda_ey_x, TIDE_DTYPE const *m_lambda_ey_z,
+    TIDE_DTYPE *m_lambda_ey_x_next, TIDE_DTYPE *m_lambda_ey_z_next,
+    TIDE_DTYPE const *eta_hx, TIDE_DTYPE const *eta_hz, TIDE_DTYPE *eta_ey,
+    TIDE_DTYPE const *m_eta_ey_x, TIDE_DTYPE const *m_eta_ey_z,
+    TIDE_DTYPE *m_eta_ey_x_next, TIDE_DTYPE *m_eta_ey_z_next,
+    TIDE_DTYPE const *ayh, TIDE_DTYPE const *byh, TIDE_DTYPE const *axh,
+    TIDE_DTYPE const *bxh, TIDE_DTYPE const *kyh, TIDE_DTYPE const *kxh) {
+  int64_t const x =
+      (int64_t)blockIdx.x * blockDim.x + (int64_t)threadIdx.x;
+  int64_t const y =
+      (int64_t)blockIdx.y * blockDim.y + (int64_t)threadIdx.y;
+  int64_t const shot_idx =
+      (int64_t)blockIdx.z * blockDim.z + (int64_t)threadIdx.z;
+  if (shot_idx >= n_shots || y < kFdPad || x < kFdPad ||
+      y >= ny - kFdPad + 1 || x >= nx - kFdPad + 1) {
+    return;
+  }
+  apply_backward_h_adj_cell(
+      ca, cq, lambda_hx, lambda_hz, lambda_ey, m_lambda_ey_x,
+      m_lambda_ey_z, m_lambda_ey_x_next, m_lambda_ey_z_next, ayh, byh, axh,
+      bxh, kyh, kxh, shot_idx, y, x);
+  apply_backward_h_adj_cell(
+      ca, cq, eta_hx, eta_hz, eta_ey, m_eta_ey_x, m_eta_ey_z,
+      m_eta_ey_x_next, m_eta_ey_z_next, ayh, byh, axh, bxh, kyh, kxh,
+      shot_idx, y, x);
+}
+
+static inline void swap_adjoint_memory(TIDE_DTYPE *&current,
+                                       TIDE_DTYPE *&next) {
+  TIDE_DTYPE *const tmp = current;
+  current = next;
+  next = tmp;
+}
+
+static inline void launch_backward_step_fused(
+    TMForwardLaunchConfig const &launch_cfg, cudaStream_t const stream,
+    TIDE_DTYPE const *const ca, TIDE_DTYPE const *const cb,
+    TIDE_DTYPE const *const cq, TIDE_DTYPE *const lambda_ey,
+    TIDE_DTYPE *const lambda_hx, TIDE_DTYPE *const lambda_hz,
+    TIDE_DTYPE *&m_ey_x, TIDE_DTYPE *&m_ey_z, TIDE_DTYPE *&m_hx_z,
+    TIDE_DTYPE *&m_hz_x, TIDE_DTYPE *&next_m_ey_x,
+    TIDE_DTYPE *&next_m_ey_z, TIDE_DTYPE *&next_m_hx_z,
+    TIDE_DTYPE *&next_m_hz_x, TIDE_DTYPE const *const ay,
+    TIDE_DTYPE const *const by, TIDE_DTYPE const *const ayh,
+    TIDE_DTYPE const *const byh, TIDE_DTYPE const *const ax,
+    TIDE_DTYPE const *const bx, TIDE_DTYPE const *const axh,
+    TIDE_DTYPE const *const bxh, TIDE_DTYPE const *const ky,
+    TIDE_DTYPE const *const kyh, TIDE_DTYPE const *const kx,
+    TIDE_DTYPE const *const kxh) {
+  backward_kernel_e_adj_fused<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                                stream>>>(
+      cb, lambda_ey, lambda_hx, lambda_hz, m_hx_z, m_hz_x, next_m_hx_z,
+      next_m_hz_x, ay, by, ax, bx, ky, kx);
+  swap_adjoint_memory(m_hx_z, next_m_hx_z);
+  swap_adjoint_memory(m_hz_x, next_m_hz_x);
+  backward_kernel_h_adj_fused<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
+                                stream>>>(
+      ca, cq, lambda_hx, lambda_hz, lambda_ey, m_ey_x, m_ey_z, next_m_ey_x,
+      next_m_ey_z, ayh, byh, axh, bxh, kyh, kxh);
+  swap_adjoint_memory(m_ey_x, next_m_ey_x);
+  swap_adjoint_memory(m_ey_z, next_m_ey_z);
+}
+
+static inline void copy_adjoint_memory_if_needed(
+    cudaStream_t const stream, size_t const bytes,
+    TIDE_DTYPE *const original_m_ey_x, TIDE_DTYPE *const original_m_ey_z,
+    TIDE_DTYPE *const original_m_hx_z, TIDE_DTYPE *const original_m_hz_x,
+    TIDE_DTYPE const *const current_m_ey_x,
+    TIDE_DTYPE const *const current_m_ey_z,
+    TIDE_DTYPE const *const current_m_hx_z,
+    TIDE_DTYPE const *const current_m_hz_x) {
+  TIDE_DTYPE *const originals[] = {original_m_ey_x, original_m_ey_z,
+                                   original_m_hx_z, original_m_hz_x};
+  TIDE_DTYPE const *const currents[] = {current_m_ey_x, current_m_ey_z,
+                                        current_m_hx_z, current_m_hz_x};
+  for (int i = 0; i < 4; ++i) {
+    if (originals[i] != currents[i]) {
+      tide::cuda_check_or_abort(
+          cudaMemcpyAsync(originals[i], currents[i], bytes,
+                          cudaMemcpyDeviceToDevice, stream),
+          __FILE__, __LINE__);
+    }
+  }
 }
 
 } // namespace
@@ -2313,7 +2408,8 @@ extern "C" void FUNC(background_vjp_reuse)(
     TIDE_DTYPE *const lambda_ey, TIDE_DTYPE *const lambda_hx,
     TIDE_DTYPE *const lambda_hz, TIDE_DTYPE *const m_lambda_ey_x,
     TIDE_DTYPE *const m_lambda_ey_z, TIDE_DTYPE *const m_lambda_hx_z,
-    TIDE_DTYPE *const m_lambda_hz_x, void *const ey_store_1,
+    TIDE_DTYPE *const m_lambda_hz_x,
+    TIDE_DTYPE *const adjoint_memory_scratch, void *const ey_store_1,
     void *const ey_store_3, char const *const *const ey_filenames,
     void *const curl_store_1, void *const curl_store_3,
     char const *const *const curl_filenames, TIDE_DTYPE *const grad_f,
@@ -2375,6 +2471,21 @@ extern "C" void FUNC(background_vjp_reuse)(
 
   TMForwardLaunchConfig const launch_cfg = make_tm_forward_launch_config(
       n_shots_h, ny_h, nx_h, n_sources_per_shot_h, n_receivers_per_shot_h);
+  size_t const adjoint_state_numel = (size_t)n_shots_h * shot_numel_h;
+  size_t const adjoint_state_bytes =
+      adjoint_state_numel * sizeof(TIDE_DTYPE);
+  TIDE_DTYPE *current_m_ey_x = m_lambda_ey_x;
+  TIDE_DTYPE *current_m_ey_z = m_lambda_ey_z;
+  TIDE_DTYPE *current_m_hx_z = m_lambda_hx_z;
+  TIDE_DTYPE *current_m_hz_x = m_lambda_hz_x;
+  TIDE_DTYPE *next_m_ey_x = adjoint_memory_scratch;
+  TIDE_DTYPE *next_m_ey_z = adjoint_memory_scratch + adjoint_state_numel;
+  TIDE_DTYPE *next_m_hx_z = adjoint_memory_scratch + 2 * adjoint_state_numel;
+  TIDE_DTYPE *next_m_hz_x = adjoint_memory_scratch + 3 * adjoint_state_numel;
+  tide::cuda_check_or_abort(
+      cudaMemsetAsync(adjoint_memory_scratch, 0, 4 * adjoint_state_bytes,
+                      stream_compute),
+      __FILE__, __LINE__);
 
   void *async_disk_ey = nullptr;
   void *async_disk_curl = nullptr;
@@ -2511,20 +2622,11 @@ extern "C" void FUNC(background_vjp_reuse)(
       }
     }
 
-    backward_kernel_e_mem_adj<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                               stream_compute>>>(
-        cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x, by, bx);
-    backward_kernel_e_adj<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                            stream_compute>>>(
-        cb, lambda_ey, lambda_hx, lambda_hz, m_lambda_hx_z, m_lambda_hz_x, ay,
-        ax, ky, kx);
-    backward_kernel_h_mem_adj<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                                stream_compute>>>(
-        cq, lambda_hx, lambda_hz, m_lambda_ey_x, m_lambda_ey_z, byh, bxh);
-    backward_kernel_h_adj<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                            stream_compute>>>(
-        ca, cq, lambda_hx, lambda_hz, lambda_ey, m_lambda_ey_x,
-        m_lambda_ey_z, ayh, axh, kyh, kxh);
+    launch_backward_step_fused(
+        launch_cfg, stream_compute, ca, cb, cq, lambda_ey, lambda_hx,
+        lambda_hz, current_m_ey_x, current_m_ey_z, current_m_hx_z,
+        current_m_hz_x, next_m_ey_x, next_m_ey_z, next_m_hx_z, next_m_hz_x,
+        ay, by, ayh, byh, ax, bx, axh, bxh, ky, kyh, kx, kxh);
 
     if (n_receivers_per_shot_h > 0) {
       add_adjoint_sources_ey<<<launch_cfg.dimGridReceivers,
@@ -2605,6 +2707,10 @@ extern "C" void FUNC(background_vjp_reuse)(
     }
 
   }
+  copy_adjoint_memory_if_needed(
+      stream_compute, adjoint_state_bytes, m_lambda_ey_x, m_lambda_ey_z,
+      m_lambda_hx_z, m_lambda_hz_x, current_m_ey_x, current_m_ey_z,
+      current_m_hx_z, current_m_hz_x);
   storage_async_disk_close(async_disk_ey);
   storage_async_disk_close(async_disk_curl);
 
@@ -2636,7 +2742,8 @@ extern "C" void FUNC(backward)(
     TIDE_DTYPE *const lambda_ey, TIDE_DTYPE *const lambda_hx,
     TIDE_DTYPE *const lambda_hz, TIDE_DTYPE *const m_lambda_ey_x,
     TIDE_DTYPE *const m_lambda_ey_z, TIDE_DTYPE *const m_lambda_hx_z,
-    TIDE_DTYPE *const m_lambda_hz_x, void *const ey_store_1,
+    TIDE_DTYPE *const m_lambda_hz_x,
+    TIDE_DTYPE *const adjoint_memory_scratch, void *const ey_store_1,
     void *const ey_store_3, char const *const *const ey_filenames,
     void *const curl_store_1, void *const curl_store_3,
     char const *const *const curl_filenames, TIDE_DTYPE *const grad_f,
@@ -2663,9 +2770,10 @@ extern "C" void FUNC(backward)(
     void *const storage_stream_handle) {
   FUNC(background_vjp_reuse)(
       ca, cb, cq, grad_r, lambda_ey, lambda_hx, lambda_hz, m_lambda_ey_x,
-      m_lambda_ey_z, m_lambda_hx_z, m_lambda_hz_x, ey_store_1, ey_store_3,
-      ey_filenames, curl_store_1, curl_store_3, curl_filenames, grad_f, grad_ca,
-      grad_cb, grad_ca_shot, grad_cb_shot, ay, by, ayh, byh, ax, bx, axh, bxh,
+      m_lambda_ey_z, m_lambda_hx_z, m_lambda_hz_x, adjoint_memory_scratch,
+      ey_store_1, ey_store_3, ey_filenames, curl_store_1, curl_store_3,
+      curl_filenames, grad_f, grad_ca, grad_cb, grad_ca_shot, grad_cb_shot, ay,
+      by, ayh, byh, ax, bx, axh, bxh,
       ky, kyh, kx, kxh, sources_i, receivers_i, rdy_h, rdx_h, dt_h, nt,
       n_shots_h, ny_h, nx_h, n_sources_per_shot_h, n_receivers_per_shot_h,
       step_ratio_h, storage_mode_h, storage_format_h, shot_bytes_uncomp_h,
@@ -2698,6 +2806,7 @@ extern "C" void FUNC(born_backward_bggrad)(
     TIDE_DTYPE *const work_eta_z, TIDE_DTYPE *const grad_ca_shot,
     TIDE_DTYPE *const grad_cb_shot, TIDE_DTYPE *const grad_dca_shot,
     TIDE_DTYPE *const grad_dcb_shot,
+    TIDE_DTYPE *const adjoint_memory_scratch,
     TIDE_DTYPE const *const ay, TIDE_DTYPE const *const by,
     TIDE_DTYPE const *const ayh, TIDE_DTYPE const *const byh,
     TIDE_DTYPE const *const ax, TIDE_DTYPE const *const bx,
@@ -2778,6 +2887,33 @@ extern "C" void FUNC(born_backward_bggrad)(
 
   TMForwardLaunchConfig const launch_cfg = make_tm_forward_launch_config(
       n_shots_h, ny_h, nx_h, n_sources_per_shot_h, n_receivers_per_shot_h);
+  size_t const adjoint_state_numel = (size_t)store_size;
+  size_t const adjoint_state_bytes =
+      adjoint_state_numel * sizeof(TIDE_DTYPE);
+  TIDE_DTYPE *current_m_ey_x = m_lambda_ey_x;
+  TIDE_DTYPE *current_m_ey_z = m_lambda_ey_z;
+  TIDE_DTYPE *current_m_hx_z = m_lambda_hx_z;
+  TIDE_DTYPE *current_m_hz_x = m_lambda_hz_x;
+  TIDE_DTYPE *next_m_ey_x = adjoint_memory_scratch;
+  TIDE_DTYPE *next_m_ey_z = adjoint_memory_scratch + adjoint_state_numel;
+  TIDE_DTYPE *next_m_hx_z = adjoint_memory_scratch + 2 * adjoint_state_numel;
+  TIDE_DTYPE *next_m_hz_x = adjoint_memory_scratch + 3 * adjoint_state_numel;
+  TIDE_DTYPE *current_eta_m_ey_x = m_eta_ey_x;
+  TIDE_DTYPE *current_eta_m_ey_z = m_eta_ey_z;
+  TIDE_DTYPE *current_eta_m_hx_z = m_eta_hx_z;
+  TIDE_DTYPE *current_eta_m_hz_x = m_eta_hz_x;
+  TIDE_DTYPE *next_eta_m_ey_x =
+      adjoint_memory_scratch + 4 * adjoint_state_numel;
+  TIDE_DTYPE *next_eta_m_ey_z =
+      adjoint_memory_scratch + 5 * adjoint_state_numel;
+  TIDE_DTYPE *next_eta_m_hx_z =
+      adjoint_memory_scratch + 6 * adjoint_state_numel;
+  TIDE_DTYPE *next_eta_m_hz_x =
+      adjoint_memory_scratch + 7 * adjoint_state_numel;
+  tide::cuda_check_or_abort(
+      cudaMemsetAsync(adjoint_memory_scratch, 0, 8 * adjoint_state_bytes,
+                      stream_compute),
+      __FILE__, __LINE__);
   dim3 const dimBlock = launch_cfg.dimBlock;
   int64_t interior_x_begin = pml_x0_h + kFdPad;
   int64_t interior_x_end = pml_x1_h - kFdPad;
@@ -2871,35 +3007,36 @@ extern "C" void FUNC(born_backward_bggrad)(
             <<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0, stream_compute>>>(
                 lambda_store_t, lambda_ey, background_n_shots_h);
       }
+      launch_backward_step_fused(
+          launch_cfg, stream_compute, ca, cb, cq, eta_ey, eta_hx, eta_hz,
+          current_eta_m_ey_x, current_eta_m_ey_z, current_eta_m_hx_z,
+          current_eta_m_hz_x, next_eta_m_ey_x, next_eta_m_ey_z,
+          next_eta_m_hx_z, next_eta_m_hz_x, ay, by, ayh, byh, ax, bx, axh,
+          bxh, ky, kyh, kx, kxh);
     } else {
-      backward_kernel_e_mem_adj<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                                  stream_compute>>>(
-          cb, lambda_ey, m_lambda_hx_z, m_lambda_hz_x, by, bx);
-      backward_kernel_e_adj<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                              stream_compute>>>(
-          cb, lambda_ey, lambda_hx, lambda_hz, m_lambda_hx_z, m_lambda_hz_x,
-          ay, ax, ky, kx);
-      backward_kernel_h_mem_adj<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                                  stream_compute>>>(
-          cq, lambda_hx, lambda_hz, m_lambda_ey_x, m_lambda_ey_z, byh, bxh);
-      backward_kernel_h_adj<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                              stream_compute>>>(
-          ca, cq, lambda_hx, lambda_hz, lambda_ey, m_lambda_ey_x,
-          m_lambda_ey_z, ayh, axh, kyh, kxh);
+      backward_kernel_e_adj_fused_dual<<<launch_cfg.dimGrid,
+                                          launch_cfg.dimBlock, 0,
+                                          stream_compute>>>(
+          cb, lambda_ey, lambda_hx, lambda_hz, current_m_hx_z,
+          current_m_hz_x, next_m_hx_z, next_m_hz_x, eta_ey, eta_hx, eta_hz,
+          current_eta_m_hx_z, current_eta_m_hz_x, next_eta_m_hx_z,
+          next_eta_m_hz_x, ay, by, ax, bx, ky, kx);
+      swap_adjoint_memory(current_m_hx_z, next_m_hx_z);
+      swap_adjoint_memory(current_m_hz_x, next_m_hz_x);
+      swap_adjoint_memory(current_eta_m_hx_z, next_eta_m_hx_z);
+      swap_adjoint_memory(current_eta_m_hz_x, next_eta_m_hz_x);
+      backward_kernel_h_adj_fused_dual<<<launch_cfg.dimGrid,
+                                          launch_cfg.dimBlock, 0,
+                                          stream_compute>>>(
+          ca, cq, lambda_hx, lambda_hz, lambda_ey, current_m_ey_x,
+          current_m_ey_z, next_m_ey_x, next_m_ey_z, eta_hx, eta_hz, eta_ey,
+          current_eta_m_ey_x, current_eta_m_ey_z, next_eta_m_ey_x,
+          next_eta_m_ey_z, ayh, byh, axh, bxh, kyh, kxh);
+      swap_adjoint_memory(current_m_ey_x, next_m_ey_x);
+      swap_adjoint_memory(current_m_ey_z, next_m_ey_z);
+      swap_adjoint_memory(current_eta_m_ey_x, next_eta_m_ey_x);
+      swap_adjoint_memory(current_eta_m_ey_z, next_eta_m_ey_z);
     }
-    backward_kernel_e_mem_adj<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                                stream_compute>>>(
-        cb, eta_ey, m_eta_hx_z, m_eta_hz_x, by, bx);
-    backward_kernel_e_adj<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                            stream_compute>>>(
-        cb, eta_ey, eta_hx, eta_hz, m_eta_hx_z, m_eta_hz_x, ay, ax, ky, kx);
-    backward_kernel_h_mem_adj<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                                stream_compute>>>(
-        cq, eta_hx, eta_hz, m_eta_ey_x, m_eta_ey_z, byh, bxh);
-    backward_kernel_h_adj<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
-                            stream_compute>>>(
-        ca, cq, eta_hx, eta_hz, eta_ey, m_eta_ey_x, m_eta_ey_z, ayh, axh, kyh,
-        kxh);
     add_inplace_and_zero<<<launch_cfg.dimGrid, launch_cfg.dimBlock, 0,
                            stream_compute>>>(eta_ey, eta_source_old);
 
@@ -3028,6 +3165,16 @@ extern "C" void FUNC(born_backward_bggrad)(
     }
   }
 
+  if (!reuse_background_adjoint) {
+    copy_adjoint_memory_if_needed(
+        stream_compute, adjoint_state_bytes, m_lambda_ey_x, m_lambda_ey_z,
+        m_lambda_hx_z, m_lambda_hz_x, current_m_ey_x, current_m_ey_z,
+        current_m_hx_z, current_m_hz_x);
+  }
+  copy_adjoint_memory_if_needed(
+      stream_compute, adjoint_state_bytes, m_eta_ey_x, m_eta_ey_z,
+      m_eta_hx_z, m_eta_hz_x, current_eta_m_ey_x, current_eta_m_ey_z,
+      current_eta_m_hx_z, current_eta_m_hz_x);
   if (!ca_batched_h) {
     combine_grad<<<dimGrid_combine, dimBlock_combine, 0, stream_compute>>>(
         grad_ca, grad_ca_shot);
