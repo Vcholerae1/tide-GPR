@@ -36,7 +36,7 @@ def test_compile_plan_normalizes_legacy_options() -> None:
     )
 
     assert plan.dimension is Dimension.TM2D
-    assert plan.backend is BackendPreference.PYTHON
+    assert plan.backend is BackendPreference.REFERENCE
     assert plan.compute_mode is ComputeMode.NATIVE
     assert plan.storage.mode.value == "device"
     assert plan.storage.chunk_steps == 3
@@ -53,8 +53,8 @@ def test_compile_plan_detects_batched_3d_models() -> None:
     ("value", "expected"),
     [
         (False, BackendPreference.AUTO),
-        (True, BackendPreference.PYTHON),
-        ("compile", BackendPreference.PYTHON),
+        (True, BackendPreference.REFERENCE),
+        ("compile", BackendPreference.REFERENCE),
         ("native", BackendPreference.NATIVE),
     ],
 )
@@ -72,7 +72,7 @@ def test_select_backend_has_explicit_fallback_policy() -> None:
         fallback=FallbackPolicy.REFERENCE.value,
     )
     decision = select_backend(plan, native_available=False)
-    assert decision.selected is BackendPreference.PYTHON
+    assert decision.selected is BackendPreference.REFERENCE
     assert decision.fallback
 
     strict_plan = compile_simulation_plan(
@@ -133,7 +133,7 @@ def test_select_backend_rejects_unsupported_gradient_targets() -> None:
     epsilon = torch.ones(4, 4)
 
     strict_plan = compile_simulation_plan(
-        operation="born",
+        operation="jvp",
         dimension="tm2d",
         epsilon=epsilon,
         gradient_targets=["mu"],
@@ -145,18 +145,18 @@ def test_select_backend_rejects_unsupported_gradient_targets() -> None:
         select_backend(strict_plan, native_available=True)
 
     reference_plan = compile_simulation_plan(
-        operation="born",
+        operation="jvp",
         dimension="tm2d",
         epsilon=epsilon,
         gradient_targets=["mu"],
         fallback=FallbackPolicy.REFERENCE.value,
     )
     decision = select_backend(reference_plan, native_available=True)
-    assert decision.selected is BackendPreference.PYTHON
+    assert decision.selected is BackendPreference.REFERENCE
     assert decision.fallback
 
     state_plan = compile_simulation_plan(
-        operation="born",
+        operation="jvp",
         dimension="em3d",
         epsilon=torch.ones(3, 4, 4, 4),
         gradient_targets=["state"],
@@ -217,7 +217,7 @@ def test_select_backend_rejects_perturbation_gradients_without_storage() -> None
     epsilon = torch.ones(4, 4)
 
     strict_plan = compile_simulation_plan(
-        operation="born",
+        operation="jvp",
         dimension="tm2d",
         epsilon=epsilon,
         gradient_targets=["perturbation"],
@@ -230,7 +230,7 @@ def test_select_backend_rejects_perturbation_gradients_without_storage() -> None
         select_backend(strict_plan, native_available=True)
 
     reference_plan = compile_simulation_plan(
-        operation="born",
+        operation="jvp",
         dimension="tm2d",
         epsilon=epsilon,
         gradient_targets=["perturbation"],
@@ -238,7 +238,7 @@ def test_select_backend_rejects_perturbation_gradients_without_storage() -> None
         fallback=FallbackPolicy.REFERENCE.value,
     )
     decision = select_backend(reference_plan, native_available=True)
-    assert decision.selected is BackendPreference.PYTHON
+    assert decision.selected is BackendPreference.REFERENCE
     assert decision.fallback
 
 
@@ -265,7 +265,7 @@ def test_select_backend_rejects_dispersion_gradients_on_native() -> None:
         fallback=FallbackPolicy.REFERENCE.value,
     )
     decision = select_backend(reference_plan, native_available=True)
-    assert decision.selected is BackendPreference.PYTHON
+    assert decision.selected is BackendPreference.REFERENCE
     assert decision.fallback
 
 
@@ -301,7 +301,7 @@ def test_maxwelltm_gradient_fallback_runs_python_end_to_end() -> None:
     source_location = torch.tensor([[[4, 4]]], dtype=torch.long)
     receiver_location = torch.tensor([[[2, 2]]], dtype=torch.long)
 
-    out = tide.maxwelltm(
+    out = tide.maxwell._kernel_api.maxwelltm(
         epsilon,
         sigma,
         mu,
@@ -331,7 +331,7 @@ def test_debye_gradient_fallback_honors_error_policy() -> None:
     with pytest.raises(
         (NotImplementedError, RuntimeError), match="gradients with dispersion|Debye"
     ):
-        tide.maxwelltm(
+        tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -346,24 +346,24 @@ def test_debye_gradient_fallback_honors_error_policy() -> None:
         )
 
 
-def test_hvp_capability_rejection_comes_from_backend_decision() -> None:
+def test_second_vjp_capability_rejection_comes_from_backend_decision() -> None:
     epsilon = torch.ones(4, 4)
     plan = compile_simulation_plan(
-        operation="hvp",
+        operation="second_vjp",
         dimension="tm2d",
         epsilon=epsilon,
         python_backend=True,
         model_gradient_sampling_interval=2,
     )
 
-    assert plan.operation is Operation.HVP
-    with pytest.raises(NotImplementedError, match="Python TM2D HVP currently"):
+    assert plan.operation is Operation.SECOND_VJP
+    with pytest.raises(NotImplementedError, match="Python TM2D second_vjp currently"):
         select_backend(plan, native_available=True)
 
 
 def test_linearization_decision_owns_background_reuse_capability() -> None:
     cpu_plan = compile_simulation_plan(
-        operation="linearization",
+        operation="jvp",
         dimension="tm2d",
         epsilon=torch.ones(4, 4),
         storage_mode="device",
@@ -429,64 +429,36 @@ def _capability_cells(
 
 
 def test_capability_matrix_matches_documented_cells() -> None:
-    python = backend_capabilities(BackendPreference.PYTHON)
+    reference = backend_capabilities(BackendPreference.REFERENCE)
     native = backend_capabilities(BackendPreference.NATIVE)
 
-    # The documented table in docs/dev/feature-matrix.md. Every cell must be
-    # reachable by an implementation; changing this test without updating the
-    # table (and vice versa) is a contract violation.
     all_targets = frozenset(GradientTarget)
     model_targets = frozenset({GradientTarget.EPSILON, GradientTarget.SIGMA})
     forward_targets = model_targets | frozenset({GradientTarget.SOURCE})
-    born_targets = model_targets | frozenset({GradientTarget.PERTURBATION})
+    jvp_targets = model_targets | frozenset({GradientTarget.PERTURBATION})
     five_modes = ("auto", "cpu", "device", "disk", "none")
 
-    assert _capability_cells(python) == {
+    assert _capability_cells(reference) == {
+        (Dimension.TM2D, ("forward", "vjp"), five_modes, all_targets, True),
+        (Dimension.TM2D, ("jvp",), five_modes, all_targets, False),
         (
             Dimension.TM2D,
-            ("forward",),
-            five_modes,
-            all_targets,
-            True,
-        ),
-        (
-            Dimension.TM2D,
-            ("born",),
-            five_modes,
-            all_targets,
-            False,
-        ),
-        (
-            Dimension.TM2D,
-            ("hvp",),
+            ("second_vjp",),
             ("cpu", "device", "disk"),
             all_targets,
             False,
         ),
-        (
-            Dimension.TM2D,
-            ("linearization",),
-            ("cpu", "device", "disk"),
-            all_targets,
-            False,
-        ),
+        (Dimension.EM3D, ("forward", "vjp"), five_modes, all_targets, True),
         (
             Dimension.EM3D,
-            ("forward",),
-            five_modes,
-            all_targets,
-            True,
-        ),
-        (
-            Dimension.EM3D,
-            ("born",),
+            ("jvp",),
             ("device", "none"),
             all_targets,
             False,
         ),
         (
             Dimension.EM3D,
-            ("hvp",),
+            ("second_vjp",),
             ("device",),
             all_targets,
             False,
@@ -495,60 +467,44 @@ def test_capability_matrix_matches_documented_cells() -> None:
     assert _capability_cells(native) == {
         (
             Dimension.TM2D,
-            ("forward",),
+            ("forward", "vjp"),
             five_modes,
             forward_targets,
             True,
         ),
+        (Dimension.TM2D, ("jvp",), five_modes, jvp_targets, False),
         (
             Dimension.TM2D,
-            ("born",),
-            five_modes,
-            born_targets,
-            False,
-        ),
-        (
-            Dimension.TM2D,
-            ("hvp",),
-            ("cpu", "device", "disk"),
-            model_targets,
-            False,
-        ),
-        (
-            Dimension.TM2D,
-            ("linearization",),
+            ("second_vjp",),
             ("cpu", "device", "disk"),
             model_targets,
             False,
         ),
         (
             Dimension.EM3D,
-            ("forward",),
+            ("forward", "vjp"),
             five_modes,
             forward_targets,
             True,
         ),
         (
             Dimension.EM3D,
-            ("born",),
+            ("jvp",),
             ("device", "none"),
-            born_targets,
+            jvp_targets,
             False,
         ),
         (
             Dimension.EM3D,
-            ("hvp",),
+            ("second_vjp",),
             ("device",),
             model_targets,
             False,
         ),
     }
 
-    for capabilities in (python, native):
-        assert {row.dimension for row in capabilities.matrix} == {
-            Dimension.TM2D,
-            Dimension.EM3D,
-        }
+    for capabilities in (reference, native):
+        assert {row.dimension for row in capabilities.matrix} == set(Dimension)
         assert all(isinstance(row, BackendCapability) for row in capabilities.matrix)
         assert all(
             row.devices == frozenset({"cpu", "cuda"})
@@ -564,23 +520,20 @@ def test_capability_matrix_matches_documented_cells() -> None:
         )
 
 
-def test_em3d_linearization_is_not_in_the_capability_matrix() -> None:
+def test_em3d_jvp_is_in_the_capability_matrix() -> None:
     plan = compile_simulation_plan(
-        operation="linearization",
+        operation="jvp",
         dimension="em3d",
         epsilon=torch.ones(3, 4, 4, 4),
         storage_mode="device",
     )
-    with pytest.raises(NotImplementedError, match="not in the capability matrix"):
-        select_backend(plan, native_available=True)
-    with pytest.raises(NotImplementedError, match="not in the capability matrix"):
-        select_backend(plan, native_available=False)
+    assert select_backend(plan, native_available=True).selected is BackendPreference.NATIVE
 
 
 def test_native_em3d_born_rejects_host_backed_storage() -> None:
     for storage_mode in ("cpu", "disk"):
         plan = compile_simulation_plan(
-            operation="born",
+            operation="jvp",
             dimension="em3d",
             epsilon=torch.ones(3, 4, 4, 4),
             storage_mode=storage_mode,
@@ -593,7 +546,7 @@ def test_em3d_born_auto_storage_is_rejected_by_the_matrix() -> None:
     # The public born3d API only accepts storage_mode="device" or "none", so
     # "auto" is not reachable by any row and is rejected outright.
     plan = compile_simulation_plan(
-        operation="born",
+        operation="jvp",
         dimension="em3d",
         epsilon=torch.ones(3, 4, 4, 4),
         storage_mode="auto",
@@ -607,7 +560,7 @@ def test_em3d_born_auto_storage_is_rejected_by_the_matrix() -> None:
 def test_native_tm2d_full_hvp_requires_device_storage() -> None:
     for storage_mode in ("cpu", "disk"):
         plan = compile_simulation_plan(
-            operation="hvp",
+            operation="second_vjp",
             dimension="tm2d",
             epsilon=torch.ones(4, 4),
             hessian_mode="full",
@@ -616,14 +569,14 @@ def test_native_tm2d_full_hvp_requires_device_storage() -> None:
         )
         with pytest.raises(
             NotImplementedError,
-            match="full HVP currently requires storage_mode='device'",
+            match="full second_vjp currently requires storage_mode='device'",
         ):
             select_backend(plan, native_available=True)
 
 
 def test_callbacks_are_rejected_for_non_forward_operations() -> None:
     plan = compile_simulation_plan(
-        operation="born",
+        operation="jvp",
         dimension="tm2d",
         epsilon=torch.ones(4, 4),
         has_callbacks=True,

@@ -81,13 +81,9 @@ class BackendCapabilities:
     def unsupported_reason(self, plan: SimulationPlan) -> str | None:
         """Return the first capability mismatch in user-facing terms."""
 
-        backend_name = "Python" if self.name is BackendPreference.PYTHON else "Native"
+        backend_name = "Python" if self.name is BackendPreference.REFERENCE else "Native"
         dimension_name = "TM2D" if plan.dimension is Dimension.TM2D else "3D"
-        operation_name = (
-            "HVP"
-            if plan.operation is Operation.HVP
-            else plan.operation.value
-        )
+        operation_name = plan.operation.value
         capability = self.capability_for(plan)
         if capability is None:
             return f"{backend_name} {dimension_name} is not in the capability matrix."
@@ -160,8 +156,8 @@ class BackendCapabilities:
         if plan.has_callbacks and not capability.callbacks:
             return f"{backend_name} backend does not support callbacks."
         if (
-            plan.operation in {Operation.HVP, Operation.LINEARIZATION}
-            and self.name is BackendPreference.PYTHON
+            plan.operation in {Operation.SECOND_VJP, Operation.JVP}
+            and self.name is BackendPreference.REFERENCE
             and plan.model_gradient_sampling_interval > 1
         ):
             return (
@@ -169,7 +165,7 @@ class BackendCapabilities:
                 "model_gradient_sampling_interval in {0, 1}."
             )
         if (
-            plan.operation in {Operation.HVP, Operation.LINEARIZATION}
+            plan.operation in {Operation.SECOND_VJP, Operation.JVP}
             and self.name is BackendPreference.NATIVE
             and plan.dimension is Dimension.TM2D
             and plan.device.type == "cpu"
@@ -180,7 +176,7 @@ class BackendCapabilities:
                 "model_gradient_sampling_interval in {0, 1}."
             )
         if (
-            plan.operation in {Operation.HVP, Operation.LINEARIZATION}
+            plan.operation in {Operation.SECOND_VJP, Operation.JVP}
             and plan.hessian_mode == "full"
             and self.name is BackendPreference.NATIVE
             and plan.dimension is Dimension.TM2D
@@ -201,7 +197,7 @@ class BackendCapabilities:
             capability is not None
             and capability.reusable_background
             and self.reusable_background
-            and plan.operation is Operation.LINEARIZATION
+            and plan.operation is Operation.JVP
             and plan.dimension is Dimension.TM2D
             and plan.device.type == "cuda"
             and plan.storage.mode.value == "device"
@@ -227,28 +223,22 @@ class BackendDecision:
 def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
     """Return the immutable capability matrix for a backend.
 
-    Rows are the dispatch contract, so each cell must be reachable by an
-    implementation: no operation, storage mode, or callback flag may be
-    declared here unless a solver actually executes it. Linearization is a
-    TM2D-only feature, native EM3D Born snapshots are device-only, and
-    callbacks are wired only on the forward paths.
+    Rows are the dispatch contract: every advertised derivative primitive,
+    storage mode, and target must have an executable adapter.
     """
     all_targets = frozenset(GradientTarget)
-    if name is BackendPreference.PYTHON:
-        # Storage cells mirror what the public API can actually express for
-        # each operation; the Python reference ignores storage, so every
-        # reachable mode is executable.
+    if name is BackendPreference.REFERENCE:
         forward_storage = frozenset({"auto", "device", "cpu", "disk", "none"})
-        born_tm2d_storage = frozenset({"auto", "device", "cpu", "disk", "none"})
-        born_em3d_storage = frozenset({"device", "none"})
-        hvp_tm2d_storage = frozenset({"device", "cpu", "disk"})
-        hvp_em3d_storage = frozenset({"device"})
+        jvp_tm2d_storage = frozenset({"auto", "device", "cpu", "disk", "none"})
+        jvp_em3d_storage = frozenset({"device", "none"})
+        second_vjp_tm2d_storage = frozenset({"device", "cpu", "disk"})
+        second_vjp_em3d_storage = frozenset({"device"})
         rows: list[BackendCapability] = []
         for dimension in Dimension:
             rows.append(
                 BackendCapability(
                     dimension=dimension,
-                    operations=frozenset({Operation.FORWARD}),
+                    operations=frozenset({Operation.FORWARD, Operation.VJP}),
                     devices=frozenset({"cpu", "cuda"}),
                     dtypes=frozenset({torch.float32, torch.float64}),
                     compute_modes=frozenset({ComputeMode.NATIVE}),
@@ -260,14 +250,14 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
             rows.append(
                 BackendCapability(
                     dimension=dimension,
-                    operations=frozenset({Operation.BORN}),
+                    operations=frozenset({Operation.JVP}),
                     devices=frozenset({"cpu", "cuda"}),
                     dtypes=frozenset({torch.float32, torch.float64}),
                     compute_modes=frozenset({ComputeMode.NATIVE}),
                     storage_modes=(
-                        born_tm2d_storage
+                        jvp_tm2d_storage
                         if dimension is Dimension.TM2D
-                        else born_em3d_storage
+                        else jvp_em3d_storage
                     ),
                     gradient_targets=all_targets,
                     callbacks=False,
@@ -276,32 +266,19 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
             rows.append(
                 BackendCapability(
                     dimension=dimension,
-                    operations=frozenset({Operation.HVP}),
+                    operations=frozenset({Operation.SECOND_VJP}),
                     devices=frozenset({"cpu", "cuda"}),
                     dtypes=frozenset({torch.float32, torch.float64}),
                     compute_modes=frozenset({ComputeMode.NATIVE}),
                     storage_modes=(
-                        hvp_tm2d_storage
+                        second_vjp_tm2d_storage
                         if dimension is Dimension.TM2D
-                        else hvp_em3d_storage
+                        else second_vjp_em3d_storage
                     ),
                     gradient_targets=all_targets,
                     callbacks=False,
                 )
             )
-            if dimension is Dimension.TM2D:
-                rows.append(
-                    BackendCapability(
-                        dimension=dimension,
-                        operations=frozenset({Operation.LINEARIZATION}),
-                        devices=frozenset({"cpu", "cuda"}),
-                        dtypes=frozenset({torch.float32, torch.float64}),
-                        compute_modes=frozenset({ComputeMode.NATIVE}),
-                        storage_modes=hvp_tm2d_storage,
-                        gradient_targets=all_targets,
-                        callbacks=False,
-                    )
-                )
         matrix = tuple(rows)
     else:
         model_targets = frozenset(
@@ -314,7 +291,7 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
             rows.append(
                 BackendCapability(
                     dimension=dimension,
-                    operations=frozenset({Operation.FORWARD}),
+                    operations=frozenset({Operation.FORWARD, Operation.VJP}),
                     devices=frozenset({"cpu", "cuda"}),
                     dtypes=frozenset({torch.float32, torch.float64}),
                     compute_modes=frozenset({ComputeMode.NATIVE}),
@@ -329,7 +306,7 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
                 rows.append(
                     BackendCapability(
                         dimension=dimension,
-                        operations=frozenset({Operation.BORN}),
+                        operations=frozenset({Operation.JVP}),
                         devices=frozenset({"cpu", "cuda"}),
                         dtypes=frozenset({torch.float32, torch.float64}),
                         compute_modes=frozenset({ComputeMode.NATIVE}),
@@ -338,38 +315,26 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
                         ),
                         gradient_targets=born_targets,
                         callbacks=False,
-                    )
-                )
-                rows.append(
-                    BackendCapability(
-                        dimension=dimension,
-                        operations=frozenset({Operation.HVP}),
-                        devices=frozenset({"cpu", "cuda"}),
-                        dtypes=frozenset({torch.float32, torch.float64}),
-                        compute_modes=frozenset({ComputeMode.NATIVE}),
-                        storage_modes=frozenset({"device", "cpu", "disk"}),
-                        gradient_targets=model_targets,
-                        callbacks=False,
-                    )
-                )
-                rows.append(
-                    BackendCapability(
-                        dimension=dimension,
-                        operations=frozenset({Operation.LINEARIZATION}),
-                        devices=frozenset({"cpu", "cuda"}),
-                        dtypes=frozenset({torch.float32, torch.float64}),
-                        compute_modes=frozenset({ComputeMode.NATIVE}),
-                        storage_modes=frozenset({"device", "cpu", "disk"}),
-                        gradient_targets=model_targets,
-                        callbacks=False,
                         reusable_background=True,
+                    )
+                )
+                rows.append(
+                    BackendCapability(
+                        dimension=dimension,
+                        operations=frozenset({Operation.SECOND_VJP}),
+                        devices=frozenset({"cpu", "cuda"}),
+                        dtypes=frozenset({torch.float32, torch.float64}),
+                        compute_modes=frozenset({ComputeMode.NATIVE}),
+                        storage_modes=frozenset({"device", "cpu", "disk"}),
+                        gradient_targets=model_targets,
+                        callbacks=False,
                     )
                 )
             else:
                 rows.append(
                     BackendCapability(
                         dimension=dimension,
-                        operations=frozenset({Operation.BORN}),
+                        operations=frozenset({Operation.JVP}),
                         devices=frozenset({"cpu", "cuda"}),
                         dtypes=frozenset({torch.float32, torch.float64}),
                         compute_modes=frozenset({ComputeMode.NATIVE}),
@@ -381,7 +346,7 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
                 rows.append(
                     BackendCapability(
                         dimension=dimension,
-                        operations=frozenset({Operation.HVP}),
+                        operations=frozenset({Operation.SECOND_VJP}),
                         devices=frozenset({"cpu", "cuda"}),
                         dtypes=frozenset({torch.float32, torch.float64}),
                         compute_modes=frozenset({ComputeMode.NATIVE}),
@@ -416,15 +381,15 @@ def select_backend(
 ) -> BackendDecision:
     """Resolve a plan without silently changing a requested backend."""
 
-    python_capabilities = backend_capabilities(BackendPreference.PYTHON)
+    python_capabilities = backend_capabilities(BackendPreference.REFERENCE)
     native_capabilities = backend_capabilities(BackendPreference.NATIVE)
-    if plan.backend is BackendPreference.PYTHON:
+    if plan.backend is BackendPreference.REFERENCE:
         python_reason = python_capabilities.unsupported_reason(plan)
         if python_reason is not None:
             raise NotImplementedError(python_reason)
         return BackendDecision(
             plan.backend,
-            BackendPreference.PYTHON,
+            BackendPreference.REFERENCE,
             False,
             capabilities=python_capabilities,
         )
@@ -453,7 +418,7 @@ def select_backend(
         raise NotImplementedError(native_reason if native_available else python_reason)
     return BackendDecision(
         requested=plan.backend,
-        selected=BackendPreference.PYTHON,
+        selected=BackendPreference.REFERENCE,
         fallback=True,
         reason=reason,
         capabilities=python_capabilities,

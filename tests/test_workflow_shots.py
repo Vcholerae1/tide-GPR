@@ -2,6 +2,7 @@ import pytest
 import torch
 
 import tide
+from numerical_utils import MaxwellExample, make_maxwell3d_example, make_tm2d_example
 from tide.workflow import (
     backward_shot_batches,
     block_preconditioner,
@@ -22,13 +23,13 @@ from tide.workflow import (
     receiver_sinkhorn_loss,
     receiver_sinkhorn_loss_shard,
     rank_shot_indices,
-    run_shot_batches,
     split_rank_shots,
     split_shots,
     take_receiver_batch,
     take_receiver_shard_batch,
     take_shot_batch,
 )
+from tide.workflow.shots import _run_kernel_shot_batches as run_shot_batches
 
 
 def test_split_shots_uses_long_indices_on_requested_device() -> None:
@@ -504,122 +505,87 @@ def test_run_shot_batches_preserves_autograd() -> None:
     assert float(weight.grad) > 0.0
 
 
-def _tm_case() -> dict[str, torch.Tensor | float | int | bool]:
-    dtype = torch.float32
-    ny, nx = 7, 8
-    nt = 6
-    dt = 4e-11
-    epsilon = torch.full((ny, nx), 4.0, dtype=dtype)
-    sigma = torch.full_like(epsilon, 1e-3)
-    mu = torch.ones_like(epsilon)
-    source_amplitude = (
-        tide.ricker(80e6, nt, dt, dtype=dtype).view(1, 1, nt).repeat(3, 1, 1)
+def _tm_example() -> MaxwellExample:
+    example = make_tm2d_example(
+        shape=(7, 8),
+        nt=6,
+        grid_spacing=0.02,
+        dt=4e-11,
+        frequency=80e6,
+        sigma=1e-3,
+        source_location=(3, 2),
+        receiver_locations=((3, 5),),
+        pml_width=1,
+        stencil=2,
+        python_backend=True,
     )
-    source_location = torch.tensor(
-        [[[3, 2]], [[3, 3]], [[3, 4]]],
-        dtype=torch.long,
+    return example.updated(
+        source_amplitude=example.source_amplitude.repeat(3, 1, 1),
+        source_location=torch.tensor([[[3, 2]], [[3, 3]], [[3, 4]]]),
+        receiver_location=torch.tensor([[[3, 5]], [[3, 5]], [[3, 5]]]),
     )
-    receiver_location = torch.tensor(
-        [[[3, 5]], [[3, 5]], [[3, 5]]],
-        dtype=torch.long,
-    )
-    return {
-        "epsilon": epsilon,
-        "sigma": sigma,
-        "mu": mu,
-        "grid_spacing": 0.02,
-        "dt": dt,
-        "source_amplitude": source_amplitude,
-        "source_location": source_location,
-        "receiver_location": receiver_location,
-        "pml_width": 1,
-        "stencil": 2,
-        "python_backend": True,
-    }
 
 
 def test_run_shot_batches_matches_full_maxwelltm_python_call() -> None:
-    case = _tm_case()
-
-    full = tide.maxwelltm(**case)[-1]
+    example = _tm_example()
+    arguments = example.arguments()
+    full = example.run()[-1]
     batched = run_shot_batches(
-        tide.maxwelltm,
+        example.solver,
         n_shots=3,
         batch_size=2,
-        **case,
+        **arguments,
     )
-
     torch.testing.assert_close(batched, full)
 
 
 def test_run_shot_batches_preserves_batched_model_receiver_shape() -> None:
-    case = _tm_case()
-    epsilon = case["epsilon"]
-    sigma = case["sigma"]
-    mu = case["mu"]
-    assert isinstance(epsilon, torch.Tensor)
-    assert isinstance(sigma, torch.Tensor)
-    assert isinstance(mu, torch.Tensor)
-    case["epsilon"] = torch.stack([epsilon, epsilon * 1.1])
-    case["sigma"] = torch.stack([sigma, sigma * 1.2])
-    case["mu"] = torch.stack([mu, mu])
-
-    full = tide.maxwelltm(**case)[-1]
+    example = _tm_example()
+    example = example.updated(
+        epsilon=torch.stack([example.epsilon, example.epsilon * 1.1]),
+        sigma=torch.stack([example.sigma, example.sigma * 1.2]),
+        mu=torch.stack([example.mu, example.mu]),
+    )
+    arguments = example.arguments()
+    full = example.run()[-1]
     batched = run_shot_batches(
-        tide.maxwelltm,
+        example.solver,
         n_shots=3,
         batch_size=1,
-        **case,
+        **arguments,
     )
-
     assert batched.shape == (6, 2, 3, 1)
     torch.testing.assert_close(batched, full)
 
 
-def _em3d_case() -> dict[str, torch.Tensor | float | int | str | bool]:
-    dtype = torch.float32
-    nz, ny, nx = 5, 6, 7
-    nt = 5
-    dt = 4e-11
-    epsilon = torch.full((nz, ny, nx), 4.0, dtype=dtype)
-    sigma = torch.full_like(epsilon, 1e-3)
-    mu = torch.ones_like(epsilon)
-    source_amplitude = (
-        tide.ricker(70e6, nt, dt, dtype=dtype).view(1, 1, nt).repeat(3, 1, 1)
+def _maxwell3d_example() -> MaxwellExample:
+    example = make_maxwell3d_example(
+        shape=(5, 6, 7),
+        nt=5,
+        grid_spacing=0.02,
+        dt=4e-11,
+        frequency=70e6,
+        sigma=1e-3,
+        source_location=(2, 2, 2),
+        receiver_locations=((2, 2, 4),),
+        pml_width=1,
+        python_backend=True,
     )
-    source_location = torch.tensor(
-        [[[2, 2, 2]], [[2, 3, 2]], [[2, 4, 2]]],
-        dtype=torch.long,
+    return example.updated(
+        source_amplitude=example.source_amplitude.repeat(3, 1, 1),
+        source_location=torch.tensor([[[2, 2, 2]], [[2, 3, 2]], [[2, 4, 2]]]),
+        receiver_location=torch.tensor([[[2, 2, 4]], [[2, 3, 4]], [[2, 4, 4]]]),
     )
-    receiver_location = torch.tensor(
-        [[[2, 2, 4]], [[2, 3, 4]], [[2, 4, 4]]],
-        dtype=torch.long,
-    )
-    return {
-        "epsilon": epsilon,
-        "sigma": sigma,
-        "mu": mu,
-        "grid_spacing": 0.02,
-        "dt": dt,
-        "source_amplitude": source_amplitude,
-        "source_location": source_location,
-        "receiver_location": receiver_location,
-        "pml_width": 1,
-        "source_component": "ey",
-        "receiver_component": "ey",
-        "python_backend": True,
-    }
 
 
 def test_run_shot_batches_matches_full_maxwell3d_python_call() -> None:
-    case = _em3d_case()
-
-    full = tide.maxwell3d(**case)[-1]
+    example = _maxwell3d_example()
+    arguments = example.arguments()
+    full = example.run()[-1]
     batched = run_shot_batches(
-        tide.maxwell3d,
+        example.solver,
         n_shots=3,
         batch_size=2,
-        **case,
+        **arguments,
     )
-
     torch.testing.assert_close(batched, full)

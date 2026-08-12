@@ -17,212 +17,10 @@ from ..utils import C0
 from ..validation import validate_model_gradient_sampling_interval
 from .maxwell3d_born_cuda import born3d_c_cuda
 from .maxwell3d_born_python import born3d_python
-from .module_utils import (
-    _register_maxwell_model,
-    _register_optional_parameter,
-    _same_receiver_locations,
-    _validate_born_parameterization,
-)
+from .module_utils import _same_receiver_locations
 from .validation_internal import _normalize_component_3d
 from ..core import derive_gradient_targets
 from .dispatch import compile_execution_policy
-
-
-class Born3D(torch.nn.Module):
-    """Module wrapper around :func:`born3d`.
-
-    This stores the background 3D Maxwell model and an optional Born
-    perturbation inside a reusable ``torch.nn.Module`` so training and
-    inversion code can follow the same module-first workflow as Deepwave's
-    ``ScalarBorn``.
-    """
-
-    @runtime_typecheck
-    def __init__(
-        self,
-        epsilon: Model3D,
-        sigma: Model3D,
-        mu: Model3D,
-        grid_spacing: float | Sequence[float],
-        *,
-        depsilon: Model3D | None = None,
-        dsigma: Model3D | None = None,
-        dca: Model3D | None = None,
-        dcb: Model3D | None = None,
-        epsilon_requires_grad: bool | None = None,
-        sigma_requires_grad: bool | None = None,
-        depsilon_requires_grad: bool | None = None,
-        dsigma_requires_grad: bool | None = None,
-        dca_requires_grad: bool | None = None,
-        dcb_requires_grad: bool | None = None,
-        parameterization: Literal["epsilon_sigma", "ca_cb"] = "epsilon_sigma",
-        linearize_source: bool = True,
-    ) -> None:
-        super().__init__()
-        _register_maxwell_model(
-            self,
-            epsilon,
-            sigma,
-            mu,
-            epsilon_requires_grad=epsilon_requires_grad,
-            sigma_requires_grad=sigma_requires_grad,
-        )
-        parameterization = _validate_born_parameterization(parameterization)
-        _register_optional_parameter(
-            self, "depsilon", depsilon, depsilon_requires_grad
-        )
-        _register_optional_parameter(self, "dsigma", dsigma, dsigma_requires_grad)
-        _register_optional_parameter(self, "dca", dca, dca_requires_grad)
-        _register_optional_parameter(self, "dcb", dcb, dcb_requires_grad)
-        self.grid_spacing = grid_spacing
-        self.parameterization = parameterization
-        self.linearize_source = linearize_source
-
-    @runtime_typecheck
-    def forward(
-        self,
-        dt: float,
-        source_amplitude: WaveletBatch | None = None,
-        source_location: SourceLocation3D | None = None,
-        receiver_location: ReceiverLocation3D | None = None,
-        bg_receiver_location: ReceiverLocation3D | None = None,
-        *,
-        depsilon: Model3D | None = None,
-        dsigma: Model3D | None = None,
-        dca: Model3D | None = None,
-        dcb: Model3D | None = None,
-        stencil: int = 2,
-        pml_width: int | Sequence[int] = 20,
-        max_vel: float | None = None,
-        Ex_0: Field3DLike | None = None,
-        Ey_0: Field3DLike | None = None,
-        Ez_0: Field3DLike | None = None,
-        Hx_0: Field3DLike | None = None,
-        Hy_0: Field3DLike | None = None,
-        Hz_0: Field3DLike | None = None,
-        m_hz_y_0: Field3DLike | None = None,
-        m_hy_z_0: Field3DLike | None = None,
-        m_hx_z_0: Field3DLike | None = None,
-        m_hz_x_0: Field3DLike | None = None,
-        m_hy_x_0: Field3DLike | None = None,
-        m_hx_y_0: Field3DLike | None = None,
-        m_ey_z_0: Field3DLike | None = None,
-        m_ez_y_0: Field3DLike | None = None,
-        m_ez_x_0: Field3DLike | None = None,
-        m_ex_z_0: Field3DLike | None = None,
-        m_ex_y_0: Field3DLike | None = None,
-        m_ey_x_0: Field3DLike | None = None,
-        dEx_0: Field3DLike | None = None,
-        dEy_0: Field3DLike | None = None,
-        dEz_0: Field3DLike | None = None,
-        dHx_0: Field3DLike | None = None,
-        dHy_0: Field3DLike | None = None,
-        dHz_0: Field3DLike | None = None,
-        dm_hz_y_0: Field3DLike | None = None,
-        dm_hy_z_0: Field3DLike | None = None,
-        dm_hx_z_0: Field3DLike | None = None,
-        dm_hz_x_0: Field3DLike | None = None,
-        dm_hy_x_0: Field3DLike | None = None,
-        dm_hx_y_0: Field3DLike | None = None,
-        dm_ey_z_0: Field3DLike | None = None,
-        dm_ez_y_0: Field3DLike | None = None,
-        dm_ez_x_0: Field3DLike | None = None,
-        dm_ex_z_0: Field3DLike | None = None,
-        dm_ex_y_0: Field3DLike | None = None,
-        dm_ey_x_0: Field3DLike | None = None,
-        nt: int | None = None,
-        model_gradient_sampling_interval: int = 1,
-        linearize_source: bool | None = None,
-        source_component: str = "ey",
-        receiver_component: str = "ey",
-        freq_taper_frac: float = 0.0,
-        time_pad_frac: float = 0.0,
-        time_taper: bool = False,
-        python_backend: Literal["eager", "jit", "compile"] | bool = False,
-        storage_mode: Literal["device", "none"] = "device",
-        storage_path: str = ".",
-        storage_compression: bool | str = False,
-        storage_bytes_limit_device: int | None = None,
-        storage_bytes_limit_host: int | None = None,
-        n_threads: int | None = None,
-        fallback: Literal["reference", "error"] = "reference",
-    ) -> tuple[torch.Tensor, ...]:
-        if linearize_source is None:
-            linearize_source = self.linearize_source
-        assert isinstance(self.epsilon, torch.Tensor)
-        assert isinstance(self.sigma, torch.Tensor)
-        assert isinstance(self.mu, torch.Tensor)
-        return born3d(
-            self.epsilon,
-            self.sigma,
-            self.mu,
-            grid_spacing=self.grid_spacing,
-            dt=dt,
-            source_amplitude=source_amplitude,
-            source_location=source_location,
-            receiver_location=receiver_location,
-            bg_receiver_location=bg_receiver_location,
-            depsilon=self.depsilon if depsilon is None else depsilon,
-            dsigma=self.dsigma if dsigma is None else dsigma,
-            dca=self.dca if dca is None else dca,
-            dcb=self.dcb if dcb is None else dcb,
-            stencil=stencil,
-            pml_width=pml_width,
-            max_vel=max_vel,
-            Ex_0=Ex_0,
-            Ey_0=Ey_0,
-            Ez_0=Ez_0,
-            Hx_0=Hx_0,
-            Hy_0=Hy_0,
-            Hz_0=Hz_0,
-            m_hz_y_0=m_hz_y_0,
-            m_hy_z_0=m_hy_z_0,
-            m_hx_z_0=m_hx_z_0,
-            m_hz_x_0=m_hz_x_0,
-            m_hy_x_0=m_hy_x_0,
-            m_hx_y_0=m_hx_y_0,
-            m_ey_z_0=m_ey_z_0,
-            m_ez_y_0=m_ez_y_0,
-            m_ez_x_0=m_ez_x_0,
-            m_ex_z_0=m_ex_z_0,
-            m_ex_y_0=m_ex_y_0,
-            m_ey_x_0=m_ey_x_0,
-            dEx_0=dEx_0,
-            dEy_0=dEy_0,
-            dEz_0=dEz_0,
-            dHx_0=dHx_0,
-            dHy_0=dHy_0,
-            dHz_0=dHz_0,
-            dm_hz_y_0=dm_hz_y_0,
-            dm_hy_z_0=dm_hy_z_0,
-            dm_hx_z_0=dm_hx_z_0,
-            dm_hz_x_0=dm_hz_x_0,
-            dm_hy_x_0=dm_hy_x_0,
-            dm_hx_y_0=dm_hx_y_0,
-            dm_ey_z_0=dm_ey_z_0,
-            dm_ez_y_0=dm_ez_y_0,
-            dm_ez_x_0=dm_ez_x_0,
-            dm_ex_z_0=dm_ex_z_0,
-            dm_ex_y_0=dm_ex_y_0,
-            dm_ey_x_0=dm_ey_x_0,
-            nt=nt,
-            model_gradient_sampling_interval=model_gradient_sampling_interval,
-            parameterization=self.parameterization,
-            linearize_source=linearize_source,
-            source_component=source_component,
-            receiver_component=receiver_component,
-            freq_taper_frac=freq_taper_frac,
-            time_pad_frac=time_pad_frac,
-            time_taper=time_taper,
-            python_backend=python_backend,
-            storage_mode=storage_mode,
-            storage_path=storage_path,
-            storage_compression=storage_compression,
-            storage_bytes_limit_device=storage_bytes_limit_device,
-            storage_bytes_limit_host=storage_bytes_limit_host,
-            n_threads=n_threads,
-            fallback=fallback,
-        )
 
 
 @runtime_typecheck
@@ -303,7 +101,7 @@ def born3d(
         raise NotImplementedError("born3d currently supports a single 3D model only.")
     execution = compile_execution_policy(
         requested_backend=python_backend,
-        operation="born",
+        operation="jvp",
         dimension="em3d",
         epsilon=epsilon,
         sigma=sigma,
@@ -629,4 +427,4 @@ def born3d(
     return (*state_outputs, bg_receiver_amplitudes, receiver_amplitudes)
 
 
-__all__ = ["Born3D", "born3d"]
+__all__: list[str] = []

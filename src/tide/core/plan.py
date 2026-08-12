@@ -38,12 +38,12 @@ def normalize_backend_request(
             f"execution_backend must be 'standard', got {execution_backend!r}."
         )
     if python_backend is True:
-        return BackendPreference.PYTHON
+        return BackendPreference.REFERENCE
     if python_backend is False:
         return BackendPreference.AUTO
     mode = python_backend.lower()
     if mode in {"eager", "jit", "compile", "python", "reference"}:
-        return BackendPreference.PYTHON
+        return BackendPreference.REFERENCE
     if mode in {"auto", "native", "standard"}:
         return BackendPreference.NATIVE if mode == "native" else BackendPreference.AUTO
     raise ValueError(f"Unknown python_backend value {python_backend!r}.")
@@ -149,7 +149,9 @@ def compile_simulation_plan(
     has_callbacks: bool = False,
     source_component: str = "ey",
     receiver_component: str = "ey",
-    operation: Operation | Literal["forward", "born", "hvp", "linearization"] | str = Operation.FORWARD,
+    operation: Operation
+    | Literal["forward", "jvp", "vjp", "second_vjp"]
+    | str = Operation.FORWARD,
     model_gradient_sampling_interval: int = 1,
     hessian_mode: str | None = None,
     gradient_targets: GradientTarget | str | Sequence[str | GradientTarget] | None = None,
@@ -170,7 +172,7 @@ def compile_simulation_plan(
         resolved_operation = Operation(str(operation).lower())
     except ValueError as exc:
         raise ValueError(
-            "operation must be 'forward', 'born', 'hvp', or 'linearization'."
+            "operation must be 'forward', 'jvp', 'vjp', or 'second_vjp'."
         ) from exc
     if not isinstance(epsilon, torch.Tensor):
         raise TypeError("epsilon must be a torch.Tensor.")
@@ -207,7 +209,7 @@ def compile_simulation_plan(
         raise ValueError("model_gradient_sampling_interval must be non-negative.")
     if hessian_mode is not None and hessian_mode not in {"full", "gauss_newton"}:
         raise ValueError("hessian_mode must be 'full' or 'gauss_newton'.")
-    if resolved_operation in {Operation.HVP, Operation.LINEARIZATION}:
+    if resolved_operation in {Operation.SECOND_VJP, Operation.JVP}:
         hessian_mode = "full" if hessian_mode is None else hessian_mode
     if resolved_dimension is Dimension.TM2D and source_component != "ey":
         raise ValueError("TM2D source_component must be 'ey'.")

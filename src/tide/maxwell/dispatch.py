@@ -30,7 +30,7 @@ class ExecutionPolicy:
 
     @property
     def use_python(self) -> bool:
-        return self.decision.selected is BackendPreference.PYTHON
+        return self.decision.selected is BackendPreference.REFERENCE
 
     @property
     def dispatch_backend(self) -> bool | str:

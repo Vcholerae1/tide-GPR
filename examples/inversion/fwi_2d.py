@@ -34,8 +34,8 @@ def main() -> None:
     shot_batches = tide.workflow.split_shots(n_shots, batch_size, device=device)
 
     def maxwell_receivers(epsilon: torch.Tensor) -> torch.Tensor:
-        return tide.workflow.run_shot_batches(
-            tide.maxwelltm,
+        return tide.workflow.shots._run_kernel_shot_batches(
+            tide.maxwell._kernel_api.maxwelltm,
             n_shots=n_shots,
             batch_size=batch_size,
             epsilon=epsilon,
@@ -67,7 +67,7 @@ def main() -> None:
                 receiver_location=receiver_location,
                 shot_indices=shot_indices,
             )
-            predicted = tide.maxwelltm(
+            predicted = tide.maxwell._kernel_api.maxwelltm(
                 epsilon=epsilon,
                 sigma=sigma,
                 mu=mu,

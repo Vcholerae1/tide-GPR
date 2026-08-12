@@ -2,32 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Literal
 
 import torch
+from ..maxwell.contracts import Acquisition
 
 ReceiverMode = Literal["shared", "paired"]
 
 
-@dataclass(frozen=True, slots=True)
-class Acquisition:
-    """Source and receiver locations following TIDE solver conventions."""
-
-    source_location: torch.Tensor
-    receiver_location: torch.Tensor
-
-    @property
-    def n_shots(self) -> int:
-        return int(self.source_location.shape[0])
-
-    @property
-    def n_receivers(self) -> int:
-        return int(self.receiver_location.shape[1])
-
-    @property
-    def spatial_ndim(self) -> int:
-        return int(self.source_location.shape[-1])
 
 
 def _as_long_tensor(

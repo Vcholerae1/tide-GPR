@@ -121,7 +121,7 @@ def test_maxwell3d_uniform_medium_plane_wave_travel_time(device: torch.device):
         dtype=torch.long,
     )
 
-    out = tide.maxwell3d(
+    out = tide.maxwell._kernel_api.maxwell3d(
         epsilon=epsilon,
         sigma=sigma,
         mu=mu,
@@ -194,7 +194,7 @@ def test_maxwell3d_matches_uniform_medium_point_source_green_polarizations(
 
     for source_component in ("ex", "ey", "ez"):
         for receiver_component in ("ex", "ey", "ez"):
-            out = tide.maxwell3d(
+            out = tide.maxwell._kernel_api.maxwell3d(
                 epsilon=epsilon,
                 sigma=sigma,
                 mu=mu,
@@ -278,7 +278,7 @@ def test_maxwell3d_matches_uniform_medium_point_source_green_long_nt(
     source_location = torch.tensor([[list(src_idx)]], device=device, dtype=torch.long)
     receiver_location = torch.tensor([[list(rec_idx)]], device=device, dtype=torch.long)
 
-    out = tide.maxwell3d(
+    out = tide.maxwell._kernel_api.maxwell3d(
         epsilon=epsilon,
         sigma=sigma,
         mu=mu,

@@ -13,6 +13,7 @@ from tide.maxwell.tm2d_born_autograd import (
     tm2d_receiver_hvp_naive,
     tm2d_receiver_hvp_native,
 )
+from numerical_utils import MaxwellExample, make_maxwell3d_example, make_tm2d_example
 
 
 def _nonlinear_receiver_misfit(
@@ -45,161 +46,84 @@ def _fail_if_separate_forward_is_called(*args, **kwargs):
     raise AssertionError("HVP must obtain the background trace from its Born pass")
 
 
-def _tm2d_exact_hvp(
+def _exact_hvp(
+    example: MaxwellExample,
     *,
-    epsilon: torch.Tensor,
-    sigma: torch.Tensor,
-    mu: torch.Tensor,
     vepsilon: torch.Tensor,
     vsigma: torch.Tensor,
-    source_amplitude: torch.Tensor,
-    source_location: torch.Tensor,
-    receiver_location: torch.Tensor,
     observed_data: torch.Tensor,
-    grid_spacing: float,
-    dt: float,
-    pml_width: int,
-    stencil: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    epsilon_req = epsilon.detach().clone().requires_grad_(True)
-    sigma_req = sigma.detach().clone().requires_grad_(True)
-    predicted = tide.maxwelltm(
-        epsilon_req,
-        sigma_req,
-        mu,
-        grid_spacing=grid_spacing,
-        dt=dt,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        pml_width=pml_width,
-        stencil=stencil,
+    epsilon = example.epsilon.clone().requires_grad_(True)
+    sigma = example.sigma.clone().requires_grad_(True)
+    predicted = example.run(
+        epsilon=epsilon,
+        sigma=sigma,
         python_backend=True,
     )[-1]
     loss = _nonlinear_receiver_misfit(predicted, observed_data)
     grad_epsilon, grad_sigma = torch.autograd.grad(
         loss,
-        (epsilon_req, sigma_req),
+        (epsilon, sigma),
         create_graph=True,
     )
     directional = (grad_epsilon * vepsilon).sum() + (grad_sigma * vsigma).sum()
-    return torch.autograd.grad(directional, (epsilon_req, sigma_req))
-
-
-def _maxwell3d_exact_hvp(
-    *,
-    epsilon: torch.Tensor,
-    sigma: torch.Tensor,
-    mu: torch.Tensor,
-    vepsilon: torch.Tensor,
-    vsigma: torch.Tensor,
-    source_amplitude: torch.Tensor,
-    source_location: torch.Tensor,
-    receiver_location: torch.Tensor,
-    observed_data: torch.Tensor,
-    grid_spacing: tuple[float, float, float],
-    dt: float,
-    pml_width: int,
-    stencil: int,
-    source_component: str,
-    receiver_component: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    epsilon_req = epsilon.detach().clone().requires_grad_(True)
-    sigma_req = sigma.detach().clone().requires_grad_(True)
-    predicted = tide.maxwell3d(
-        epsilon_req,
-        sigma_req,
-        mu,
-        grid_spacing=grid_spacing,
-        dt=dt,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        pml_width=pml_width,
-        stencil=stencil,
-        source_component=source_component,
-        receiver_component=receiver_component,
-        python_backend=True,
-    )[-1]
-    loss = _nonlinear_receiver_misfit(predicted, observed_data)
-    grad_epsilon, grad_sigma = torch.autograd.grad(
-        loss,
-        (epsilon_req, sigma_req),
-        create_graph=True,
-    )
-    directional = (grad_epsilon * vepsilon).sum() + (grad_sigma * vsigma).sum()
-    return torch.autograd.grad(directional, (epsilon_req, sigma_req))
+    return torch.autograd.grad(directional, (epsilon, sigma))
 
 
 def test_tm2d_receiver_hvp_naive_matches_exact_nested_autodiff():
-    dtype = torch.float64
-    ny, nx = 8, 9
-    nt = 12
-    dt = 4e-11
-
-    epsilon = torch.full((ny, nx), 4.0, dtype=dtype)
-    epsilon[ny // 2 - 1 : ny // 2 + 1, nx // 2 - 1 : nx // 2 + 1] = 4.3
-    sigma = torch.full((ny, nx), 5e-4, dtype=dtype)
-    mu = torch.ones_like(epsilon)
-
-    source_location = torch.tensor([[[ny // 2, nx // 3]]], dtype=torch.long)
-    receiver_location = torch.tensor(
-        [[[ny // 2, nx // 2], [ny // 2, nx // 2 + 1]]],
-        dtype=torch.long,
+    example = make_tm2d_example(
+        shape=(8, 9),
+        nt=12,
+        grid_spacing=0.02,
+        dt=4e-11,
+        frequency=90e6,
+        dtype=torch.float64,
+        sigma=5e-4,
+        source_location=(4, 3),
+        receiver_locations=((4, 4), (4, 5)),
+        pml_width=2,
+        stencil=2,
     )
-    source_amplitude = tide.ricker(
-        90e6,
-        nt,
-        dt,
-        peak_time=1.0 / 90e6,
-        dtype=dtype,
-    ).view(1, 1, nt)
-    observed_data = torch.zeros(nt, 1, receiver_location.shape[1], dtype=dtype)
+    epsilon = example.epsilon.clone()
+    epsilon[3:5, 3:5] = 4.3
+    example = example.updated(epsilon=epsilon)
+    observed_data = example.receiver_zeros()
 
     torch.manual_seed(0)
-    vepsilon = 0.03 * torch.randn_like(epsilon)
+    vepsilon = 0.03 * torch.randn_like(example.epsilon)
     vepsilon = vepsilon / vepsilon.abs().amax()
-    vsigma = 0.02 * torch.randn_like(sigma)
+    vsigma = 0.02 * torch.randn_like(example.sigma)
     vsigma = vsigma / vsigma.abs().amax()
 
-    hvp_epsilon_exact, hvp_sigma_exact = _tm2d_exact_hvp(
-        epsilon=epsilon,
-        sigma=sigma,
-        mu=mu,
+    exact = _exact_hvp(
+        example,
         vepsilon=vepsilon,
         vsigma=vsigma,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
         observed_data=observed_data,
-        grid_spacing=0.02,
-        dt=dt,
-        pml_width=2,
-        stencil=2,
     )
-    hvp_epsilon_proto, hvp_sigma_proto = tm2d_receiver_hvp_naive(
-        epsilon,
-        sigma,
-        mu,
+    actual = tm2d_receiver_hvp_naive(
+        example.epsilon,
+        example.sigma,
+        example.mu,
         vepsilon=vepsilon,
         vsigma=vsigma,
-        grid_spacing=0.02,
-        dt=dt,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
+        grid_spacing=example.grid_spacing,
+        dt=example.dt,
+        source_amplitude=example.source_amplitude,
+        source_location=example.source_location,
+        receiver_location=example.receiver_location,
         observed_data=observed_data,
         misfit_fn=_nonlinear_receiver_misfit,
-        pml_width=2,
-        stencil=2,
+        pml_width=example.pml_width,
+        stencil=example.stencil,
     )
 
-    _assert_relative_norm_close(hvp_epsilon_proto, hvp_epsilon_exact, rtol=1e-6)
-    _assert_relative_norm_close(hvp_sigma_proto, hvp_sigma_exact, rtol=1e-6)
+    for actual_part, exact_part in zip(actual, exact, strict=True):
+        _assert_relative_norm_close(actual_part, exact_part, rtol=1e-6)
 
 
 def test_tm2d_receiver_hvp_naive_does_not_run_a_separate_forward(monkeypatch):
-    case = _build_tm2d_native_case()
+    case = _build_tm2d_native_example()
     forward_module = importlib.import_module("tide.maxwell.tm2d")
     monkeypatch.setattr(
         forward_module,
@@ -208,17 +132,17 @@ def test_tm2d_receiver_hvp_naive_does_not_run_a_separate_forward(monkeypatch):
     )
 
     result = tm2d_receiver_hvp_naive(
-        case["epsilon"],
-        case["sigma"],
-        case["mu"],
-        vepsilon=case["vepsilon"],
-        vsigma=case["vsigma"],
-        grid_spacing=case["grid_spacing"],
-        dt=case["dt"],
-        source_amplitude=case["source_amplitude"],
-        source_location=case["source_location"],
-        receiver_location=case["receiver_location"],
-        observed_data=case["observed_data"],
+        case.epsilon,
+        case.sigma,
+        case.mu,
+        vepsilon=case.vepsilon,
+        vsigma=case.vsigma,
+        grid_spacing=case.grid_spacing,
+        dt=case.dt,
+        source_amplitude=case.source_amplitude,
+        source_location=case.source_location,
+        receiver_location=case.receiver_location,
+        observed_data=case.observed_data,
         misfit_fn=_nonlinear_receiver_misfit,
         pml_width=2,
         stencil=2,
@@ -228,35 +152,34 @@ def test_tm2d_receiver_hvp_naive_does_not_run_a_separate_forward(monkeypatch):
 
 
 def test_tm2d_full_and_gauss_newton_hvp_match_at_zero_least_squares_residual():
-    case = _build_tm2d_native_case()
-    predicted = tide.maxwelltm(
-        case["epsilon"],
-        case["sigma"],
-        case["mu"],
-        grid_spacing=case["grid_spacing"],
-        dt=case["dt"],
-        source_amplitude=case["source_amplitude"],
-        source_location=case["source_location"],
-        receiver_location=case["receiver_location"],
+    case = _build_tm2d_native_example()
+    predicted = tide.maxwell._kernel_api.maxwelltm(
+        case.epsilon,
+        case.sigma,
+        case.mu,
+        grid_spacing=case.grid_spacing,
+        dt=case.dt,
+        source_amplitude=case.source_amplitude,
+        source_location=case.source_location,
+        receiver_location=case.receiver_location,
         pml_width=2,
         stencil=2,
         python_backend=True,
     )[-1].detach()
 
     common = {
-        "epsilon": case["epsilon"],
-        "sigma": case["sigma"],
-        "mu": case["mu"],
-        "vepsilon": case["vepsilon"],
-        "vsigma": case["vsigma"],
-        "grid_spacing": case["grid_spacing"],
-        "dt": case["dt"],
-        "source_amplitude": case["source_amplitude"],
-        "source_location": case["source_location"],
-        "receiver_location": case["receiver_location"],
+        "epsilon": case.epsilon,
+        "sigma": case.sigma,
+        "mu": case.mu,
+        "vepsilon": case.vepsilon,
+        "vsigma": case.vsigma,
+        "grid_spacing": case.grid_spacing,
+        "dt": case.dt,
+        "source_amplitude": case.source_amplitude,
+        "source_location": case.source_location,
+        "receiver_location": case.receiver_location,
         "observed_data": predicted,
-        "misfit_fn": lambda actual, observed: 0.5
-        * (actual - observed).square().sum(),
+        "misfit_fn": lambda actual, observed: 0.5 * (actual - observed).square().sum(),
         "pml_width": 2,
         "stencil": 2,
     }
@@ -271,77 +194,58 @@ def test_tm2d_full_and_gauss_newton_hvp_match_at_zero_least_squares_residual():
 
 
 @torch.no_grad()
-def _build_tm2d_native_case():
-    dtype = torch.float64
-    ny, nx = 8, 9
-    nt = 12
-    dt = 4e-11
-
-    epsilon = torch.full((ny, nx), 4.0, dtype=dtype)
-    epsilon[ny // 2 - 1 : ny // 2 + 1, nx // 2 - 1 : nx // 2 + 1] = 4.3
-    sigma = torch.full((ny, nx), 5e-4, dtype=dtype)
-    mu = torch.ones_like(epsilon)
-
-    source_location = torch.tensor([[[ny // 2, nx // 3]]], dtype=torch.long)
-    receiver_location = torch.tensor(
-        [[[ny // 2, nx // 2], [ny // 2, nx // 2 + 1]]],
-        dtype=torch.long,
+def _build_tm2d_native_example(
+    device: torch.device = torch.device("cpu"),
+) -> MaxwellExample:
+    example = make_tm2d_example(
+        shape=(8, 9),
+        nt=12,
+        grid_spacing=0.02,
+        dt=4e-11,
+        frequency=90e6,
+        dtype=torch.float64,
+        device=device,
+        sigma=5e-4,
+        source_location=(4, 3),
+        receiver_locations=((4, 4), (4, 5)),
+        pml_width=2,
+        stencil=2,
     )
-    source_amplitude = tide.ricker(
-        90e6,
-        nt,
-        dt,
-        peak_time=1.0 / 90e6,
-        dtype=dtype,
-    ).view(1, 1, nt)
-    observed_data = torch.zeros(nt, 1, receiver_location.shape[1], dtype=dtype)
-
+    epsilon = example.epsilon.clone()
+    epsilon[3:5, 3:5] = 4.3
     torch.manual_seed(4)
     vepsilon = 0.03 * torch.randn_like(epsilon)
-    vepsilon = vepsilon / vepsilon.abs().amax()
-    vsigma = 0.02 * torch.randn_like(sigma)
-    vsigma = vsigma / vsigma.abs().amax()
-    return {
-        "epsilon": epsilon,
-        "sigma": sigma,
-        "mu": mu,
-        "vepsilon": vepsilon,
-        "vsigma": vsigma,
-        "source_amplitude": source_amplitude,
-        "source_location": source_location,
-        "receiver_location": receiver_location,
-        "observed_data": observed_data,
-        "grid_spacing": 0.02,
-        "dt": dt,
-    }
+    vsigma = 0.02 * torch.randn_like(example.sigma)
+    return example.updated(
+        epsilon=epsilon,
+        vepsilon=vepsilon / vepsilon.abs().amax(),
+        vsigma=vsigma / vsigma.abs().amax(),
+        observed_data=example.receiver_zeros(),
+    )
 
 
-def _tm2d_native_case_on(device: torch.device) -> dict[str, torch.Tensor | float]:
-    case = _build_tm2d_native_case()
-    return {
-        key: value.to(device) if torch.is_tensor(value) else value
-        for key, value in case.items()
-    }
+def _tm2d_native_example_on(device: torch.device) -> MaxwellExample:
+    return _build_tm2d_native_example(device)
 
 
 @pytest.mark.skipif(
     not backend_utils.is_backend_available(), reason="native backend not available"
 )
 def test_tm2d_receiver_hvp_native_returns_coeff_hvp_without_pml():
-    case = _tm2d_native_case_on(torch.device("cpu"))
+    case = _tm2d_native_example_on(torch.device("cpu"))
 
     hvp_epsilon_native, hvp_sigma_native = tm2d_receiver_hvp_native(
-        case["epsilon"],
-        case["sigma"],
-        case["mu"],
-        vepsilon=case["vepsilon"],
-        vsigma=case["vsigma"],
-        grid_spacing=case["grid_spacing"],
-        dt=case["dt"],
-        source_amplitude=case["source_amplitude"],
-        source_location=case["source_location"],
-        receiver_location=case["receiver_location"],
-        observed_data=case["observed_data"],
+        case.epsilon,
+        case.sigma,
+        case.mu,
+        vepsilon=case.vepsilon,
+        vsigma=case.vsigma,
+        grid_spacing=case.grid_spacing,
+        dt=case.dt,
+        source_amplitude=case.source_amplitude,
+        source_location=case.source_location,
+        receiver_location=case.receiver_location,
+        observed_data=case.observed_data,
         misfit_fn=_nonlinear_receiver_misfit,
         pml_width=0,
         stencil=2,
@@ -354,7 +258,7 @@ def test_tm2d_receiver_hvp_native_returns_coeff_hvp_without_pml():
     not backend_utils.is_backend_available(), reason="native backend not available"
 )
 def test_tm2d_receiver_hvp_native_does_not_run_a_separate_forward(monkeypatch):
-    case = _tm2d_native_case_on(torch.device("cpu"))
+    case = _tm2d_native_example_on(torch.device("cpu"))
     forward_module = importlib.import_module("tide.maxwell.tm2d")
     monkeypatch.setattr(
         forward_module,
@@ -363,17 +267,17 @@ def test_tm2d_receiver_hvp_native_does_not_run_a_separate_forward(monkeypatch):
     )
 
     result = tm2d_receiver_hvp_native(
-        case["epsilon"],
-        case["sigma"],
-        case["mu"],
-        vepsilon=case["vepsilon"],
-        vsigma=case["vsigma"],
-        grid_spacing=case["grid_spacing"],
-        dt=case["dt"],
-        source_amplitude=case["source_amplitude"],
-        source_location=case["source_location"],
-        receiver_location=case["receiver_location"],
-        observed_data=case["observed_data"],
+        case.epsilon,
+        case.sigma,
+        case.mu,
+        vepsilon=case.vepsilon,
+        vsigma=case.vsigma,
+        grid_spacing=case.grid_spacing,
+        dt=case.dt,
+        source_amplitude=case.source_amplitude,
+        source_location=case.source_location,
+        receiver_location=case.receiver_location,
+        observed_data=case.observed_data,
         misfit_fn=_nonlinear_receiver_misfit,
         pml_width=0,
         stencil=2,
@@ -387,20 +291,20 @@ def test_tm2d_receiver_hvp_native_does_not_run_a_separate_forward(monkeypatch):
     reason="native cuda backend not available",
 )
 def test_tm2d_receiver_hvp_native_cuda_returns_coeff_hvp_with_pml():
-    case = _tm2d_native_case_on(torch.device("cuda"))
+    case = _tm2d_native_example_on(torch.device("cuda"))
 
     hvp_epsilon_native, hvp_sigma_native = tm2d_receiver_hvp_native(
-        case["epsilon"],
-        case["sigma"],
-        case["mu"],
-        vepsilon=case["vepsilon"],
-        vsigma=case["vsigma"],
-        grid_spacing=case["grid_spacing"],
-        dt=case["dt"],
-        source_amplitude=case["source_amplitude"],
-        source_location=case["source_location"],
-        receiver_location=case["receiver_location"],
-        observed_data=case["observed_data"],
+        case.epsilon,
+        case.sigma,
+        case.mu,
+        vepsilon=case.vepsilon,
+        vsigma=case.vsigma,
+        grid_spacing=case.grid_spacing,
+        dt=case.dt,
+        source_amplitude=case.source_amplitude,
+        source_location=case.source_location,
+        receiver_location=case.receiver_location,
+        observed_data=case.observed_data,
         misfit_fn=_nonlinear_receiver_misfit,
         pml_width=2,
         stencil=2,
@@ -413,20 +317,20 @@ def test_tm2d_receiver_hvp_native_cuda_returns_coeff_hvp_with_pml():
     not backend_utils.is_backend_available(), reason="native backend not available"
 )
 def test_tm2d_receiver_hvp_native_returns_coeff_hvp_with_pml_cpu():
-    case = _tm2d_native_case_on(torch.device("cpu"))
+    case = _tm2d_native_example_on(torch.device("cpu"))
 
     hvp_epsilon_native, hvp_sigma_native = tm2d_receiver_hvp_native(
-        case["epsilon"],
-        case["sigma"],
-        case["mu"],
-        vepsilon=case["vepsilon"],
-        vsigma=case["vsigma"],
-        grid_spacing=case["grid_spacing"],
-        dt=case["dt"],
-        source_amplitude=case["source_amplitude"],
-        source_location=case["source_location"],
-        receiver_location=case["receiver_location"],
-        observed_data=case["observed_data"],
+        case.epsilon,
+        case.sigma,
+        case.mu,
+        vepsilon=case.vepsilon,
+        vsigma=case.vsigma,
+        grid_spacing=case.grid_spacing,
+        dt=case.dt,
+        source_amplitude=case.source_amplitude,
+        source_location=case.source_location,
+        receiver_location=case.receiver_location,
+        observed_data=case.observed_data,
         misfit_fn=_nonlinear_receiver_misfit,
         pml_width=2,
         stencil=2,
@@ -436,74 +340,57 @@ def test_tm2d_receiver_hvp_native_returns_coeff_hvp_with_pml_cpu():
 
 
 def test_maxwell3d_receiver_hvp_naive_matches_exact_nested_autodiff():
-    dtype = torch.float64
-    nz, ny, nx = 5, 6, 7
-    nt = 8
-    dt = 4e-11
-
-    epsilon = torch.full((nz, ny, nx), 4.0, dtype=dtype)
-    epsilon[nz // 2 - 1 : nz // 2 + 1, ny // 2, nx // 2] = 4.25
-    sigma = torch.full((nz, ny, nx), 3e-4, dtype=dtype)
-    mu = torch.ones_like(epsilon)
-
-    source_location = torch.tensor([[[2, 2, 1]]], dtype=torch.long)
-    receiver_location = torch.tensor(
-        [[[2, 2, 4], [2, 2, 5]]],
-        dtype=torch.long,
+    example = make_maxwell3d_example(
+        shape=(5, 6, 7),
+        nt=8,
+        grid_spacing=(0.03, 0.02, 0.02),
+        dt=4e-11,
+        frequency=80e6,
+        dtype=torch.float64,
+        sigma=3e-4,
+        source_location=(2, 2, 1),
+        receiver_locations=((2, 2, 4), (2, 2, 5)),
+        pml_width=2,
+        stencil=2,
     )
-    source_amplitude = tide.ricker(
-        80e6,
-        nt,
-        dt,
-        peak_time=1.0 / 80e6,
-        dtype=dtype,
-    ).view(1, 1, nt)
-    observed_data = torch.zeros(nt, 1, receiver_location.shape[1], dtype=dtype)
+    epsilon = example.epsilon.clone()
+    epsilon[1:3, 3, 3] = 4.25
+    example = example.updated(epsilon=epsilon)
+    observed_data = example.receiver_zeros()
 
     torch.manual_seed(1)
-    vepsilon = 0.03 * torch.randn_like(epsilon)
+    vepsilon = 0.03 * torch.randn_like(example.epsilon)
     vepsilon = vepsilon / vepsilon.abs().amax()
-    vsigma = 0.02 * torch.randn_like(sigma)
+    vsigma = 0.02 * torch.randn_like(example.sigma)
     vsigma = vsigma / vsigma.abs().amax()
 
-    hvp_epsilon_exact, hvp_sigma_exact = _maxwell3d_exact_hvp(
-        epsilon=epsilon,
-        sigma=sigma,
-        mu=mu,
+    exact = _exact_hvp(
+        example,
         vepsilon=vepsilon,
         vsigma=vsigma,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
         observed_data=observed_data,
-        grid_spacing=(0.03, 0.02, 0.02),
-        dt=dt,
-        pml_width=2,
-        stencil=2,
-        source_component="ey",
-        receiver_component="ey",
     )
-    hvp_epsilon_proto, hvp_sigma_proto = maxwell3d_receiver_hvp_naive(
-        epsilon,
-        sigma,
-        mu,
+    actual = maxwell3d_receiver_hvp_naive(
+        example.epsilon,
+        example.sigma,
+        example.mu,
         vepsilon=vepsilon,
         vsigma=vsigma,
-        grid_spacing=(0.03, 0.02, 0.02),
-        dt=dt,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
+        grid_spacing=example.grid_spacing,
+        dt=example.dt,
+        source_amplitude=example.source_amplitude,
+        source_location=example.source_location,
+        receiver_location=example.receiver_location,
         observed_data=observed_data,
         misfit_fn=_nonlinear_receiver_misfit,
-        pml_width=2,
-        stencil=2,
-        source_component="ey",
-        receiver_component="ey",
+        pml_width=example.pml_width,
+        stencil=example.stencil,
+        source_component=example.source_component,
+        receiver_component=example.receiver_component,
     )
 
-    _assert_relative_norm_close(hvp_epsilon_proto, hvp_epsilon_exact, rtol=1e-6)
-    _assert_relative_norm_close(hvp_sigma_proto, hvp_sigma_exact, rtol=1e-6)
+    for actual_part, exact_part in zip(actual, exact, strict=True):
+        _assert_relative_norm_close(actual_part, exact_part, rtol=1e-6)
 
 
 def test_maxwell3d_receiver_hvp_naive_does_not_run_a_separate_forward(monkeypatch):

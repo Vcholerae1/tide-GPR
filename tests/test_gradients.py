@@ -2,8 +2,10 @@
 
 import pytest
 from numerical_utils import (
+    MaxwellExample,
     deterministic_direction,
     directional_derivative_errors,
+    make_tm2d_example,
     taylor_remainders,
 )
 import torch
@@ -21,137 +23,63 @@ class TestGradientAccuracy2D:
     """Tests for 2D MaxwellTM gradient accuracy."""
 
     @pytest.fixture
-    def setup_2d(self):
+    def setup_2d(self) -> MaxwellExample:
         """Common setup for 2D tests."""
         if not torch.cuda.is_available():
             pytest.skip("CUDA required")
-        device = torch.device("cuda")
-        dtype = torch.float32
-
-        ny, nx = 20, 24
-        nt = 30
-        dx = 0.02
-        dt = 4e-11
-        pml_width = 4
-        stencil = 2
-
-        epsilon = torch.ones(ny, nx, device=device, dtype=dtype) * 4.0
-        sigma = torch.zeros_like(epsilon)
-        mu = torch.ones_like(epsilon)
-
-        source_locations = torch.tensor(
-            [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
-        )
-        receiver_locations = torch.tensor(
-            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
+        return make_tm2d_example(
+            shape=(20, 24),
+            nt=30,
+            grid_spacing=0.02,
+            dt=4e-11,
+            frequency=200e6,
+            device="cuda",
+            source_location=(10, 6),
+            receiver_locations=((10, 12),),
+            pml_width=4,
+            stencil=2,
         )
 
-        freq = 200e6
-        wavelet = tide.ricker(
-            freq, nt, dt, peak_time=1.0 / freq, dtype=dtype, device=device
-        )
-        source_amplitude = wavelet.view(1, 1, nt)
-
-        return {
-            "device": device,
-            "dtype": dtype,
-            "epsilon": epsilon,
-            "sigma": sigma,
-            "mu": mu,
-            "dx": dx,
-            "dt": dt,
-            "pml_width": pml_width,
-            "stencil": stencil,
-            "source_amplitude": source_amplitude,
-            "source_locations": source_locations,
-            "receiver_locations": receiver_locations,
-        }
-
-    def test_epsilon_gradient_finite_difference_2d(self, setup_2d):
+    def test_epsilon_gradient_finite_difference_2d(
+        self,
+        setup_2d: MaxwellExample,
+    ):
         """Compare epsilon gradient with finite difference approximation."""
-        s = setup_2d
-        ny, nx = s["epsilon"].shape
+        example = setup_2d
         h = 1e-2
+        epsilon = example.epsilon.clone().requires_grad_(True)
+        receiver = example.run(epsilon=epsilon)[-1]
+        loss = receiver.pow(2).sum()
+        loss.backward()
+        assert epsilon.grad is not None
 
-        # Forward with base epsilon
-        eps_base = s["epsilon"].clone().detach().requires_grad_(True)
-        out_base = tide.maxwelltm(
-            eps_base,
-            s["sigma"],
-            s["mu"],
-            grid_spacing=s["dx"],
-            dt=s["dt"],
-            source_amplitude=s["source_amplitude"],
-            source_location=s["source_locations"],
-            receiver_location=s["receiver_locations"],
-            pml_width=s["pml_width"],
-            stencil=s["stencil"],
-        )[-1]
-        loss_base = out_base.pow(2).sum()
-        loss_base.backward()
-        assert eps_base.grad is not None
-        grad_autodiff = eps_base.grad.clone()
+        index = (example.epsilon.shape[0] // 2, example.epsilon.shape[1] // 2)
+        perturbed = example.epsilon.clone()
+        perturbed[index] += h
+        finite_difference = (
+            example.run(epsilon=perturbed)[-1].pow(2).sum() - loss.detach()
+        ) / h
+        gradient = epsilon.grad[index]
 
-        # Finite difference: perturb epsilon at a single point
-        eps_pert = s["epsilon"].clone()
-        eps_pert[ny // 2, nx // 2] += h
-
-        out_pert = tide.maxwelltm(
-            eps_pert,
-            s["sigma"],
-            s["mu"],
-            grid_spacing=s["dx"],
-            dt=s["dt"],
-            source_amplitude=s["source_amplitude"],
-            source_location=s["source_locations"],
-            receiver_location=s["receiver_locations"],
-            pml_width=s["pml_width"],
-            stencil=s["stencil"],
-        )[-1]
-
-        fd_approx = (out_pert.pow(2).sum() - loss_base.detach()) / h
-
-        # Compare at the perturbed point
-        grad_at_point = grad_autodiff[ny // 2, nx // 2]
-
-        # The gradient should have the same sign and similar magnitude
-        # Using a looser tolerance since FD is approximate
-        assert torch.sign(grad_at_point) == torch.sign(fd_approx), (
+        assert torch.sign(gradient) == torch.sign(finite_difference), (
             "Gradient sign should match"
         )
-        rel_error = abs(grad_at_point - fd_approx) / (abs(fd_approx) + 1e-10)
-        assert rel_error < 0.5, f"Gradient FD mismatch too large: {rel_error}"
+        relative_error = abs(gradient - finite_difference) / (
+            abs(finite_difference) + 1e-10
+        )
+        assert relative_error < 0.5, f"Gradient FD mismatch too large: {relative_error}"
 
-    def test_sigma_gradient_is_nonzero_2d(self, setup_2d):
+    def test_sigma_gradient_is_nonzero_2d(
+        self,
+        setup_2d: MaxwellExample,
+    ):
         """Sigma gradient should be non-zero for loss function."""
-        s = setup_2d
-
-        # Use non-zero sigma
-        sigma = torch.ones_like(s["epsilon"]) * 1e-3
-        sigma.requires_grad_(True)
-
-        out = tide.maxwelltm(
-            s["epsilon"],
-            sigma,
-            s["mu"],
-            grid_spacing=s["dx"],
-            dt=s["dt"],
-            source_amplitude=s["source_amplitude"],
-            source_location=s["source_locations"],
-            receiver_location=s["receiver_locations"],
-            pml_width=s["pml_width"],
-            stencil=s["stencil"],
-        )[-1]
-
-        loss = out.pow(2).sum()
-        loss.backward()
-
+        sigma = torch.full_like(setup_2d.epsilon, 1e-3, requires_grad=True)
+        receiver = setup_2d.run(sigma=sigma)[-1]
+        receiver.pow(2).sum().backward()
         assert sigma.grad is not None
-        sigma_grad = sigma.grad
-
-        # Gradient should be non-zero somewhere
-        assert sigma_grad.abs().sum() > 0, "Sigma gradient should be non-zero"
-        assert torch.isfinite(sigma_grad).all(), "Sigma gradient should be finite"
+        assert sigma.grad.abs().sum() > 0, "Sigma gradient should be non-zero"
+        assert torch.isfinite(sigma.grad).all(), "Sigma gradient should be finite"
 
 
 class TestGradientSamplingInterval:
@@ -184,7 +112,7 @@ class TestGradientSamplingInterval:
 
         # Compute gradient with sampling interval 1
         eps1 = epsilon.clone().detach().requires_grad_(True)
-        out1 = tide.maxwelltm(
+        out1 = tide.maxwell._kernel_api.maxwelltm(
             eps1,
             sigma,
             mu,
@@ -204,7 +132,7 @@ class TestGradientSamplingInterval:
 
         # Compute gradient with sampling interval 3
         eps2 = epsilon.clone().detach().requires_grad_(True)
-        out2 = tide.maxwelltm(
+        out2 = tide.maxwell._kernel_api.maxwelltm(
             eps2,
             sigma,
             mu,
@@ -257,7 +185,7 @@ class TestGradientSamplingInterval:
         # Test that different sampling intervals work without error
         for interval in [1, 2, 5]:
             eps = epsilon.clone().detach().requires_grad_(True)
-            out = tide.maxwelltm(
+            out = tide.maxwell._kernel_api.maxwelltm(
                 eps,
                 sigma,
                 mu,
@@ -309,7 +237,7 @@ class TestGradientBoundaryConditions:
 
         # Test with PML
         eps = epsilon.clone().detach().requires_grad_(True)
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             eps,
             sigma,
             mu,
@@ -355,7 +283,7 @@ class TestGradientBoundaryConditions:
 
         # Test without PML
         eps = epsilon.clone().detach().requires_grad_(True)
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             eps,
             sigma,
             mu,
@@ -410,7 +338,7 @@ class TestGradientMultiSource:
         source_amplitude = wavelet.view(1, 1, nt).expand(1, n_sources, nt)
 
         eps = epsilon.clone().detach().requires_grad_(True)
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             eps,
             sigma,
             mu,
@@ -478,7 +406,7 @@ class TestGradientBackendConsistency:
         def compute_grads(backend: bool | str) -> tuple[torch.Tensor, torch.Tensor]:
             eps = epsilon.clone().detach().requires_grad_(True)
             sig = sigma.clone().detach().requires_grad_(True)
-            rec = tide.maxwelltm(
+            rec = tide.maxwell._kernel_api.maxwelltm(
                 eps,
                 sig,
                 mu,
@@ -549,7 +477,7 @@ class TestGradientBackendConsistency:
             eps = epsilon.clone().detach().requires_grad_(True)
             sig = sigma.clone().detach().requires_grad_(True)
             src = source_wavelet.clone().detach().requires_grad_(True)
-            rec = tide.maxwelltm(
+            rec = tide.maxwell._kernel_api.maxwelltm(
                 eps,
                 sig,
                 mu,
@@ -623,7 +551,7 @@ class TestGradientBackendConsistency:
 
         def source_gradient(backend: bool | str) -> torch.Tensor:
             source = source_wavelet.clone().detach().requires_grad_(True)
-            receiver = tide.maxwelltm(
+            receiver = tide.maxwell._kernel_api.maxwelltm(
                 epsilon,
                 sigma,
                 mu,
@@ -692,7 +620,7 @@ class TestGradientBackendConsistency:
 
         def source_gradient(python_backend: bool) -> torch.Tensor:
             source = source_wavelet.clone().detach().requires_grad_(True)
-            receiver = tide.maxwell3d(
+            receiver = tide.maxwell._kernel_api.maxwell3d(
                 epsilon,
                 sigma,
                 mu,
@@ -766,7 +694,7 @@ class TestGradientBackendConsistency:
         def compute_grads(backend: bool | str) -> tuple[torch.Tensor, torch.Tensor]:
             eps = epsilon.clone().detach().requires_grad_(True)
             sig = sigma.clone().detach().requires_grad_(True)
-            rec = tide.maxwelltm(
+            rec = tide.maxwell._kernel_api.maxwelltm(
                 eps,
                 sig,
                 mu,
@@ -842,7 +770,7 @@ def test_eager_vs_native_gradients_cuda_include_pml_foldback():
 
     def compute_grad(backend: bool | str) -> torch.Tensor:
         eps = epsilon.clone().detach().requires_grad_(True)
-        rec = tide.maxwelltm(
+        rec = tide.maxwell._kernel_api.maxwelltm(
             eps,
             sigma,
             mu,
@@ -906,7 +834,7 @@ def test_tm2d_native_directional_derivative(parameter: str, stencil: int) -> Non
     def objective(value: torch.Tensor) -> torch.Tensor:
         epsilon_i = value if parameter == "epsilon" else epsilon
         sigma_i = value if parameter == "sigma" else sigma
-        receiver = tide.maxwelltm(
+        receiver = tide.maxwell._kernel_api.maxwelltm(
             epsilon_i,
             sigma_i,
             mu,

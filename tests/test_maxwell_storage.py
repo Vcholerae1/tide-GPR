@@ -98,7 +98,7 @@ def _run_grad(
 
     context = torch.cuda.stream(stream) if stream is not None else nullcontext()
     with context:
-        *_, receivers = tide.maxwelltm(
+        *_, receivers = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -291,7 +291,7 @@ def test_storage_mode_none_routes_gradients_per_fallback_policy():
     # Model gradients with storage_mode="none" are rejected by the capability
     # matrix under fallback="error" (native cannot snapshot wavefields).
     with pytest.raises(NotImplementedError, match="storage_mode='none'"):
-        tide.maxwelltm(
+        tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -308,7 +308,7 @@ def test_storage_mode_none_routes_gradients_per_fallback_policy():
 
     # Under the default reference policy the same plan runs on the Python
     # reference backend instead of raising in the adapter.
-    out = tide.maxwelltm(
+    out = tide.maxwell._kernel_api.maxwelltm(
         epsilon,
         sigma,
         mu,
@@ -354,7 +354,7 @@ def _run_tm_forward(stream: torch.cuda.Stream | None = None) -> torch.Tensor:
 
     context = torch.cuda.stream(stream) if stream is not None else nullcontext()
     with context:
-        receivers = tide.maxwelltm(
+        receivers = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,

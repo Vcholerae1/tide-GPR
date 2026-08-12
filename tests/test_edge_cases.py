@@ -30,7 +30,7 @@ class TestEdgeCaseGridSizes:
         source_amplitude = wavelet.view(1, 1, nt)
 
         # Should not raise an error for small grid
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -64,7 +64,7 @@ class TestEdgeCaseGridSizes:
         source_amplitude = wavelet.view(1, 1, nt)
 
         # Should handle single cell grid
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -97,7 +97,7 @@ class TestEdgeCaseGridSizes:
         wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -135,7 +135,7 @@ class TestEdgeCaseMaterialParameters:
         wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -169,7 +169,7 @@ class TestEdgeCaseMaterialParameters:
         wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -203,7 +203,7 @@ class TestEdgeCaseMaterialParameters:
         wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -239,7 +239,7 @@ class TestEdgeCaseMaterialParameters:
         wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -277,7 +277,7 @@ class TestEdgeCaseSourceReceiver:
         wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -310,7 +310,7 @@ class TestEdgeCaseSourceReceiver:
         source_locations = torch.tensor([[[ny // 2, nx // 2]]], dtype=torch.long, device=device)
         receiver_locations = torch.tensor([[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -344,7 +344,7 @@ class TestEdgeCaseSourceReceiver:
         wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -382,7 +382,7 @@ class TestEdgeCasePML:
         wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -417,7 +417,7 @@ class TestEdgeCasePML:
         source_amplitude = wavelet.view(1, 1, nt)
 
         # Large PML (almost half the domain)
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -455,7 +455,7 @@ class TestEdgeCaseDifferentStencils:
         wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,

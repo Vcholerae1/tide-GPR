@@ -15,165 +15,11 @@ from ..typing import (
 )
 from ..utils import C0
 from ..validation import validate_model_gradient_sampling_interval
-from .module_utils import (
-    _register_maxwell_model,
-    _register_optional_parameter,
-    _same_receiver_locations,
-    _validate_born_parameterization,
-)
+from .module_utils import _same_receiver_locations
 from .tm2d_born_cuda import borntm_c_cuda
 from .tm2d_born_python import borntm_python
 from ..core import derive_gradient_targets
 from .dispatch import compile_execution_policy
-
-
-class BornTM(torch.nn.Module):
-    """Module wrapper around :func:`borntm`.
-
-    The wrapper stores the background Maxwell model and an optional Born
-    perturbation inside a reusable ``torch.nn.Module``. This mirrors the module
-    oriented workflow that Deepwave exposes for ``ScalarBorn`` while preserving
-    TIDE's explicit ``borntm`` functional API.
-    """
-
-    @runtime_typecheck
-    def __init__(
-        self,
-        epsilon: Model2D,
-        sigma: Model2D,
-        mu: Model2D,
-        grid_spacing: float | Sequence[float],
-        *,
-        depsilon: Model2D | None = None,
-        dsigma: Model2D | None = None,
-        dca: Model2D | None = None,
-        dcb: Model2D | None = None,
-        epsilon_requires_grad: bool | None = None,
-        sigma_requires_grad: bool | None = None,
-        depsilon_requires_grad: bool | None = None,
-        dsigma_requires_grad: bool | None = None,
-        dca_requires_grad: bool | None = None,
-        dcb_requires_grad: bool | None = None,
-        parameterization: Literal["epsilon_sigma", "ca_cb"] = "epsilon_sigma",
-        linearize_source: bool = True,
-    ) -> None:
-        super().__init__()
-        _register_maxwell_model(
-            self,
-            epsilon,
-            sigma,
-            mu,
-            epsilon_requires_grad=epsilon_requires_grad,
-            sigma_requires_grad=sigma_requires_grad,
-        )
-        parameterization = _validate_born_parameterization(parameterization)
-        _register_optional_parameter(
-            self, "depsilon", depsilon, depsilon_requires_grad
-        )
-        _register_optional_parameter(self, "dsigma", dsigma, dsigma_requires_grad)
-        _register_optional_parameter(self, "dca", dca, dca_requires_grad)
-        _register_optional_parameter(self, "dcb", dcb, dcb_requires_grad)
-        self.grid_spacing = grid_spacing
-        self.parameterization = parameterization
-        self.linearize_source = linearize_source
-
-    @runtime_typecheck
-    def forward(
-        self,
-        dt: float,
-        source_amplitude: WaveletBatch | None = None,
-        source_location: SourceLocation2D | None = None,
-        receiver_location: ReceiverLocation2D | None = None,
-        bg_receiver_location: ReceiverLocation2D | None = None,
-        *,
-        depsilon: Model2D | None = None,
-        dsigma: Model2D | None = None,
-        dca: Model2D | None = None,
-        dcb: Model2D | None = None,
-        stencil: int = 2,
-        pml_width: int | Sequence[int] = 20,
-        max_vel: float | None = None,
-        Ey_0: Field2DLike | None = None,
-        Hx_0: Field2DLike | None = None,
-        Hz_0: Field2DLike | None = None,
-        m_Ey_x_0: Field2DLike | None = None,
-        m_Ey_z_0: Field2DLike | None = None,
-        m_Hx_z_0: Field2DLike | None = None,
-        m_Hz_x_0: Field2DLike | None = None,
-        dEy_0: Field2DLike | None = None,
-        dHx_0: Field2DLike | None = None,
-        dHz_0: Field2DLike | None = None,
-        dm_Ey_x_0: Field2DLike | None = None,
-        dm_Ey_z_0: Field2DLike | None = None,
-        dm_Hx_z_0: Field2DLike | None = None,
-        dm_Hz_x_0: Field2DLike | None = None,
-        nt: int | None = None,
-        model_gradient_sampling_interval: int = 1,
-        linearize_source: bool | None = None,
-        freq_taper_frac: float = 0.0,
-        time_pad_frac: float = 0.0,
-        time_taper: bool = False,
-        python_backend: Literal["eager", "jit", "compile"] | bool = False,
-        storage_mode: Literal["device", "cpu", "disk", "none", "auto"] = "device",
-        storage_path: str = ".",
-        storage_compression: bool | str = False,
-        storage_bytes_limit_device: int | None = None,
-        storage_bytes_limit_host: int | None = None,
-        n_threads: int | None = None,
-        fallback: Literal["reference", "error"] = "reference",
-    ) -> tuple[torch.Tensor, ...]:
-        if linearize_source is None:
-            linearize_source = self.linearize_source
-        assert isinstance(self.epsilon, torch.Tensor)
-        assert isinstance(self.sigma, torch.Tensor)
-        assert isinstance(self.mu, torch.Tensor)
-        return borntm(
-            self.epsilon,
-            self.sigma,
-            self.mu,
-            grid_spacing=self.grid_spacing,
-            dt=dt,
-            source_amplitude=source_amplitude,
-            source_location=source_location,
-            receiver_location=receiver_location,
-            bg_receiver_location=bg_receiver_location,
-            depsilon=self.depsilon if depsilon is None else depsilon,
-            dsigma=self.dsigma if dsigma is None else dsigma,
-            dca=self.dca if dca is None else dca,
-            dcb=self.dcb if dcb is None else dcb,
-            stencil=stencil,
-            pml_width=pml_width,
-            max_vel=max_vel,
-            Ey_0=Ey_0,
-            Hx_0=Hx_0,
-            Hz_0=Hz_0,
-            m_Ey_x_0=m_Ey_x_0,
-            m_Ey_z_0=m_Ey_z_0,
-            m_Hx_z_0=m_Hx_z_0,
-            m_Hz_x_0=m_Hz_x_0,
-            dEy_0=dEy_0,
-            dHx_0=dHx_0,
-            dHz_0=dHz_0,
-            dm_Ey_x_0=dm_Ey_x_0,
-            dm_Ey_z_0=dm_Ey_z_0,
-            dm_Hx_z_0=dm_Hx_z_0,
-            dm_Hz_x_0=dm_Hz_x_0,
-            nt=nt,
-            model_gradient_sampling_interval=model_gradient_sampling_interval,
-            parameterization=self.parameterization,
-            linearize_source=linearize_source,
-            freq_taper_frac=freq_taper_frac,
-            time_pad_frac=time_pad_frac,
-            time_taper=time_taper,
-            python_backend=python_backend,
-            storage_mode=storage_mode,
-            storage_path=storage_path,
-            storage_compression=storage_compression,
-            storage_bytes_limit_device=storage_bytes_limit_device,
-            storage_bytes_limit_host=storage_bytes_limit_host,
-            n_threads=n_threads,
-            fallback=fallback,
-        )
 
 
 @runtime_typecheck
@@ -246,7 +92,7 @@ def borntm(
         raise NotImplementedError("borntm currently supports a single 2D model only.")
     execution = compile_execution_policy(
         requested_backend=python_backend,
-        operation="born",
+        operation="jvp",
         dimension="tm2d",
         epsilon=epsilon,
         sigma=sigma,
@@ -480,4 +326,4 @@ def borntm(
     return (*state_outputs, bg_receiver_amplitudes, receiver_amplitudes)
 
 
-__all__ = ["BornTM", "borntm"]
+__all__: list[str] = []

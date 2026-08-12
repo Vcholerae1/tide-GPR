@@ -71,7 +71,7 @@ class TM2DLinearizationContext:
 
         execution = compile_execution_policy(
             requested_backend=python_backend,
-            operation="linearization",
+            operation="jvp",
             dimension="tm2d",
             epsilon=epsilon,
             sigma=sigma,

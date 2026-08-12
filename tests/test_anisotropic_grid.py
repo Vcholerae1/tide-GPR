@@ -9,7 +9,7 @@ import tide
 from tide.cfl import cfl_condition
 from tide.grid_utils import _normalize_grid_spacing_2d, _normalize_grid_spacing_3d
 
-from numerical_utils import assert_finite_nonzero, relative_l2
+from numerical_utils import MaxwellExample, assert_finite_nonzero, relative_l2
 
 
 @pytest.mark.numerical
@@ -47,7 +47,7 @@ def _tm_source_field(grid_spacing: list[float]) -> torch.Tensor:
     mu = torch.ones_like(epsilon)
     source = torch.ones((1, 1, 1), dtype=dtype)
     source_location = torch.tensor([[[6, 7]]], dtype=torch.long)
-    return tide.maxwelltm(
+    return tide.maxwell._kernel_api.maxwelltm(
         epsilon,
         sigma,
         mu,
@@ -69,7 +69,7 @@ def _em3d_source_field(grid_spacing: list[float]) -> torch.Tensor:
     mu = torch.ones_like(epsilon)
     source = torch.ones((1, 1, 1), dtype=dtype)
     source_location = torch.tensor([[[4, 4, 5]]], dtype=torch.long)
-    return tide.maxwell3d(
+    return tide.maxwell._kernel_api.maxwell3d(
         epsilon,
         sigma,
         mu,
@@ -112,14 +112,14 @@ def test_anisotropic_forward_and_material_gradients_are_finite(dimension: int) -
         spacing = [0.018, 0.022]
         source_location = torch.tensor([[[8, 6]]], dtype=torch.long)
         receiver_location = torch.tensor([[[8, 12]]], dtype=torch.long)
-        solver = tide.maxwelltm
+        solver = tide.maxwell._kernel_api.maxwelltm
         component_kwargs = {}
     else:
         shape = (8, 9, 10)
         spacing = [0.016, 0.018, 0.022]
         source_location = torch.tensor([[[4, 4, 3]]], dtype=torch.long)
         receiver_location = torch.tensor([[[4, 4, 7]]], dtype=torch.long)
-        solver = tide.maxwell3d
+        solver = tide.maxwell._kernel_api.maxwell3d
         component_kwargs = {"source_component": "ey", "receiver_component": "ey"}
 
     epsilon = torch.full(shape, 4.0, dtype=dtype, requires_grad=True)
@@ -150,21 +150,8 @@ def test_anisotropic_forward_and_material_gradients_are_finite(dimension: int) -
 
 @pytest.mark.numerical
 def test_scalar_and_equal_axis_spacing_match_exactly(
-    tm2d_numerical_case: dict[str, object],
+    tm2d_example: MaxwellExample,
 ) -> None:
-    case = tm2d_numerical_case
-    common = dict(
-        epsilon=case["epsilon"],
-        sigma=case["sigma"],
-        mu=case["mu"],
-        dt=case["dt"],
-        source_amplitude=case["source_amplitude"],
-        source_location=case["source_location"],
-        receiver_location=case["receiver_location"],
-        stencil=4,
-        pml_width=case["pml_width"],
-        python_backend=True,
-    )
-    scalar = tide.maxwelltm(grid_spacing=0.02, **common)[-1]
-    sequence = tide.maxwelltm(grid_spacing=[0.02, 0.02], **common)[-1]
+    scalar = tm2d_example.run(grid_spacing=0.02)[-1]
+    sequence = tm2d_example.run(grid_spacing=[0.02, 0.02])[-1]
     assert relative_l2(sequence, scalar) == 0.0

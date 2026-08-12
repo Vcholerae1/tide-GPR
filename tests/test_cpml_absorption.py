@@ -3,56 +3,42 @@ from __future__ import annotations
 import pytest
 import torch
 
-import tide
 from numerical_utils import (
     cosine_similarity,
+    make_tm2d_example,
     relative_l2,
     require_native_backend,
     signal_rms,
 )
 
 
-def _reflection_case(pml_width: int) -> torch.Tensor:
-    dtype = torch.float64
-    ny, nx, nt = 24, 50, 450
-    dt = 2.0e-11
-    epsilon = torch.full((ny, nx), 4.0, dtype=dtype)
-    sigma = torch.zeros_like(epsilon)
-    mu = torch.ones_like(epsilon)
-    source = tide.ricker(
-        300e6,
-        nt,
-        dt,
+def _reflection_response(pml_width: int) -> torch.Tensor:
+    example = make_tm2d_example(
+        shape=(24, 50),
+        nt=450,
+        grid_spacing=0.02,
+        dt=2.0e-11,
+        frequency=300e6,
         peak_time=1.5e-9,
-        dtype=dtype,
-    ).view(1, 1, nt)
-    source_location = torch.tensor([[[ny // 2, 15]]], dtype=torch.long)
-    receiver_location = torch.tensor([[[ny // 2, 20]]], dtype=torch.long)
-    return tide.maxwelltm(
-        epsilon,
-        sigma,
-        mu,
-        0.02,
-        dt,
-        source,
-        source_location,
-        receiver_location,
-        stencil=2,
+        dtype=torch.float64,
+        source_location=(12, 15),
+        receiver_locations=((12, 20),),
         pml_width=pml_width,
         python_backend=True,
-    )[-1]
+    )
+    return example.run()[-1]
 
 
 @pytest.mark.numerical
 def test_cpml_preserves_early_trace_and_reduces_late_reflection() -> None:
-    reflective = _reflection_case(0)
+    reflective = _reflection_response(0)
     early_stop = 100
     late_start = 280
     reflective_late_rms = signal_rms(reflective[late_start:])
     assert reflective_late_rms > 0.0
 
     for width in (4, 8, 12):
-        absorbed = _reflection_case(width)
+        absorbed = _reflection_response(width)
         assert relative_l2(absorbed[:early_stop], reflective[:early_stop]) < 1.0e-5
         assert signal_rms(absorbed[late_start:]) / reflective_late_rms < 0.30
 
@@ -60,27 +46,25 @@ def test_cpml_preserves_early_trace_and_reduces_late_reflection() -> None:
 def _tm_gradient(
     *, python_backend: bool
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    dtype = torch.float64
-    ny, nx, nt = 14, 16, 48
-    epsilon = torch.full((ny, nx), 4.0, dtype=dtype, requires_grad=True)
-    sigma = torch.full((ny, nx), 1.0e-4, dtype=dtype, requires_grad=True)
-    mu = torch.ones_like(epsilon)
-    source = tide.ricker(250e6, nt, 2.5e-11, peak_time=1.0e-9, dtype=dtype).view(
-        1, 1, nt
-    )
-    source_location = torch.tensor([[[7, 5]]], dtype=torch.long)
-    receiver_location = torch.tensor([[[7, 10]]], dtype=torch.long)
-    receiver = tide.maxwelltm(
-        epsilon,
-        sigma,
-        mu,
-        0.02,
-        2.5e-11,
-        source,
-        source_location,
-        receiver_location,
-        stencil=4,
+    example = make_tm2d_example(
+        shape=(14, 16),
+        nt=48,
+        grid_spacing=0.02,
+        dt=2.5e-11,
+        frequency=250e6,
+        peak_time=1.0e-9,
+        dtype=torch.float64,
+        sigma=1.0e-4,
+        source_location=(7, 5),
+        receiver_locations=((7, 10),),
         pml_width=3,
+        stencil=4,
+    )
+    epsilon = example.epsilon.requires_grad_()
+    sigma = example.sigma.requires_grad_()
+    receiver = example.run(
+        epsilon=epsilon,
+        sigma=sigma,
         python_backend=python_backend,
         storage_compression=False,
     )[-1]

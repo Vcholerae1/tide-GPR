@@ -88,7 +88,7 @@ def test_maxwelltm_matches_constant_medium_analytic():
     source_location = torch.tensor([[src_idx]], device=device)
     receiver_location = torch.tensor([[rec_idx]], device=device)
 
-    _, _, _, _, _, _, _, receivers = tide.maxwelltm(
+    _, _, _, _, _, _, _, receivers = tide.maxwell._kernel_api.maxwelltm(
         epsilon,
         sigma,
         mu,

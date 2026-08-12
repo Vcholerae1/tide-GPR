@@ -35,7 +35,6 @@ from .common import (
 )
 from ..core import derive_gradient_targets
 from .dispatch import compile_execution_policy
-from .module_utils import _register_maxwell_model
 from .maxwell3d_cuda import maxwell3d_c_cuda
 from .maxwell3d_python import maxwell3d_python
 from .validation_internal import (
@@ -56,197 +55,6 @@ def _default_receiver_misfit(
 ) -> torch.Tensor:
     residual = predicted - observed
     return 0.5 * residual.square().sum()
-
-
-class Maxwell3D(torch.nn.Module):
-    """3D Maxwell equations solver using FDTD + CPML.
-
-    This class is the 3D counterpart to `MaxwellTM`. It supports forward modeling
-    and inversion through PyTorch autograd on `(epsilon, sigma)`.
-    """
-
-    @runtime_typecheck
-    def __init__(
-        self,
-        epsilon: Model3DLike,
-        sigma: Model3DLike,
-        mu: Model3DLike,
-        grid_spacing: float | Sequence[float],
-        epsilon_requires_grad: bool | None = None,
-        sigma_requires_grad: bool | None = None,
-    ) -> None:
-        super().__init__()
-        _register_maxwell_model(
-            self,
-            epsilon,
-            sigma,
-            mu,
-            epsilon_requires_grad=epsilon_requires_grad,
-            sigma_requires_grad=sigma_requires_grad,
-        )
-        self.grid_spacing = grid_spacing
-
-    @runtime_typecheck
-    def forward(
-        self,
-        dt: float,
-        source_amplitude: WaveletBatch | None,
-        source_location: SourceLocation3D | None,
-        receiver_location: ReceiverLocation3D | None,
-        stencil: int = 2,
-        pml_width: int | Sequence[int] = 20,
-        max_vel: float | None = None,
-        Ex_0: Field3DLike | None = None,
-        Ey_0: Field3DLike | None = None,
-        Ez_0: Field3DLike | None = None,
-        Hx_0: Field3DLike | None = None,
-        Hy_0: Field3DLike | None = None,
-        Hz_0: Field3DLike | None = None,
-        m_hz_y: Field3DLike | None = None,
-        m_hy_z: Field3DLike | None = None,
-        m_hx_z: Field3DLike | None = None,
-        m_hz_x: Field3DLike | None = None,
-        m_hy_x: Field3DLike | None = None,
-        m_hx_y: Field3DLike | None = None,
-        m_ey_z: Field3DLike | None = None,
-        m_ez_y: Field3DLike | None = None,
-        m_ez_x: Field3DLike | None = None,
-        m_ex_z: Field3DLike | None = None,
-        m_ex_y: Field3DLike | None = None,
-        m_ey_x: Field3DLike | None = None,
-        nt: int | None = None,
-        model_gradient_sampling_interval: int = 1,
-        freq_taper_frac: float = 0.0,
-        time_pad_frac: float = 0.0,
-        time_taper: bool = False,
-        save_snapshots: bool | None = None,
-        forward_callback: Callback | None = None,
-        backward_callback: Callback | None = None,
-        callback_frequency: int = 1,
-        source_component: str = "ey",
-        receiver_component: str = "ey",
-        execution_backend: str = "standard",
-        python_backend: bool | str = False,
-        storage_mode: str = "device",
-        storage_path: str = ".",
-        storage_compression: bool | str = False,
-        storage_bytes_limit_device: int | None = None,
-        storage_bytes_limit_host: int | None = None,
-        storage_chunk_steps: int = 0,
-        n_threads: int | None = None,
-        dispersion: DebyeDispersion | None = None,
-        compute_mode: Literal["native"] = "native",
-        fallback: Literal["reference", "error"] = "reference",
-    ):
-        assert isinstance(self.epsilon, torch.Tensor)
-        assert isinstance(self.sigma, torch.Tensor)
-        assert isinstance(self.mu, torch.Tensor)
-        return maxwell3d(
-            self.epsilon,
-            self.sigma,
-            self.mu,
-            self.grid_spacing,
-            dt,
-            source_amplitude,
-            source_location,
-            receiver_location,
-            stencil,
-            pml_width,
-            max_vel,
-            Ex_0,
-            Ey_0,
-            Ez_0,
-            Hx_0,
-            Hy_0,
-            Hz_0,
-            m_hz_y,
-            m_hy_z,
-            m_hx_z,
-            m_hz_x,
-            m_hy_x,
-            m_hx_y,
-            m_ey_z,
-            m_ez_y,
-            m_ez_x,
-            m_ex_z,
-            m_ex_y,
-            m_ey_x,
-            nt,
-            model_gradient_sampling_interval,
-            freq_taper_frac,
-            time_pad_frac,
-            time_taper,
-            save_snapshots,
-            forward_callback,
-            backward_callback,
-            callback_frequency,
-            source_component,
-            receiver_component,
-            execution_backend,
-            python_backend,
-            storage_mode,
-            storage_path,
-            storage_compression,
-            storage_bytes_limit_device,
-            storage_bytes_limit_host,
-            storage_chunk_steps,
-            n_threads,
-            dispersion=dispersion,
-            compute_mode=compute_mode,
-            fallback=fallback,
-        )
-
-    @runtime_typecheck
-    def hvp(
-        self,
-        dt: float,
-        source_amplitude: WaveletBatch | None,
-        source_location: SourceLocation3D | None,
-        receiver_location: ReceiverLocation3D | None,
-        observed_data: ReceiverData,
-        *,
-        vepsilon: Model3D | None = None,
-        vsigma: Model3D | None = None,
-        misfit: ReceiverMisfit | None = None,
-        stencil: int = 2,
-        pml_width: int | Sequence[int] = 20,
-        max_vel: float | None = None,
-        nt: int | None = None,
-        model_gradient_sampling_interval: int = 1,
-        linearize_source: bool = True,
-        source_component: str = "ey",
-        receiver_component: str = "ey",
-        hessian_mode: Literal["full", "gauss_newton"] = "full",
-        python_backend: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        _validate_optional_bool("python_backend", python_backend)
-        assert isinstance(self.epsilon, torch.Tensor)
-        assert isinstance(self.sigma, torch.Tensor)
-        assert isinstance(self.mu, torch.Tensor)
-        return maxwell3d_hvp(
-            self.epsilon,
-            self.sigma,
-            self.mu,
-            grid_spacing=self.grid_spacing,
-            dt=dt,
-            source_amplitude=source_amplitude,
-            source_location=source_location,
-            receiver_location=receiver_location,
-            observed_data=observed_data,
-            vepsilon=vepsilon,
-            vsigma=vsigma,
-            misfit=misfit,
-            stencil=stencil,
-            pml_width=pml_width,
-            max_vel=max_vel,
-            nt=nt,
-            model_gradient_sampling_interval=model_gradient_sampling_interval,
-            linearize_source=linearize_source,
-            source_component=source_component,
-            receiver_component=receiver_component,
-            hessian_mode=hessian_mode,
-            python_backend=python_backend,
-        )
 
 
 @runtime_typecheck
@@ -316,7 +124,7 @@ def maxwell3d_hvp(
 
     execution = compile_execution_policy(
         requested_backend=python_backend,
-        operation="hvp",
+        operation="second_vjp",
         dimension="em3d",
         epsilon=epsilon,
         sigma=sigma,
@@ -334,7 +142,7 @@ def maxwell3d_hvp(
     )
     decision = execution.decision
 
-    if decision.selected is BackendPreference.PYTHON:
+    if decision.selected is BackendPreference.REFERENCE:
         from .maxwell3d_born_autograd import maxwell3d_receiver_hvp_naive
 
         return maxwell3d_receiver_hvp_naive(
@@ -1158,4 +966,4 @@ def maxwell3d(
     )
 
 
-__all__ = ["Maxwell3D", "maxwell3d", "maxwell3d_hvp"]
+__all__: list[str] = []

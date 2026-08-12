@@ -3,8 +3,8 @@ import warnings
 import pytest
 import torch
 
-import tide
 from tide import backend_utils
+from numerical_utils import MaxwellExample, make_tm2d_example
 
 
 def _cosine(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -14,82 +14,42 @@ def _cosine(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 @pytest.fixture
-def born_tm_setup() -> dict[str, object]:
-    device = torch.device("cpu")
-    dtype = torch.float64
-
-    ny, nx = 14, 16
-    nt = 24
-    dx = 0.02
-    dt = 3.5e-11
-    pml_width = 3
-    stencil = 2
-
-    epsilon = torch.full((ny, nx), 4.0, device=device, dtype=dtype)
-    epsilon[ny // 2 - 1 : ny // 2 + 1, nx // 2 - 1 : nx // 2 + 1] = 4.4
-    sigma = torch.zeros_like(epsilon)
-    mu = torch.ones_like(epsilon)
-
-    source_location = torch.tensor(
-        [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
+def born_tm_setup() -> MaxwellExample:
+    example = make_tm2d_example(
+        shape=(14, 16),
+        nt=24,
+        grid_spacing=0.02,
+        dt=3.5e-11,
+        frequency=120e6,
+        dtype=torch.float64,
+        source_location=(7, 4),
+        receiver_locations=((7, 8), (7, 10)),
+        pml_width=3,
+        stencil=2,
     )
-    receiver_location = torch.tensor(
-        [[[ny // 2, nx // 2], [ny // 2, nx // 2 + 2]]],
-        dtype=torch.long,
-        device=device,
-    )
-    wavelet = tide.ricker(
-        120e6,
-        nt,
-        dt,
-        peak_time=1.0 / 120e6,
-        dtype=dtype,
-        device=device,
-    )
-    source_amplitude = wavelet.view(1, 1, nt)
-
-    return {
-        "epsilon": epsilon,
-        "sigma": sigma,
-        "mu": mu,
-        "grid_spacing": dx,
-        "dt": dt,
-        "source_amplitude": source_amplitude,
-        "source_location": source_location,
-        "receiver_location": receiver_location,
-        "pml_width": pml_width,
-        "stencil": stencil,
-    }
+    epsilon = example.epsilon.clone()
+    epsilon[6:8, 7:9] = 4.4
+    return example.updated(epsilon=epsilon)
 
 
 def _born_outputs(
-    setup: dict[str, object],
+    setup: MaxwellExample,
     *,
     depsilon: torch.Tensor,
     linearize_source: bool,
     python_backend: bool,
     bg_receiver_location: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, ...]:
-    return tide.borntm(
-        setup["epsilon"],
-        setup["sigma"],
-        setup["mu"],
-        grid_spacing=setup["grid_spacing"],
-        dt=setup["dt"],
-        source_amplitude=setup["source_amplitude"],
-        source_location=setup["source_location"],
-        receiver_location=setup["receiver_location"],
+    return setup.run_born(
         bg_receiver_location=bg_receiver_location,
         depsilon=depsilon,
-        pml_width=setup["pml_width"],
-        stencil=setup["stencil"],
         linearize_source=linearize_source,
         python_backend=python_backend,
     )
 
 
 def _born_receivers(
-    setup: dict[str, object],
+    setup: MaxwellExample,
     *,
     depsilon: torch.Tensor,
     linearize_source: bool,
@@ -104,37 +64,29 @@ def _born_receivers(
 
 
 def _maxwell_outputs(
-    setup: dict[str, object],
+    setup: MaxwellExample,
     *,
     epsilon: torch.Tensor,
     receiver_location: torch.Tensor,
     python_backend: bool,
 ) -> tuple[torch.Tensor, ...]:
-    return tide.maxwelltm(
-        epsilon,
-        setup["sigma"],
-        setup["mu"],
-        grid_spacing=setup["grid_spacing"],
-        dt=setup["dt"],
-        source_amplitude=setup["source_amplitude"],
-        source_location=setup["source_location"],
+    return setup.run(
+        epsilon=epsilon,
         receiver_location=receiver_location,
-        pml_width=setup["pml_width"],
-        stencil=setup["stencil"],
         model_gradient_sampling_interval=1,
         python_backend=python_backend,
     )
 
 
 def _maxwell_receivers(
-    setup: dict[str, object],
+    setup: MaxwellExample,
     *,
     epsilon: torch.Tensor,
 ) -> torch.Tensor:
     return _maxwell_outputs(
         setup,
         epsilon=epsilon,
-        receiver_location=setup["receiver_location"],
+        receiver_location=setup.receiver_location,
         python_backend=True,
     )[-1]
 
@@ -142,7 +94,7 @@ def _maxwell_receivers(
 def test_borntm_is_linear_in_depsilon(born_tm_setup):
     torch.manual_seed(0)
     setup = born_tm_setup
-    epsilon = setup["epsilon"]
+    epsilon = setup.epsilon
     assert isinstance(epsilon, torch.Tensor)
 
     m1 = torch.randn_like(epsilon) * 0.05
@@ -174,7 +126,7 @@ def test_borntm_is_linear_in_depsilon(born_tm_setup):
 def test_borntm_matches_maxwelltm_taylor_expansion(born_tm_setup):
     torch.manual_seed(1)
     setup = born_tm_setup
-    epsilon = setup["epsilon"]
+    epsilon = setup.epsilon
     assert isinstance(epsilon, torch.Tensor)
 
     dm = torch.randn_like(epsilon)
@@ -200,8 +152,8 @@ def test_borntm_matches_maxwelltm_taylor_expansion(born_tm_setup):
 def test_borntm_returns_background_wavefields_and_receivers(born_tm_setup):
     torch.manual_seed(3)
     setup = born_tm_setup
-    epsilon = setup["epsilon"]
-    receiver_location = setup["receiver_location"]
+    epsilon = setup.epsilon
+    receiver_location = setup.receiver_location
     assert isinstance(epsilon, torch.Tensor)
     assert isinstance(receiver_location, torch.Tensor)
 
@@ -231,8 +183,8 @@ def test_native_borntm_matches_python_reference(born_tm_setup):
 
     torch.manual_seed(11)
     setup = born_tm_setup
-    epsilon = setup["epsilon"]
-    receiver_location = setup["receiver_location"]
+    epsilon = setup.epsilon
+    receiver_location = setup.receiver_location
     assert isinstance(epsilon, torch.Tensor)
     assert isinstance(receiver_location, torch.Tensor)
 
@@ -258,12 +210,10 @@ def test_native_borntm_matches_python_reference(born_tm_setup):
 
 
 @pytest.mark.parametrize("linearize_source", [True, False])
-def test_borntm_autograd_passes_dot_product_test(
-    born_tm_setup, linearize_source: bool
-):
+def test_borntm_autograd_passes_dot_product_test(born_tm_setup, linearize_source: bool):
     torch.manual_seed(2)
     setup = born_tm_setup
-    epsilon = setup["epsilon"]
+    epsilon = setup.epsilon
     assert isinstance(epsilon, torch.Tensor)
 
     dm = 0.05 * torch.randn_like(epsilon)
@@ -304,7 +254,7 @@ def test_native_borntm_autograd_uses_coeff_gradient_direction(
 
     torch.manual_seed(5)
     setup = born_tm_setup
-    epsilon = setup["epsilon"]
+    epsilon = setup.epsilon
     assert isinstance(epsilon, torch.Tensor)
 
     dm = 0.05 * torch.randn_like(epsilon)
@@ -340,7 +290,7 @@ def test_native_borntm_autograd_uses_coeff_gradient_direction(
 def test_borntm_autograd_matches_maxwelltm_autograd_gradient(born_tm_setup):
     torch.manual_seed(7)
     setup = born_tm_setup
-    epsilon = setup["epsilon"]
+    epsilon = setup.epsilon
     assert isinstance(epsilon, torch.Tensor)
 
     residual = torch.randn(
@@ -373,7 +323,7 @@ def test_native_borntm_autograd_matches_python_reference_direction(born_tm_setup
 
     torch.manual_seed(13)
     setup = born_tm_setup
-    epsilon = setup["epsilon"]
+    epsilon = setup.epsilon
     assert isinstance(epsilon, torch.Tensor)
 
     residual = torch.randn(
@@ -415,8 +365,8 @@ def test_native_borntm_supports_background_gradients_by_default(born_tm_setup):
 
     torch.manual_seed(17)
     setup = born_tm_setup
-    epsilon = setup["epsilon"]
-    sigma = setup["sigma"]
+    epsilon = setup.epsilon
+    sigma = setup.sigma
     assert isinstance(epsilon, torch.Tensor)
     assert isinstance(sigma, torch.Tensor)
 
@@ -434,18 +384,10 @@ def test_native_borntm_supports_background_gradients_by_default(born_tm_setup):
     depsilon_native = depsilon_seed.clone().detach().requires_grad_(True)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        pred_native = tide.borntm(
-            epsilon_native,
-            sigma_native,
-            setup["mu"],
-            grid_spacing=setup["grid_spacing"],
-            dt=setup["dt"],
-            source_amplitude=setup["source_amplitude"],
-            source_location=setup["source_location"],
-            receiver_location=setup["receiver_location"],
+        pred_native = setup.run_born(
+            epsilon=epsilon_native,
+            sigma=sigma_native,
             depsilon=depsilon_native,
-            pml_width=setup["pml_width"],
-            stencil=setup["stencil"],
             linearize_source=True,
             python_backend=False,
         )[-1]
@@ -460,18 +402,10 @@ def test_native_borntm_supports_background_gradients_by_default(born_tm_setup):
     epsilon_reference = epsilon.clone().detach().requires_grad_(True)
     sigma_reference = sigma.clone().detach().requires_grad_(True)
     depsilon_reference = depsilon_seed.clone().detach().requires_grad_(True)
-    pred_reference = tide.borntm(
-        epsilon_reference,
-        sigma_reference,
-        setup["mu"],
-        grid_spacing=setup["grid_spacing"],
-        dt=setup["dt"],
-        source_amplitude=setup["source_amplitude"],
-        source_location=setup["source_location"],
-        receiver_location=setup["receiver_location"],
+    pred_reference = setup.run_born(
+        epsilon=epsilon_reference,
+        sigma=sigma_reference,
         depsilon=depsilon_reference,
-        pml_width=setup["pml_width"],
-        stencil=setup["stencil"],
         linearize_source=True,
         python_backend=True,
     )[-1]

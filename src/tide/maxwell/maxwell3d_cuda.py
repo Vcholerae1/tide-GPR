@@ -203,7 +203,7 @@ def maxwell3d_c_cuda(
         receiver_component=receiver_component,
     )
     decision = execution.decision
-    if decision.selected is BackendPreference.PYTHON:
+    if decision.selected is BackendPreference.REFERENCE:
         return _fallback_reason(decision.reason or "native backend unavailable")
 
     if functorch_active:

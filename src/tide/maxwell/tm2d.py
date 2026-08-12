@@ -37,7 +37,6 @@ from .common import (
 )
 from ..core import GradientTarget, derive_gradient_targets
 from .dispatch import ExecutionPolicy, compile_execution_policy
-from .module_utils import _register_maxwell_model
 from .tm2d_python import maxwell_func
 from .validation_internal import (
     _validate_dispersion_time_step,
@@ -101,164 +100,6 @@ def _default_receiver_misfit(
 ) -> torch.Tensor:
     residual = predicted - observed
     return 0.5 * residual.square().sum()
-
-
-class MaxwellTM(torch.nn.Module):
-    """2D TM mode Maxwell equations solver using FDTD method."""
-
-    @runtime_typecheck
-    def __init__(
-        self,
-        epsilon: Model2DLike,
-        sigma: Model2DLike,
-        mu: Model2DLike,
-        grid_spacing: float | Sequence[float],
-        epsilon_requires_grad: bool | None = None,
-        sigma_requires_grad: bool | None = None,
-    ) -> None:
-        super().__init__()
-        _register_maxwell_model(
-            self,
-            epsilon,
-            sigma,
-            mu,
-            epsilon_requires_grad=epsilon_requires_grad,
-            sigma_requires_grad=sigma_requires_grad,
-        )
-        self.grid_spacing = grid_spacing
-
-    @runtime_typecheck
-    def forward(
-        self,
-        dt: float,
-        source_amplitude: WaveletBatch | None,
-        source_location: SourceLocation2D | None,
-        receiver_location: ReceiverLocation2D | None,
-        stencil: int = 2,
-        pml_width: int | Sequence[int] = 20,
-        max_vel: float | None = None,
-        Ey_0: Field2DLike | None = None,
-        Hx_0: Field2DLike | None = None,
-        Hz_0: Field2DLike | None = None,
-        m_Ey_x: Field2DLike | None = None,
-        m_Ey_z: Field2DLike | None = None,
-        m_Hx_z: Field2DLike | None = None,
-        m_Hz_x: Field2DLike | None = None,
-        nt: int | None = None,
-        model_gradient_sampling_interval: int = 1,
-        freq_taper_frac: float = 0.0,
-        time_pad_frac: float = 0.0,
-        time_taper: bool = False,
-        save_snapshots: bool | None = None,
-        forward_callback: Callback | None = None,
-        backward_callback: Callback | None = None,
-        callback_frequency: int = 1,
-        python_backend: Literal["eager", "jit", "compile"] | bool = False,
-        storage_mode: Literal["device", "cpu", "disk", "none", "auto"] = "device",
-        storage_path: str = ".",
-        storage_compression: bool | str = False,
-        storage_bytes_limit_device: int | None = None,
-        storage_bytes_limit_host: int | None = None,
-        storage_chunk_steps: int = 0,
-        dispersion: DebyeDispersion | None = None,
-        compute_mode: Literal["native"] = "native",
-        fallback: Literal["reference", "error"] = "reference",
-    ):
-        assert isinstance(self.epsilon, torch.Tensor)
-        assert isinstance(self.sigma, torch.Tensor)
-        assert isinstance(self.mu, torch.Tensor)
-        return maxwelltm(
-            self.epsilon,
-            self.sigma,
-            self.mu,
-            self.grid_spacing,
-            dt,
-            source_amplitude,
-            source_location,
-            receiver_location,
-            stencil,
-            pml_width,
-            max_vel,
-            Ey_0,
-            Hx_0,
-            Hz_0,
-            m_Ey_x,
-            m_Ey_z,
-            m_Hx_z,
-            m_Hz_x,
-            nt,
-            model_gradient_sampling_interval,
-            freq_taper_frac,
-            time_pad_frac,
-            time_taper,
-            save_snapshots,
-            forward_callback,
-            backward_callback,
-            callback_frequency,
-            python_backend,
-            storage_mode,
-            storage_path,
-            storage_compression,
-            storage_bytes_limit_device,
-            storage_bytes_limit_host,
-            storage_chunk_steps,
-            n_threads=None,
-            dispersion=dispersion,
-            compute_mode=compute_mode,
-            fallback=fallback,
-        )
-
-    @runtime_typecheck
-    def hvp(
-        self,
-        dt: float,
-        source_amplitude: WaveletBatch | None,
-        source_location: SourceLocation2D | None,
-        receiver_location: ReceiverLocation2D | None,
-        observed_data: ReceiverData,
-        *,
-        vepsilon: Model2D | None = None,
-        vsigma: Model2D | None = None,
-        misfit: ReceiverMisfit | None = None,
-        stencil: int = 2,
-        pml_width: int | Sequence[int] = 20,
-        max_vel: float | None = None,
-        nt: int | None = None,
-        model_gradient_sampling_interval: int = 1,
-        linearize_source: bool = True,
-        hessian_mode: Literal["full", "gauss_newton"] = "full",
-        python_backend: bool = False,
-        storage_mode: Literal["device", "cpu", "disk"] = "device",
-        storage_compression: bool | str | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        _validate_optional_bool("python_backend", python_backend)
-        assert isinstance(self.epsilon, torch.Tensor)
-        assert isinstance(self.sigma, torch.Tensor)
-        assert isinstance(self.mu, torch.Tensor)
-        return maxwelltm_hvp(
-            self.epsilon,
-            self.sigma,
-            self.mu,
-            grid_spacing=self.grid_spacing,
-            dt=dt,
-            source_amplitude=source_amplitude,
-            source_location=source_location,
-            receiver_location=receiver_location,
-            observed_data=observed_data,
-            vepsilon=vepsilon,
-            vsigma=vsigma,
-            misfit=misfit,
-            stencil=stencil,
-            pml_width=pml_width,
-            max_vel=max_vel,
-            nt=nt,
-            model_gradient_sampling_interval=model_gradient_sampling_interval,
-            linearize_source=linearize_source,
-            hessian_mode=hessian_mode,
-            python_backend=python_backend,
-            storage_mode=storage_mode,
-            storage_compression=storage_compression,
-        )
 
 
 @runtime_typecheck
@@ -339,7 +180,7 @@ def maxwelltm_hvp(
 
     execution = compile_execution_policy(
         requested_backend=python_backend,
-        operation="hvp",
+        operation="second_vjp",
         dimension="tm2d",
         epsilon=epsilon,
         sigma=sigma,
@@ -356,7 +197,7 @@ def maxwelltm_hvp(
     )
     decision = execution.decision
 
-    if decision.selected is BackendPreference.PYTHON:
+    if decision.selected is BackendPreference.REFERENCE:
         from .tm2d_born_autograd import tm2d_receiver_hvp_naive
 
         return tm2d_receiver_hvp_naive(
@@ -912,4 +753,4 @@ def maxwelltm(
     )
 
 
-__all__ = ["MaxwellTM", "maxwelltm", "maxwelltm_hvp"]
+__all__: list[str] = []

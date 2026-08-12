@@ -62,7 +62,7 @@ def test_maxwelltm_rejects_3d_coordinates() -> None:
     bad_source_location = torch.tensor([[[2, 3, 4]]], dtype=torch.long)
 
     with pytest.raises(TypeCheckError):
-        tide.maxwelltm(
+        tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -81,7 +81,7 @@ def test_maxwell3d_rejects_2d_coordinates() -> None:
     bad_receiver_location = torch.tensor([[[3, 4]]], dtype=torch.long)
 
     with pytest.raises(TypeCheckError):
-        tide.maxwell3d(
+        tide.maxwell._kernel_api.maxwell3d(
             epsilon,
             sigma,
             mu,
@@ -107,7 +107,7 @@ def test_borntm_rejects_batched_perturbation() -> None:
     bad_depsilon = torch.ones((1, *epsilon.shape), dtype=epsilon.dtype)
 
     with pytest.raises(TypeCheckError):
-        tide.borntm(
+        tide.maxwell._kernel_api.borntm(
             epsilon,
             sigma,
             mu,
@@ -122,14 +122,21 @@ def test_borntm_rejects_batched_perturbation() -> None:
         )
 
 
-def test_maxwelltm_constructor_rejects_rank4_model() -> None:
-    epsilon, sigma, mu, *_ = _tm_inputs()
+def test_maxwelltm_operator_rejects_rank4_model() -> None:
+    epsilon, _, _, source, source_location, receiver_location = _tm_inputs()
     bad_epsilon = torch.ones((1, 1, *epsilon.shape), dtype=epsilon.dtype)
+    model = tide.EMModel(
+        bad_epsilon,
+        torch.zeros_like(bad_epsilon),
+        torch.ones_like(bad_epsilon),
+    )
+    operator = tide.MaxwellTM(
+        tide.Discretization(0.02, 1e-11, boundary=tide.CPML(1)),
+        tide.Experiment(
+            tide.Acquisition(source_location, receiver_location),
+            source,
+        ),
+    )
 
-    with pytest.raises(TypeCheckError):
-        tide.MaxwellTM(
-            bad_epsilon,
-            sigma,
-            mu,
-            grid_spacing=0.02,
-        )
+    with pytest.raises(ValueError, match="2-D or batched 3-D"):
+        operator(model)

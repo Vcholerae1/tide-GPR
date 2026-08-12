@@ -36,7 +36,7 @@ class TestLongRunStability:
         )
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -93,7 +93,7 @@ class TestLongRunStability:
         # CFL: dt <= dx / (v * sqrt(2)) ≈ 0.02 / (1.5e8 * 1.414) ≈ 9e-11
         dt = 5e-11  # Conservative time step
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -143,7 +143,7 @@ class TestHighContrastStability:
         )
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -184,7 +184,7 @@ class TestHighContrastStability:
         )
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -229,7 +229,7 @@ class TestLossyMediaStability:
         )
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -271,7 +271,7 @@ class TestLossyMediaStability:
         source_amplitude = wavelet.view(1, 1, nt)
 
         # Lossless case
-        out_lossless = tide.maxwelltm(
+        out_lossless = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -286,7 +286,7 @@ class TestLossyMediaStability:
 
         # Lossy case
         sigma_lossy = torch.ones(ny, nx, device=device, dtype=dtype) * 0.1
-        out_lossy = tide.maxwelltm(
+        out_lossy = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma_lossy,
             mu,
@@ -332,7 +332,7 @@ class TestDifferentStencilStability:
         )
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -377,7 +377,7 @@ class TestEnergyConservation:
         )
         source_amplitude = wavelet.view(1, 1, nt)
 
-        out = tide.maxwelltm(
+        out = tide.maxwell._kernel_api.maxwelltm(
             epsilon,
             sigma,
             mu,
@@ -437,7 +437,7 @@ def test_native_long_run_forward_and_backward_stay_stable(
         receiver_location = torch.tensor(
             [[[12, 14], [14, 16]]], device=device, dtype=torch.long
         )
-        solver = tide.maxwelltm
+        solver = tide.maxwell._kernel_api.maxwelltm
         component_kwargs = {}
     else:
         shape = (12, 13, 14)
@@ -446,7 +446,7 @@ def test_native_long_run_forward_and_backward_stay_stable(
         receiver_location = torch.tensor(
             [[[6, 6, 9], [7, 8, 9]]], device=device, dtype=torch.long
         )
-        solver = tide.maxwell3d
+        solver = tide.maxwell._kernel_api.maxwell3d
         component_kwargs = {"source_component": "ey", "receiver_component": "ey"}
 
     epsilon = torch.full(shape, 4.0, device=device, dtype=dtype)

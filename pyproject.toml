@@ -53,11 +53,6 @@ dev = [
     "pytest-cov>=4.0",
     "ruff>=0.15.2",
 ]
-docs = [
-    "mkdocs>=1.6.1",
-    "mkdocs-material>=9.6.0",
-    "pymdown-extensions>=10.0",
-]
 experiments = [
     "geomloss>=0.2.6",
     "pyyaml>=6.0",
@@ -143,9 +138,4 @@ dev = [
     "pytest>=9.0.2",
     "pytest-cov>=4.0",
     "ruff>=0.15.2",
-]
-docs = [
-    "mkdocs>=1.6.1",
-    "mkdocs-material>=9.6.0",
-    "pymdown-extensions>=10.0",
 ]

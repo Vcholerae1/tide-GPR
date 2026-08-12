@@ -43,7 +43,7 @@ def test_callback_state_views_for_3d():
         assert ey_full.shape[-2] >= ey_pml.shape[-2]
         assert ey_full.shape[-1] >= ey_pml.shape[-1]
 
-    tide.maxwell3d(
+    tide.maxwell._kernel_api.maxwell3d(
         epsilon,
         sigma,
         mu,
@@ -116,7 +116,7 @@ def test_native_3d_backward_callback_preserves_accumulated_gradients(
             kwargs["backward_callback"] = backward_cb
             kwargs["callback_frequency"] = 2
 
-        receivers = tide.maxwell3d(
+        receivers = tide.maxwell._kernel_api.maxwell3d(
             eps,
             sig,
             mu,

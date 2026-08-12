@@ -26,7 +26,7 @@ def test_maxwell3d_storage_modes_are_accepted_in_backend_path(storage_mode: str)
         70e6, nt, 4e-11, peak_time=1.0 / 70e6, dtype=dtype, device=device
     ).view(1, 1, nt)
 
-    out = tide.maxwell3d(
+    out = tide.maxwell._kernel_api.maxwell3d(
         epsilon,
         sigma,
         mu,
@@ -69,7 +69,7 @@ def _run_3d_grad(
 
     context = torch.cuda.stream(stream) if stream is not None else nullcontext()
     with context:
-        receivers = tide.maxwell3d(
+        receivers = tide.maxwell._kernel_api.maxwell3d(
             epsilon,
             sigma,
             mu,
@@ -180,7 +180,7 @@ def _run_3d_forward(
 
     context = torch.cuda.stream(stream) if stream is not None else nullcontext()
     with context:
-        receivers = tide.maxwell3d(
+        receivers = tide.maxwell._kernel_api.maxwell3d(
             epsilon,
             sigma,
             mu,

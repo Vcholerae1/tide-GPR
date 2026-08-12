@@ -31,6 +31,7 @@ from .losses import (
     take_receiver_batch,
     take_receiver_shard_batch,
 )
+from .objective import ReceiverLoss, ReceiverObjective
 from .preconditioners import (
     BlockPreconditioner,
     block_preconditioner,
@@ -54,6 +55,8 @@ __all__ = [
     "BlockPreconditioner",
     "DistributedContext",
     "LossNormalization",
+    "ReceiverLoss",
+    "ReceiverObjective",
     "ReceiverMode",
     "ShotBatch",
     "all_reduce_float",

@@ -151,7 +151,7 @@ def _run_numeric_trace(
         device=device,
     )
 
-    out = tide.maxwell3d(
+    out = tide.maxwell._kernel_api.maxwell3d(
         epsilon=epsilon,
         sigma=cond,
         mu=mu,

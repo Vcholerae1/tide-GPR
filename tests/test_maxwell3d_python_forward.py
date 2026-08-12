@@ -27,7 +27,7 @@ def test_maxwell3d_python_forward_smoke(device: torch.device):
         100e6, nt, 4e-11, peak_time=1.0 / 100e6, dtype=dtype, device=device
     ).view(1, 1, nt)
 
-    out = tide.maxwell3d(
+    out = tide.maxwell._kernel_api.maxwell3d(
         epsilon,
         sigma,
         mu,
@@ -85,7 +85,7 @@ def test_maxwell3d_python_forward_long_nt_stability(device: torch.device):
         ey = state.get_wavefield("Ey", view="inner")
         wavefield_peaks.append(float(ey.abs().max().detach().cpu()))
 
-    out = tide.maxwell3d(
+    out = tide.maxwell._kernel_api.maxwell3d(
         epsilon,
         sigma,
         mu,

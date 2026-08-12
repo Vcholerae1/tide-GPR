@@ -15,7 +15,7 @@ class Dimension(StrEnum):
 
 class BackendPreference(StrEnum):
     AUTO = "auto"
-    PYTHON = "python"
+    REFERENCE = "reference"
     NATIVE = "native"
 
 
@@ -38,9 +38,9 @@ class StorageMode(StrEnum):
 
 class Operation(StrEnum):
     FORWARD = "forward"
-    BORN = "born"
-    HVP = "hvp"
-    LINEARIZATION = "linearization"
+    JVP = "jvp"
+    VJP = "vjp"
+    SECOND_VJP = "second_vjp"
 
 
 class GradientTarget(StrEnum):
@@ -146,7 +146,7 @@ class SimulationPlan:
         return self.runtime.compute_mode
 
     def require_native(self, reason: str) -> None:
-        if self.backend is BackendPreference.PYTHON:
+        if self.backend is BackendPreference.REFERENCE:
             raise NotImplementedError(
                 f"{reason} requires the native backend, "
                 "but backend='python' was requested."

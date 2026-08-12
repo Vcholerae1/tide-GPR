@@ -33,7 +33,7 @@ def main() -> None:
     )
 
     started = time.perf_counter()
-    receiver = tide.maxwelltm(
+    receiver = tide.maxwell._kernel_api.maxwelltm(
         epsilon,
         sigma,
         mu,

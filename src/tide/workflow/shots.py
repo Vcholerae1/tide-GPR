@@ -8,6 +8,9 @@ from typing import Any
 
 import torch
 
+from ..maxwell.contracts import EMModel
+from ..maxwell.operators import Maxwell3D, MaxwellTM
+
 ModelOutput = torch.Tensor | Sequence[torch.Tensor]
 ReceiverSelector = Callable[[ModelOutput], torch.Tensor]
 
@@ -123,7 +126,7 @@ def merge_receiver_batches(
     return torch.cat(chunk_list, dim=dim)
 
 
-def run_shot_batches(
+def _run_kernel_shot_batches(
     solver: Callable[..., ModelOutput],
     *,
     n_shots: int,
@@ -164,6 +167,57 @@ def run_shot_batches(
             **model_kwargs,
         )
         chunks.append(selector(output))
+    return merge_receiver_batches(chunks, shot_dim=receiver_shot_dim)
+
+
+def run_shot_batches(
+    operator: MaxwellTM | Maxwell3D,
+    model: EMModel,
+    *,
+    batch_size: int,
+    receiver_shot_dim: int | None = None,
+) -> torch.Tensor:
+    """Run a structured Maxwell operator over contiguous shot batches."""
+    from ..maxwell.contracts import Acquisition, Experiment
+
+    experiment = operator.experiment
+    acquisition = experiment.acquisition
+    chunks: list[torch.Tensor] = []
+    for shot_indices in split_shots(
+        acquisition.n_shots,
+        batch_size,
+        model.epsilon.device,
+    ):
+        batch = take_shot_batch(
+            source_amplitude=experiment.source_amplitude,
+            source_location=acquisition.source_location,
+            receiver_location=acquisition.receiver_location,
+            shot_indices=shot_indices,
+        )
+        batch_experiment = Experiment(
+            acquisition=Acquisition(
+                source_location=batch.source_location,
+                receiver_location=batch.receiver_location,
+            ),
+            source_amplitude=batch.source_amplitude,
+            nt=experiment.nt,
+            source_component=experiment.source_component,
+            receiver_component=experiment.receiver_component,
+            source_convention=experiment.source_convention,
+            frequency_taper_fraction=experiment.frequency_taper_fraction,
+            time_padding_fraction=experiment.time_padding_fraction,
+            time_taper=experiment.time_taper,
+        )
+        batch_operator = type(operator)(
+            operator.discretization,
+            batch_experiment,
+            execution=operator.execution,
+            storage=operator.storage,
+            model_gradient_sampling_interval=(
+                operator.model_gradient_sampling_interval
+            ),
+        )
+        chunks.append(batch_operator(model).receiver_data)
     return merge_receiver_batches(chunks, shot_dim=receiver_shot_dim)
 
 

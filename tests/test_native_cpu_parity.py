@@ -8,8 +8,8 @@ absent) against the Python reference for forward and Born operators in 2D and
 import pytest
 import torch
 
-import tide
 from tide import backend_utils
+from numerical_utils import MaxwellExample, make_maxwell3d_example, make_tm2d_example
 
 
 def _requires_native_backend() -> None:
@@ -17,160 +17,89 @@ def _requires_native_backend() -> None:
         pytest.skip("native backend is not available")
 
 
-def _case_2d(device: torch.device) -> dict[str, torch.Tensor]:
-    dtype = torch.float64
-    ny, nx, nt = 12, 12, 16
-    epsilon = torch.full((ny, nx), 4.0, dtype=dtype, device=device)
-    epsilon[ny // 2 - 1 : ny // 2 + 1, nx // 2 - 1 : nx // 2 + 1] = 4.4
-    sigma = torch.zeros_like(epsilon)
-    mu = torch.ones_like(epsilon)
-    source_amplitude = tide.ricker(
-        120e6, nt, 3.5e-11, peak_time=1.0 / 120e6, dtype=dtype, device=device
-    ).view(1, 1, nt)
-    source_location = torch.tensor(
-        [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
+def _tm2d_example(device: torch.device) -> MaxwellExample:
+    example = make_tm2d_example(
+        shape=(12, 12),
+        nt=16,
+        grid_spacing=0.02,
+        dt=3.5e-11,
+        frequency=120e6,
+        dtype=torch.float64,
+        device=device,
+        source_location=(6, 3),
+        receiver_locations=((6, 6),),
+        pml_width=3,
     )
-    receiver_location = torch.tensor(
-        [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
-    )
-    return {
-        "epsilon": epsilon,
-        "sigma": sigma,
-        "mu": mu,
-        "source_amplitude": source_amplitude,
-        "source_location": source_location,
-        "receiver_location": receiver_location,
-    }
+    epsilon = example.epsilon.clone()
+    epsilon[5:7, 5:7] = 4.4
+    return example.updated(epsilon=epsilon)
 
 
-def _case_3d(device: torch.device) -> dict[str, torch.Tensor]:
-    dtype = torch.float32
-    nz, ny, nx, nt = 6, 6, 7, 10
-    epsilon = torch.full((nz, ny, nx), 4.0, dtype=dtype, device=device)
-    sigma = torch.zeros_like(epsilon)
-    mu = torch.ones_like(epsilon)
-    source_amplitude = tide.ricker(
-        90e6, nt, 4e-11, peak_time=1.0 / 90e6, dtype=dtype, device=device
-    ).view(1, 1, nt)
-    source_location = torch.tensor(
-        [[[2, 2, 2]]], dtype=torch.long, device=device
+def _maxwell3d_example(device: torch.device) -> MaxwellExample:
+    return make_maxwell3d_example(
+        shape=(6, 6, 7),
+        nt=10,
+        grid_spacing=0.02,
+        dt=4e-11,
+        frequency=90e6,
+        device=device,
+        source_location=(2, 2, 2),
+        receiver_locations=((2, 2, 4),),
+        pml_width=1,
     )
-    receiver_location = torch.tensor(
-        [[[2, 2, 4]]], dtype=torch.long, device=device
-    )
-    return {
-        "epsilon": epsilon,
-        "sigma": sigma,
-        "mu": mu,
-        "source_amplitude": source_amplitude,
-        "source_location": source_location,
-        "receiver_location": receiver_location,
-    }
 
 
 def test_native_cpu_tm2d_forward_matches_python() -> None:
     _requires_native_backend()
-    case = _case_2d(torch.device("cpu"))
-    out_py = tide.maxwelltm(
-        **case, grid_spacing=0.02, dt=3.5e-11, pml_width=3, python_backend=True
-    )
-    out_native = tide.maxwelltm(
-        **case, grid_spacing=0.02, dt=3.5e-11, pml_width=3, python_backend=False
-    )
-    for a, b in zip(out_py, out_native, strict=True):
-        torch.testing.assert_close(a, b, atol=1e-8, rtol=1e-8)
+    example = _tm2d_example(torch.device("cpu"))
+    reference = example.run(python_backend=True)
+    actual = example.run(python_backend=False)
+    for actual_value, reference_value in zip(actual, reference, strict=True):
+        torch.testing.assert_close(actual_value, reference_value, atol=1e-8, rtol=1e-8)
 
 
 def test_native_cpu_tm2d_born_matches_python() -> None:
     _requires_native_backend()
-    case = _case_2d(torch.device("cpu"))
-    depsilon = 0.03 * torch.randn_like(case["epsilon"])
-    out_py = tide.borntm(
-        **case,
-        depsilon=depsilon,
-        grid_spacing=0.02,
-        dt=3.5e-11,
-        pml_width=3,
-        python_backend=True,
-    )
-    out_native = tide.borntm(
-        **case,
-        depsilon=depsilon,
-        grid_spacing=0.02,
-        dt=3.5e-11,
-        pml_width=3,
-        python_backend=False,
-    )
-    for a, b in zip(out_py, out_native, strict=True):
-        torch.testing.assert_close(a, b, atol=1e-8, rtol=1e-8)
+    example = _tm2d_example(torch.device("cpu"))
+    depsilon = 0.03 * torch.randn_like(example.epsilon)
+    reference = example.run_born(depsilon=depsilon, python_backend=True)
+    actual = example.run_born(depsilon=depsilon, python_backend=False)
+    for actual_value, reference_value in zip(actual, reference, strict=True):
+        torch.testing.assert_close(actual_value, reference_value, atol=1e-8, rtol=1e-8)
 
 
 def test_native_cpu_em3d_forward_matches_python() -> None:
     _requires_native_backend()
-    case = _case_3d(torch.device("cpu"))
-    out_py = tide.maxwell3d(
-        **case, grid_spacing=0.02, dt=4e-11, pml_width=1, python_backend=True
-    )
-    out_native = tide.maxwell3d(
-        **case, grid_spacing=0.02, dt=4e-11, pml_width=1, python_backend=False
-    )
-    torch.testing.assert_close(out_native[-1], out_py[-1], atol=1e-4, rtol=1e-4)
+    example = _maxwell3d_example(torch.device("cpu"))
+    reference = example.run(python_backend=True)
+    actual = example.run(python_backend=False)
+    torch.testing.assert_close(actual[-1], reference[-1], atol=1e-4, rtol=1e-4)
 
 
 def test_native_cpu_em3d_born_matches_python() -> None:
     _requires_native_backend()
-    case = _case_3d(torch.device("cpu"))
-    depsilon = 0.03 * torch.randn_like(case["epsilon"])
-    out_py = tide.born3d(
-        **case,
-        depsilon=depsilon,
-        grid_spacing=0.02,
-        dt=4e-11,
-        pml_width=1,
-        python_backend=True,
-    )
-    out_native = tide.born3d(
-        **case,
-        depsilon=depsilon,
-        grid_spacing=0.02,
-        dt=4e-11,
-        pml_width=1,
-        python_backend=False,
-    )
-    torch.testing.assert_close(out_native[-1], out_py[-1], atol=1e-4, rtol=1e-4)
+    example = _maxwell3d_example(torch.device("cpu"))
+    depsilon = 0.03 * torch.randn_like(example.epsilon)
+    reference = example.run_born(depsilon=depsilon, python_backend=True)
+    actual = example.run_born(depsilon=depsilon, python_backend=False)
+    torch.testing.assert_close(actual[-1], reference[-1], atol=1e-4, rtol=1e-4)
 
 
 def test_native_cpu_born_model_grads_with_none_storage_route_to_python() -> None:
     _requires_native_backend()
-    case = _case_2d(torch.device("cpu"))
-    epsilon = case["epsilon"].clone().requires_grad_(True)
-    out = tide.borntm(
-        epsilon,
-        case["sigma"],
-        case["mu"],
-        source_amplitude=case["source_amplitude"],
-        source_location=case["source_location"],
-        receiver_location=case["receiver_location"],
-        grid_spacing=0.02,
-        dt=3.5e-11,
-        pml_width=3,
+    example = _tm2d_example(torch.device("cpu"))
+    epsilon = example.epsilon.clone().requires_grad_(True)
+    output = example.run_born(
+        epsilon=epsilon,
         storage_mode="none",
         fallback="reference",
     )
-    grad = torch.autograd.grad(out[-1].square().sum(), epsilon)[0]
-    assert torch.isfinite(grad).all()
+    gradient = torch.autograd.grad(output[-1].square().sum(), epsilon)[0]
+    assert torch.isfinite(gradient).all()
 
     with pytest.raises(NotImplementedError, match="storage_mode='none'"):
-        tide.borntm(
-            epsilon.detach().requires_grad_(True),
-            case["sigma"],
-            case["mu"],
-            source_amplitude=case["source_amplitude"],
-            source_location=case["source_location"],
-            receiver_location=case["receiver_location"],
-            grid_spacing=0.02,
-            dt=3.5e-11,
-            pml_width=3,
+        example.run_born(
+            epsilon=example.epsilon.clone().requires_grad_(True),
             storage_mode="none",
             fallback="error",
         )

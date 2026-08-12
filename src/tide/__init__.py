@@ -1,7 +1,4 @@
-"""TIDE: Torch-based Inversion & Intelligence Engine.
-
-A PyTorch-based library for electromagnetic wave propagation and inversion.
-"""
+"""TIDE: differentiable electromagnetic modeling and inversion."""
 
 from . import (
     callbacks,
@@ -19,33 +16,27 @@ from . import (
 )
 from .callbacks import Callback, CallbackState, create_callback_state
 from .cfl import cfl_condition
-from .core import (
-    BackendPreference,
-    ComputeMode,
-    Dimension,
-    FallbackPolicy,
-    RuntimeOptions,
-    SimulationPlan,
-    StorageMode,
-    StorageOptions,
-    compile_simulation_plan,
-    normalize_backend_request,
-    select_backend,
-)
+from .core import BackendPreference, FallbackPolicy, StorageMode, StorageOptions
 from .dispersion import DebyeDispersion
 from .maxwell import (
-    Born3D,
-    BornTM,
+    Acquisition,
+    CPML,
+    Discretization,
+    EM3DState,
+    EMDirection,
+    EMGradient,
+    EMModel,
+    ExecutionOptions,
+    Experiment,
+    ForwardResult,
+    LinearizedMaxwell3D,
+    LinearizedMaxwellTM,
     Maxwell3D,
     MaxwellTM,
-    TM2DLinearizationContext,
-    born3d,
-    borntm,
-    maxwell3d,
-    maxwell3d_hvp,
-    maxwelltm,
-    maxwelltm_hvp,
-    linearize_maxwelltm,
+    Observers,
+    SourceConvention,
+    TMState,
+    TangentResult,
 )
 from .padding import create_or_pad, reverse_pad, zero_interior
 from .resampling import downsample, downsample_and_movedim, upsample
@@ -78,41 +69,23 @@ from .validation import (
 from .wavelets import ricker
 
 __all__ = [
-    # Modules
-    "callbacks",
-    "cfl",
-    "core",
-    "maxwell",
-    "optim",
-    "padding",
-    "resampling",
-    "staggered",
-    "validation",
-    "utils",
-    "wavelets",
-    "workflow",
-    # Classes
-    "BornTM",
-    "Born3D",
-    "MaxwellTM",
-    "TM2DLinearizationContext",
-    "Maxwell3D",
-    "CallbackState",
-    "DebyeDispersion",
-    "BackendPreference",
-    "ComputeMode",
-    "Dimension",
-    "FallbackPolicy",
-    "RuntimeOptions",
-    "SimulationPlan",
-    "StorageMode",
-    "StorageOptions",
-    # Type aliases
+    "Acquisition",
     "BatchedModel2D",
     "BatchedModel3D",
+    "BackendPreference",
+    "CPML",
     "Callback",
+    "CallbackState",
+    "DebyeDispersion",
     "Field2DLike",
     "Field3DLike",
+    "Discretization",
+    "EM3DState",
+    "EMDirection",
+    "EMGradient",
+    "EMModel",
+    "ExecutionOptions",
+    "Experiment",
     "Location2D",
     "Location3D",
     "MatrixF32",
@@ -127,35 +100,43 @@ __all__ = [
     "SourceLocation3D",
     "VectorF32",
     "WaveletBatch",
-    # Functions
-    "maxwelltm",
-    "maxwell3d",
-    "maxwelltm_hvp",
-    "linearize_maxwelltm",
-    "maxwell3d_hvp",
-    "born3d",
-    "borntm",
+    "FallbackPolicy",
+    "ForwardResult",
+    "LinearizedMaxwell3D",
+    "LinearizedMaxwellTM",
+    "Maxwell3D",
+    "MaxwellTM",
+    "Observers",
+    "SourceConvention",
+    "StorageMode",
+    "StorageOptions",
+    "TMState",
+    "TangentResult",
+    "callbacks",
+    "cfl",
+    "cfl_condition",
+    "core",
     "create_callback_state",
-    "compile_simulation_plan",
-    "normalize_backend_request",
-    "select_backend",
-    # Signal processing
-    "upsample",
+    "create_or_pad",
     "downsample",
     "downsample_and_movedim",
-    "cfl_condition",
-    # Validation
-    "validate_model_gradient_sampling_interval",
-    "validate_freq_taper_frac",
-    "validate_time_pad_frac",
-    # Model padding utilities
-    "create_or_pad",
-    "zero_interior",
+    "maxwell",
+    "optim",
+    "padding",
+    "resampling",
     "reverse_pad",
-    # Wavelets
     "ricker",
+    "staggered",
+    "upsample",
+    "utils",
+    "validate_freq_taper_frac",
+    "validate_model_gradient_sampling_interval",
     "runtime_typecheck",
+    "validate_time_pad_frac",
+    "validation",
+    "wavelets",
+    "workflow",
+    "zero_interior",
 ]
 
-
-__version__ = "0.0.34"
+__version__ = "0.1.0"

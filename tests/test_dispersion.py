@@ -5,155 +5,99 @@ import torch
 
 import tide
 from tide import backend_utils
+from numerical_utils import make_maxwell3d_example, make_tm2d_example
 
 
-def _tm_case():
-    device = torch.device("cpu")
-    dtype = torch.float32
-    ny, nx = 8, 9
-    nt = 10
-    epsilon = torch.full((ny, nx), 4.0, device=device, dtype=dtype)
-    sigma = torch.zeros_like(epsilon)
-    mu = torch.ones_like(epsilon)
-    source_location = torch.tensor([[[ny // 2, nx // 2]]], device=device)
-    receiver_location = torch.tensor([[[ny // 2, nx // 2 + 1]]], device=device)
-    source_amplitude = tide.ricker(
-        80e6, nt, 4e-11, peak_time=1.0 / 80e6, dtype=dtype, device=device
-    ).view(1, 1, nt)
-    return epsilon, sigma, mu, source_amplitude, source_location, receiver_location
-
-
-def _em3d_case():
-    device = torch.device("cpu")
-    dtype = torch.float32
-    nz, ny, nx = 5, 6, 7
-    nt = 8
-    epsilon = torch.full((nz, ny, nx), 4.0, device=device, dtype=dtype)
-    sigma = torch.zeros_like(epsilon)
-    mu = torch.ones_like(epsilon)
-    source_location = torch.tensor([[[2, 3, 2]]], dtype=torch.long, device=device)
-    receiver_location = torch.tensor([[[2, 3, 4]]], dtype=torch.long, device=device)
-    source_amplitude = tide.ricker(
-        70e6, nt, 4e-11, peak_time=1.0 / 70e6, dtype=dtype, device=device
-    ).view(1, 1, nt)
-    return epsilon, sigma, mu, source_amplitude, source_location, receiver_location
-
-
-def test_debye_tm_module_matches_functional():
-    epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _tm_case()
-    dispersion = tide.DebyeDispersion(delta_epsilon=2.0, tau=5e-10)
-
-    model = tide.MaxwellTM(epsilon, sigma, mu, grid_spacing=0.02)
-    out_module = model(
-        dt=4e-11,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        pml_width=1,
-        python_backend=True,
-        dispersion=dispersion,
-    )
-    out_func = tide.maxwelltm(
-        epsilon,
-        sigma,
-        mu,
+def _tm_example():
+    return make_tm2d_example(
+        shape=(8, 9),
+        nt=10,
         grid_spacing=0.02,
         dt=4e-11,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
+        frequency=80e6,
+        source_location=(4, 4),
+        receiver_locations=((4, 5),),
         pml_width=1,
         python_backend=True,
-        dispersion=dispersion,
     )
 
-    for mod_out, fn_out in zip(out_module, out_func):
-        torch.testing.assert_close(mod_out, fn_out)
+
+def _maxwell3d_example(device: torch.device | str = "cpu"):
+    return make_maxwell3d_example(
+        shape=(5, 6, 7),
+        nt=8,
+        grid_spacing=0.02,
+        dt=4e-11,
+        frequency=70e6,
+        device=device,
+        source_location=(2, 3, 2),
+        receiver_locations=((2, 3, 4),),
+        pml_width=1,
+    )
+
+
+def test_debye_tm_operator_matches_reference_kernel():
+    example = _tm_example()
+    dispersion = tide.DebyeDispersion(delta_epsilon=2.0, tau=5e-10)
+    operator = tide.MaxwellTM(
+        tide.Discretization(
+            example.grid_spacing,
+            example.dt,
+            boundary=tide.CPML(example.pml_width),
+        ),
+        tide.Experiment(
+            tide.Acquisition(example.source_location, example.receiver_location),
+            example.source_amplitude,
+        ),
+        execution=tide.ExecutionOptions(backend=tide.BackendPreference.REFERENCE),
+    )
+    actual = operator(
+        tide.EMModel(
+            example.epsilon,
+            example.sigma,
+            example.mu,
+            dispersion=dispersion,
+        )
+    )
+    expected = example.run(dispersion=dispersion)
+    torch.testing.assert_close(actual.receiver_data, expected[-1])
 
 
 def test_debye_zero_delta_matches_nondispersive():
-    epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _tm_case()
-    out_ref = tide.maxwelltm(
-        epsilon,
-        sigma,
-        mu,
-        grid_spacing=0.02,
-        dt=4e-11,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        pml_width=1,
-        python_backend=True,
-    )
-    out_debye = tide.maxwelltm(
-        epsilon,
-        sigma,
-        mu,
-        grid_spacing=0.02,
-        dt=4e-11,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        pml_width=1,
-        python_backend=True,
-        dispersion=tide.DebyeDispersion(delta_epsilon=0.0, tau=5e-10),
-    )
-
-    for ref, got in zip(out_ref, out_debye):
-        torch.testing.assert_close(ref, got)
+    example = _tm_example()
+    reference = example.run()
+    actual = example.run(dispersion=tide.DebyeDispersion(delta_epsilon=0.0, tau=5e-10))
+    for reference_output, actual_output in zip(reference, actual, strict=True):
+        torch.testing.assert_close(reference_output, actual_output)
 
 
 def test_debye_single_pole_matches_explicit_pole_axis():
-    epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _tm_case()
-    ny, nx = epsilon.shape
-    scalar = tide.maxwelltm(
-        epsilon,
-        sigma,
-        mu,
-        grid_spacing=0.02,
-        dt=4e-11,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        pml_width=1,
-        python_backend=True,
-        dispersion=tide.DebyeDispersion(delta_epsilon=1.5, tau=5e-10),
-    )
-    explicit = tide.maxwelltm(
-        epsilon,
-        sigma,
-        mu,
-        grid_spacing=0.02,
-        dt=4e-11,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        pml_width=1,
-        python_backend=True,
+    example = _tm_example()
+    ny, nx = example.epsilon.shape
+    scalar = example.run(dispersion=tide.DebyeDispersion(delta_epsilon=1.5, tau=5e-10))
+    explicit = example.run(
         dispersion=tide.DebyeDispersion(
-            delta_epsilon=torch.full((1, ny, nx), 1.5, dtype=epsilon.dtype),
-            tau=torch.full((1, ny, nx), 5e-10, dtype=epsilon.dtype),
-        ),
+            delta_epsilon=torch.full(
+                (1, ny, nx),
+                1.5,
+                dtype=example.epsilon.dtype,
+            ),
+            tau=torch.full(
+                (1, ny, nx),
+                5e-10,
+                dtype=example.epsilon.dtype,
+            ),
+        )
     )
-
-    for ref, got in zip(scalar, explicit):
-        torch.testing.assert_close(ref, got)
+    for scalar_output, explicit_output in zip(scalar, explicit, strict=True):
+        torch.testing.assert_close(scalar_output, explicit_output)
 
 
 def test_debye_requires_dt_smaller_than_tau():
-    epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _tm_case()
+    example = _tm_example()
     with pytest.raises(ValueError, match="dt < min\\(tau\\)"):
-        tide.maxwelltm(
-            epsilon,
-            sigma,
-            mu,
-            grid_spacing=0.02,
+        example.run(
             dt=5e-10,
-            source_amplitude=source_amplitude,
-            source_location=source_location,
-            receiver_location=receiver_location,
-            pml_width=1,
-            python_backend=True,
             dispersion=tide.DebyeDispersion(delta_epsilon=1.0, tau=5e-10),
         )
 
@@ -161,37 +105,17 @@ def test_debye_requires_dt_smaller_than_tau():
 def test_debye_tm_native_forward_matches_python():
     if not backend_utils.is_backend_available():
         pytest.skip("native backend not available")
-    epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _tm_case()
+    example = _tm_example()
     dispersion = tide.DebyeDispersion(delta_epsilon=1.0, tau=5e-10)
-    out_py = tide.maxwelltm(
-        epsilon,
-        sigma,
-        mu,
-        grid_spacing=0.02,
-        dt=4e-11,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        pml_width=1,
-        python_backend=True,
-        dispersion=dispersion,
-    )
-    out_native = tide.maxwelltm(
-        epsilon,
-        sigma,
-        mu,
-        grid_spacing=0.02,
-        dt=4e-11,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        pml_width=1,
-        python_backend=False,
-        dispersion=dispersion,
-    )
-
-    for ref, got in zip(out_py, out_native):
-        torch.testing.assert_close(ref, got, rtol=1e-4, atol=1e-5)
+    reference = example.run(python_backend=True, dispersion=dispersion)
+    actual = example.run(python_backend=False, dispersion=dispersion)
+    for reference_output, actual_output in zip(reference, actual, strict=True):
+        torch.testing.assert_close(
+            reference_output,
+            actual_output,
+            rtol=1e-4,
+            atol=1e-5,
+        )
 
 
 def test_debye_em3d_native_forward_matches_python():
@@ -199,89 +123,45 @@ def test_debye_em3d_native_forward_matches_python():
         pytest.skip("native backend not available")
     if not torch.cuda.is_available():
         pytest.skip("CUDA required for 3D native Debye parity test")
-    epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _em3d_case()
-    epsilon = epsilon.cuda()
-    sigma = sigma.cuda()
-    mu = mu.cuda()
-    source_amplitude = source_amplitude.cuda()
-    source_location = source_location.cuda()
-    receiver_location = receiver_location.cuda()
+    example = _maxwell3d_example("cuda")
     dispersion = tide.DebyeDispersion(delta_epsilon=1.0, tau=5e-10)
-    out_py = tide.maxwell3d(
-        epsilon,
-        sigma,
-        mu,
-        grid_spacing=0.02,
-        dt=4e-11,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        pml_width=1,
-        python_backend=True,
-        dispersion=dispersion,
-    )
-    out_native = tide.maxwell3d(
-        epsilon,
-        sigma,
-        mu,
-        grid_spacing=0.02,
-        dt=4e-11,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        pml_width=1,
-        python_backend=False,
-        dispersion=dispersion,
-    )
-
-    for ref, got in zip(out_py, out_native):
-        torch.testing.assert_close(ref, got, rtol=1e-4, atol=1e-5)
+    reference = example.run(python_backend=True, dispersion=dispersion)
+    actual = example.run(python_backend=False, dispersion=dispersion)
+    for reference_output, actual_output in zip(reference, actual, strict=True):
+        torch.testing.assert_close(
+            reference_output,
+            actual_output,
+            rtol=1e-4,
+            atol=1e-5,
+        )
 
 
 def test_debye_em3d_cpu_backend_falls_back_to_python():
-    epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _em3d_case()
+    example = _maxwell3d_example()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        out = tide.maxwell3d(
-            epsilon,
-            sigma,
-            mu,
-            grid_spacing=0.02,
-            dt=4e-11,
-            source_amplitude=source_amplitude,
-            source_location=source_location,
-            receiver_location=receiver_location,
-            pml_width=1,
+        output = example.run(
             python_backend=False,
             dispersion=tide.DebyeDispersion(delta_epsilon=1.0, tau=5e-10),
         )
-    assert any("3D Debye CPU backend is not enabled yet" in str(w.message) for w in caught)
-    assert torch.isfinite(out[-1]).all()
+    assert any(
+        "3D Debye CPU backend is not enabled yet" in str(w.message) for w in caught
+    )
+    assert torch.isfinite(output[-1]).all()
 
 
 def test_debye_gradient_fallback_routes_through_policy():
-    epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _tm_case()
-    epsilon = epsilon.clone().detach().requires_grad_(True)
+    example = _tm_example()
+    epsilon = example.epsilon.clone().requires_grad_(True)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        out = tide.maxwelltm(
-            epsilon,
-            sigma,
-            mu,
-            grid_spacing=0.02,
-            dt=4e-11,
-            source_amplitude=source_amplitude,
-            source_location=source_location,
-            receiver_location=receiver_location,
-            pml_width=1,
+        output = example.run(
+            epsilon=epsilon,
             python_backend=False,
             dispersion=tide.DebyeDispersion(delta_epsilon=1.0, tau=5e-10),
         )
-    assert torch.isfinite(out[-1]).all()
-    assert out[-1].requires_grad
-    # The capability matrix routes dispersion+gradients to the Python
-    # reference before any adapter runs, so the adapter-level warning
-    # must not fire.
+    assert torch.isfinite(output[-1]).all()
+    assert output[-1].requires_grad
     assert not any(
         "Debye native backend currently supports forward inference only"
         in str(w.message)
@@ -290,7 +170,7 @@ def test_debye_gradient_fallback_routes_through_policy():
 
 
 def test_debye_callback_exposes_dispersion_and_polarization_tm():
-    epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _tm_case()
+    example = _tm_example()
     seen = {}
 
     def callback(state: tide.CallbackState) -> None:
@@ -299,23 +179,14 @@ def test_debye_callback_exposes_dispersion_and_polarization_tm():
         seen["model_names"] = state.model_names
         seen["wavefield_names"] = state.wavefield_names
         seen["dispersion"] = state.get_model("dispersion")
-        seen["polarization_shape"] = tuple(state.get_wavefield("polarization", view="inner").shape)
+        seen["polarization_shape"] = tuple(
+            state.get_wavefield("polarization", view="inner").shape
+        )
 
-    tide.maxwelltm(
-        epsilon,
-        sigma,
-        mu,
-        grid_spacing=0.02,
-        dt=4e-11,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        pml_width=1,
-        python_backend=True,
+    example.run(
         forward_callback=callback,
         dispersion=tide.DebyeDispersion(delta_epsilon=1.0, tau=5e-10),
     )
-
     assert "dispersion" in seen["model_names"]
     assert "polarization" in seen["wavefield_names"]
     assert isinstance(seen["dispersion"], tide.DebyeDispersion)
@@ -323,7 +194,7 @@ def test_debye_callback_exposes_dispersion_and_polarization_tm():
 
 
 def test_debye_callback_exposes_dispersion_and_polarization_3d():
-    epsilon, sigma, mu, source_amplitude, source_location, receiver_location = _em3d_case()
+    example = _maxwell3d_example()
     seen = {}
 
     def callback(state: tide.CallbackState) -> None:
@@ -332,25 +203,17 @@ def test_debye_callback_exposes_dispersion_and_polarization_3d():
         seen["model_names"] = state.model_names
         seen["wavefield_names"] = state.wavefield_names
         seen["dispersion"] = state.get_model("dispersion")
-        seen["polarization_shape"] = tuple(state.get_wavefield("polarization", view="inner").shape)
+        seen["polarization_shape"] = tuple(
+            state.get_wavefield("polarization", view="inner").shape
+        )
 
-    out = tide.maxwell3d(
-        epsilon,
-        sigma,
-        mu,
-        grid_spacing=0.02,
-        dt=4e-11,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        pml_width=1,
+    output = example.run(
         python_backend=True,
         forward_callback=callback,
         dispersion=tide.DebyeDispersion(delta_epsilon=1.0, tau=5e-10),
     )
-
     assert "dispersion" in seen["model_names"]
     assert "polarization" in seen["wavefield_names"]
     assert isinstance(seen["dispersion"], tide.DebyeDispersion)
     assert len(seen["polarization_shape"]) == 5
-    assert torch.isfinite(out[-1]).all()
+    assert torch.isfinite(output[-1]).all()

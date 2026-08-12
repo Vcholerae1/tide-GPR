@@ -35,7 +35,7 @@ def test_workflow_shot_batches_drive_torch_native_objective() -> None:
         assert source_location.shape[0] == receiver_location.shape[0]
         return source_amplitude[:, 0, :].transpose(0, 1).unsqueeze(-1) * scale
 
-    observed = tide.workflow.run_shot_batches(
+    observed = tide.workflow.shots._run_kernel_shot_batches(
         solver,
         n_shots=n_shots,
         batch_size=batch_size,
