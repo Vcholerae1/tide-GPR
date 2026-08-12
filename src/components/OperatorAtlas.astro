@@ -1,0 +1,104 @@
+---
+const operators = [
+  {
+    id: 'forward',
+    symbol: 'F(m)',
+    label: 'Forward',
+    detail: 'Propagate one electromagnetic model into receiver data.',
+    href: '/tide-GPR/guides/modeling/',
+    output: 'd',
+  },
+  {
+    id: 'jvp',
+    symbol: 'J(m)v',
+    label: 'JVP',
+    detail: 'Push a model-space direction into receiver space.',
+    href: '/tide-GPR/api/maxwell/#jvp',
+    output: 'δd',
+  },
+  {
+    id: 'vjp',
+    symbol: 'J(m)ᵀr',
+    label: 'VJP',
+    detail: 'Pull a receiver cotangent back to an EM gradient.',
+    href: '/tide-GPR/api/maxwell/#vjp',
+    output: '∇m',
+  },
+  {
+    id: 'second',
+    symbol: '(DJ[m][v])ᵀr',
+    label: 'Second VJP',
+    detail: 'Evaluate the nonlinear-physics term used by a full Hessian.',
+    href: '/tide-GPR/api/maxwell/#second-vjp',
+    output: 'Hv',
+  },
+];
+---
+
+<section class="operator-atlas" aria-labelledby="operator-atlas-title" data-operator-atlas>
+  <div class="operator-atlas__heading">
+    <p class="operator-atlas__kicker">One physics model, four derivative views</p>
+    <h2 id="operator-atlas-title">Read the library as an operator.</h2>
+    <p>
+      The public API follows the mathematics. Move across the operators to see
+      what changes, what stays fixed, and where each path is documented.
+    </p>
+  </div>
+
+  <div class="operator-atlas__figure">
+    <nav class="operator-atlas__rail" aria-label="Maxwell operator paths">
+      {operators.map((operator, index) => (
+        <a
+          class:list={['operator-node', { 'is-active': index === 0 }]}
+          data-operator={operator.id}
+          data-detail={operator.detail}
+          data-output={operator.output}
+          href={operator.href}
+          aria-describedby="operator-readout"
+        >
+          <span class="operator-node__index">0{index + 1}</span>
+          <span class="operator-node__symbol">{operator.symbol}</span>
+          <span class="operator-node__label">{operator.label}</span>
+        </a>
+      ))}
+    </nav>
+
+    <div class="operator-readout" id="operator-readout" aria-live="polite">
+      <div>
+        <span class="operator-readout__label">Input</span>
+        <strong>EM model + experiment</strong>
+      </div>
+      <p data-operator-detail>{operators[0].detail}</p>
+      <div>
+        <span class="operator-readout__label">Returns</span>
+        <strong data-operator-output>{operators[0].output}</strong>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+  const bindOperatorAtlas = () => {
+    document.querySelectorAll<HTMLElement>('[data-operator-atlas]').forEach((atlas) => {
+      if (atlas.dataset.bound === 'true') return;
+      atlas.dataset.bound = 'true';
+      const nodes = Array.from(atlas.querySelectorAll<HTMLElement>('[data-operator]'));
+      const detail = atlas.querySelector<HTMLElement>('[data-operator-detail]');
+      const output = atlas.querySelector<HTMLElement>('[data-operator-output]');
+
+      const activate = (node: HTMLElement) => {
+        nodes.forEach((candidate) => candidate.classList.toggle('is-active', candidate === node));
+        if (detail) detail.textContent = node.dataset.detail ?? '';
+        if (output) output.textContent = node.dataset.output ?? '';
+      };
+
+      nodes.forEach((node) => {
+        node.addEventListener('pointerenter', () => activate(node));
+        node.addEventListener('focus', () => activate(node));
+      });
+    });
+  };
+
+  bindOperatorAtlas();
+  document.addEventListener('astro:page-load', bindOperatorAtlas);
+</script>

@@ -10,15 +10,14 @@ TIDE is a PyTorch-first electromagnetic FDTD library for forward modeling and fu
 
 | Capability | API | Status |
 | --- | --- | --- |
-| 2D TM forward modeling | `tide.maxwelltm` | Stable |
-| 2D TM inversion with autograd | `tide.maxwelltm`, `MaxwellTM` | Stable |
-| 3D forward modeling | `tide.maxwell3d` | Stable |
-| 3D inversion and gradients | `tide.maxwell3d`, `Maxwell3D` | Stable with constraints |
+| 2D TM forward/inverse modeling | `tide.MaxwellTM` | Stable |
+| 3D forward/inverse modeling | `tide.Maxwell3D` | Stable with constraints |
+| JVP, VJP, and second VJP | `operator.linearize(model)` | Stable |
 | Snapshot storage | `storage_mode` | Device, CPU, disk, none, or auto |
 | Snapshot compression | `storage_compression` | Optional BF16 compression |
 | Debye dispersion | `DebyeDispersion` | Advanced |
 
-TIDE also includes PML boundaries, staggered-grid operators, callbacks, CFL resampling, shot batching, and inversion workflow helpers. Check the [limitations guide](docs/guides/limitations.md) before scaling up 3D or inversion workloads.
+TIDE also includes PML boundaries, staggered-grid operators, callbacks, CFL resampling, shot batching, and inversion workflow helpers. Check the [limitations guide](src/content/docs/guides/limitations.md) before scaling up 3D or inversion workloads.
 
 ## Installation
 
@@ -59,61 +58,47 @@ import torch
 import tide
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-dtype = torch.float32
-
-ny, nx = 96, 96
-epsilon = torch.full((ny, nx), 4.0, device=device, dtype=dtype)
-sigma = torch.zeros_like(epsilon)
-mu = torch.ones_like(epsilon)
-
-nt = 300
-dt = 4e-11
-source = tide.ricker(
-    freq=8e8,
-    length=nt,
-    dt=dt,
-    device=device,
-    dtype=dtype,
-).view(1, 1, nt)
-
-source_location = torch.tensor(
-    [[[20, 48]]],
-    device=device,
-    dtype=torch.long,
-)
-receiver_location = torch.tensor(
-    [[[20, 60]]],
-    device=device,
-    dtype=torch.long,
-)
-
-*_, receiver_data = tide.maxwelltm(
+epsilon = torch.full((96, 96), 4.0, device=device)
+model = tide.EMModel(
     epsilon=epsilon,
-    sigma=sigma,
-    mu=mu,
-    grid_spacing=0.02,
-    dt=dt,
-    source_amplitude=source,
-    source_location=source_location,
-    receiver_location=receiver_location,
-    pml_width=10,
+    sigma=torch.zeros_like(epsilon),
+    mu=torch.ones_like(epsilon),
 )
 
-print(receiver_data.shape)  # [nt, n_shots, n_receivers]
+nt, dt = 300, 4e-11
+experiment = tide.Experiment(
+    acquisition=tide.Acquisition(
+        source_location=torch.tensor([[[20, 48]]], device=device),
+        receiver_location=torch.tensor([[[20, 60]]], device=device),
+    ),
+    source_amplitude=tide.ricker(8e8, nt, dt, device=device).view(1, 1, nt),
+)
+operator = tide.MaxwellTM(
+    tide.Discretization(
+        spacing=0.02,
+        dt=dt,
+        boundary=tide.CPML(width=10),
+    ),
+    experiment,
+    execution=tide.ExecutionOptions(fallback=tide.FallbackPolicy.REFERENCE),
+)
+
+result = operator(model)
+print(result.receiver_data.shape)  # [nt, n_shots, n_receivers]
 ```
 
 ## Documentation
 
 Start with the path that matches your task:
 
-- [Getting started](docs/getting-started.md): installation, backend checks, and a first 2D simulation
-- [API orientation](docs/guides/api-orientation.md): functional and module-level solver APIs
-- [Modeling](docs/guides/modeling.md): sources, receivers, boundaries, and tensor layouts
-- [Inversion](docs/guides/inversion.md): losses, backpropagation, and optimizer workflows
-- [Configuration](docs/guides/configuration.md): storage, callbacks, backends, and CFL controls
-- [API reference](docs/api/index.md): public modules and functions
+- [Getting started](src/content/docs/getting-started.md): installation, backend checks, and a first 2D simulation
+- [API orientation](src/content/docs/guides/api-orientation.md): models, experiments, operators, and derivative sessions
+- [Modeling](src/content/docs/guides/modeling.md): sources, receivers, boundaries, and tensor layouts
+- [Inversion](src/content/docs/guides/inversion.md): losses, backpropagation, and optimizer workflows
+- [Configuration](src/content/docs/guides/configuration.md): storage, callbacks, backends, and CFL controls
+- [API reference](src/content/docs/api/index.md): public contracts and operators
 
-Before relying on advanced configurations, review the [known limitations](docs/guides/limitations.md) and [verification guide](docs/guides/verification.md).
+Before relying on advanced configurations, review the [known limitations](src/content/docs/guides/limitations.md) and [verification guide](src/content/docs/guides/verification.md).
 
 ## Development
 
@@ -122,6 +107,13 @@ Install the development dependencies and run the test suite:
 ```bash
 uv sync --group dev
 uv run pytest
+```
+
+Preview the documentation:
+
+```bash
+npm install
+npm run dev
 ```
 
 Issues and pull requests are welcome.

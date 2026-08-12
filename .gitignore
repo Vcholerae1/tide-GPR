@@ -16,6 +16,12 @@ dist/
 wheels/
 site/
 
+# Node/Astro documentation artifacts
+node_modules/
+.astro/
+.npm/
+*.tsbuildinfo
+
 # Compiled shared libraries (keep libtide_C.so tracked via git add -f)
 *.so
 *.dylib

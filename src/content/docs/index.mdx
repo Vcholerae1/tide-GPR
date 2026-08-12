@@ -1,0 +1,112 @@
+---
+title: TIDE documentation
+description: Differentiable electromagnetic modeling and inversion in PyTorch.
+template: splash
+pagefind: false
+---
+
+import OperatorAtlas from '../../components/OperatorAtlas.astro';
+
+<main class="tide-home" id="main-content">
+  <section class="tide-hero" aria-labelledby="tide-title">
+    <div class="tide-hero__copy">
+      <p class="tide-kicker">Differentiable electromagnetics, expressed directly</p>
+      <h1 id="tide-title">
+        Maxwell modeling as a <em>computable operator.</em>
+      </h1>
+      <p class="tide-hero__lede">
+        TIDE connects FDTD propagation, model-space derivatives, and inversion
+        workflows through one explicit PyTorch API for 2D TM and full 3D fields.
+      </p>
+      <div class="tide-hero__actions">
+        <a class="tide-action tide-action--primary" href="/tide-GPR/getting-started/">
+          Run the first model <span aria-hidden="true">→</span>
+        </a>
+        <a class="tide-action" href="/tide-GPR/api/maxwell/">
+          Read the operator API
+        </a>
+      </div>
+    </div>
+
+    <aside class="tide-abstract" aria-label="TIDE at a glance">
+      <div class="tide-abstract__label">Abstract</div>
+      <dl>
+        <div>
+          <dt>Physics</dt>
+          <dd>2D TM · 3D Maxwell · CPML</dd>
+        </div>
+        <div>
+          <dt>Derivatives</dt>
+          <dd>JVP · VJP · second VJP</dd>
+        </div>
+        <div>
+          <dt>Execution</dt>
+          <dd>Reference · C · CUDA</dd>
+        </div>
+        <div>
+          <dt>Models</dt>
+          <dd>ε · σ · μ · Debye</dd>
+        </div>
+      </dl>
+      <p>
+        The stable surface is structured around <code>EMModel</code>, an
+        experiment, and a nonlinear Maxwell operator.
+      </p>
+    </aside>
+  </section>
+
+  <OperatorAtlas />
+
+  <section class="tide-routes" aria-labelledby="routes-title">
+    <div class="tide-section-heading">
+      <p class="tide-kicker">Two reading layers</p>
+      <h2 id="routes-title">Enter through the question you have.</h2>
+    </div>
+
+    <div class="tide-route-grid">
+      <article class="tide-route tide-route--research">
+        <div class="tide-route__number">I</div>
+        <p class="tide-route__eyebrow">Research workflow</p>
+        <h3>From material model to inversion loop.</h3>
+        <p>
+          Start here to build an acquisition, choose a boundary and storage
+          policy, inspect receiver data, and optimize ε or σ.
+        </p>
+        <nav aria-label="Research documentation">
+          <a href="/tide-GPR/getting-started/">Getting started</a>
+          <a href="/tide-GPR/guides/modeling/">Forward modeling</a>
+          <a href="/tide-GPR/guides/inversion/">Inversion workflows</a>
+          <a href="/tide-GPR/guides/verification/">Numerical verification</a>
+        </nav>
+      </article>
+
+      <article class="tide-route tide-route--engineering">
+        <div class="tide-route__number">II</div>
+        <p class="tide-route__eyebrow">API and internals</p>
+        <h3>From public contract to native kernel.</h3>
+        <p>
+          Use this layer to inspect named results, backend capabilities,
+          derivative sessions, storage ownership, and C/CUDA implementation notes.
+        </p>
+        <nav aria-label="Engineering documentation">
+          <a href="/tide-GPR/api/">API index</a>
+          <a href="/tide-GPR/api/core/">Execution contracts</a>
+          <a href="/tide-GPR/api/maxwell/">Maxwell operators</a>
+          <a href="/tide-GPR/dev/architecture/">Architecture</a>
+        </nav>
+      </article>
+    </div>
+  </section>
+
+  <section class="tide-proof" aria-labelledby="proof-title">
+    <div>
+      <p class="tide-kicker">Before scale</p>
+      <h2 id="proof-title">Trust a run only after its contracts agree.</h2>
+    </div>
+    <ol>
+      <li><span>01</span><a href="/tide-GPR/guides/validation/">Check CFL, layout, and material validity.</a></li>
+      <li><span>02</span><a href="/tide-GPR/guides/storage/">Choose snapshot storage deliberately.</a></li>
+      <li><span>03</span><a href="/tide-GPR/guides/verification/">Verify gradients and backend parity.</a></li>
+    </ol>
+  </section>
+</main>
