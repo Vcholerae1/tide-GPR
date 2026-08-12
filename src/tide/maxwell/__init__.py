@@ -1,5 +1,6 @@
 """Structured differentiable Maxwell operators."""
-from . import _kernel_api
+
+from . import _kernel_api as _kernel_api
 
 from .contracts import (
     Acquisition,
