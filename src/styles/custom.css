@@ -1,3 +1,4 @@
+@import 'katex/dist/katex.min.css';
 @import '@fontsource-variable/source-sans-3';
 @import '@fontsource/stix-two-text/400.css';
 @import '@fontsource/stix-two-text/600.css';
@@ -133,6 +134,25 @@ header.header {
 .sl-markdown-content pre {
   border-radius: 4px;
   box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--tide-rule) 72%, transparent);
+}
+
+.sl-markdown-content .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.6rem 0;
+}
+
+.sl-markdown-content pre.mermaid {
+  overflow-x: auto;
+  padding: 1.25rem;
+  background: var(--tide-paper-raised);
+}
+
+.sl-markdown-content pre.mermaid svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0 auto;
 }
 
 .pagination-links a {

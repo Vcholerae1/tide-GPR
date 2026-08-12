@@ -62,7 +62,7 @@ The following import directions are enforced by tests:
 ## Operator data flow
 
 ```mermaid
-graph LR
+flowchart TD
     A[Domain objects] --> B[MaxwellTM or Maxwell3D]
     B --> C[SimulationPlan]
     C --> D[BackendDecision]

@@ -10,7 +10,7 @@ Most application code does not need to call these functions directly. They are u
 ## Planning flow
 
 ```mermaid
-graph LR
+flowchart TD
     A[User request] --> B[compile_simulation_plan]
     B --> C[SimulationPlan]
     C --> D[capability matrix]

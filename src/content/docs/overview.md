@@ -60,7 +60,7 @@ Source and receiver coordinates are integer grid indices, not physical distances
 ## What happens during a forward call
 
 ```mermaid
-graph LR
+flowchart TD
     A[Validate model and geometry] --> B[Resolve backend and capabilities]
     B --> C[Choose CFL-safe internal dt]
     C --> D[Upsample source if needed]

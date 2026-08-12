@@ -1,5 +1,9 @@
 import { defineConfig } from 'astro/config';
+import { unified } from '@astrojs/markdown-remark';
 import starlight from '@astrojs/starlight';
+import mermaid from 'astro-mermaid';
+import rehypeKatex from 'rehype-katex';
+import remarkMath from 'remark-math';
 
 const guideItems = [
   'api-orientation',
@@ -47,7 +51,36 @@ const developerItems = [
 export default defineConfig({
   site: 'https://vcholerae1.github.io',
   base: '/tide-GPR',
+  markdown: {
+    processor: unified({
+      remarkPlugins: [remarkMath],
+      rehypePlugins: [rehypeKatex],
+    }),
+  },
   integrations: [
+    mermaid({
+      theme: 'base',
+      autoTheme: false,
+      enableLog: false,
+      mermaidConfig: {
+        flowchart: {
+          curve: 'linear',
+          useMaxWidth: true,
+        },
+        themeVariables: {
+          background: '#f8f4ea',
+          primaryColor: '#eee5d6',
+          primaryTextColor: '#173f39',
+          primaryBorderColor: '#9f4933',
+          lineColor: '#536d66',
+          secondaryColor: '#e5eee9',
+          tertiaryColor: '#f8f4ea',
+          clusterBkg: '#f8f4ea',
+          clusterBorder: '#b8a991',
+        },
+        securityLevel: 'strict',
+      },
+    }),
     starlight({
       title: 'TIDE',
       description:
