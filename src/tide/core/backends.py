@@ -8,7 +8,6 @@ import torch
 
 from .types import (
     BackendPreference,
-    ComputeMode,
     Dimension,
     FallbackPolicy,
     GradientTarget,
@@ -21,9 +20,7 @@ from .types import (
 #: Gradient targets whose native execution requires snapshot storage. Source
 #: gradients use the autograd wrappers without stored wavefields, so they are
 #: excluded from the storage-none interaction for forward operations.
-SNAPSHOT_REQUIRING_TARGETS = frozenset(
-    {GradientTarget.EPSILON, GradientTarget.SIGMA}
-)
+SNAPSHOT_REQUIRING_TARGETS = frozenset({GradientTarget.EPSILON, GradientTarget.SIGMA})
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,18 +36,13 @@ class BackendCapability:
     operations: frozenset[Operation]
     devices: frozenset[str]
     dtypes: frozenset[torch.dtype]
-    compute_modes: frozenset[ComputeMode]
     storage_modes: frozenset[str]
     callbacks: bool
     reusable_background: bool = False
     gradient_targets: frozenset[GradientTarget] = frozenset()
 
     def matches(self, plan: SimulationPlan) -> bool:
-        return (
-            self.dimension is plan.dimension
-            and plan.operation in self.operations
-            and plan.compute_mode in self.compute_modes
-        )
+        return self.dimension is plan.dimension and plan.operation in self.operations
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +73,9 @@ class BackendCapabilities:
     def unsupported_reason(self, plan: SimulationPlan) -> str | None:
         """Return the first capability mismatch in user-facing terms."""
 
-        backend_name = "Python" if self.name is BackendPreference.REFERENCE else "Native"
+        backend_name = (
+            "Python" if self.name is BackendPreference.REFERENCE else "Native"
+        )
         dimension_name = "TM2D" if plan.dimension is Dimension.TM2D else "3D"
         operation_name = plan.operation.value
         capability = self.capability_for(plan)
@@ -97,11 +91,6 @@ class BackendCapabilities:
                 f"{backend_name} {dimension_name} {operation_name} does not support "
                 f"dtype={plan.dtype}."
             )
-        if plan.compute_mode not in capability.compute_modes:
-            return (
-                f"{backend_name} {dimension_name} {operation_name} does not support "
-                f"compute_mode={plan.compute_mode.value!r}."
-            )
         if plan.operation not in capability.operations:
             return f"{backend_name} backend does not support {plan.operation.value}."
         if plan.device.type == "cpu" and not self.cpu:
@@ -115,9 +104,7 @@ class BackendCapabilities:
             )
         missing_targets = plan.gradient_targets - capability.gradient_targets
         if missing_targets:
-            target_names = ", ".join(
-                sorted(target.value for target in missing_targets)
-            )
+            target_names = ", ".join(sorted(target.value for target in missing_targets))
             return (
                 f"{backend_name} {dimension_name} {operation_name} does not "
                 f"support gradients w.r.t. {target_names}."
@@ -131,9 +118,7 @@ class BackendCapabilities:
                 # Native forward source gradients run through the autograd
                 # wrappers without stored wavefields; only model gradients
                 # require snapshot storage.
-                storage_requiring = (
-                    storage_requiring & SNAPSHOT_REQUIRING_TARGETS
-                )
+                storage_requiring = storage_requiring & SNAPSHOT_REQUIRING_TARGETS
             if storage_requiring:
                 target_names = ", ".join(
                     sorted(target.value for target in storage_requiring)
@@ -241,7 +226,6 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
                     operations=frozenset({Operation.FORWARD, Operation.VJP}),
                     devices=frozenset({"cpu", "cuda"}),
                     dtypes=frozenset({torch.float32, torch.float64}),
-                    compute_modes=frozenset({ComputeMode.NATIVE}),
                     storage_modes=forward_storage,
                     gradient_targets=all_targets,
                     callbacks=True,
@@ -253,7 +237,6 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
                     operations=frozenset({Operation.JVP}),
                     devices=frozenset({"cpu", "cuda"}),
                     dtypes=frozenset({torch.float32, torch.float64}),
-                    compute_modes=frozenset({ComputeMode.NATIVE}),
                     storage_modes=(
                         jvp_tm2d_storage
                         if dimension is Dimension.TM2D
@@ -269,7 +252,6 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
                     operations=frozenset({Operation.SECOND_VJP}),
                     devices=frozenset({"cpu", "cuda"}),
                     dtypes=frozenset({torch.float32, torch.float64}),
-                    compute_modes=frozenset({ComputeMode.NATIVE}),
                     storage_modes=(
                         second_vjp_tm2d_storage
                         if dimension is Dimension.TM2D
@@ -281,9 +263,7 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
             )
         matrix = tuple(rows)
     else:
-        model_targets = frozenset(
-            {GradientTarget.EPSILON, GradientTarget.SIGMA}
-        )
+        model_targets = frozenset({GradientTarget.EPSILON, GradientTarget.SIGMA})
         forward_targets = model_targets | frozenset({GradientTarget.SOURCE})
         born_targets = model_targets | frozenset({GradientTarget.PERTURBATION})
         rows: list[BackendCapability] = []
@@ -294,10 +274,7 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
                     operations=frozenset({Operation.FORWARD, Operation.VJP}),
                     devices=frozenset({"cpu", "cuda"}),
                     dtypes=frozenset({torch.float32, torch.float64}),
-                    compute_modes=frozenset({ComputeMode.NATIVE}),
-                    storage_modes=frozenset(
-                        {"auto", "device", "cpu", "disk", "none"}
-                    ),
+                    storage_modes=frozenset({"auto", "device", "cpu", "disk", "none"}),
                     gradient_targets=forward_targets,
                     callbacks=True,
                 )
@@ -309,7 +286,6 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
                         operations=frozenset({Operation.JVP}),
                         devices=frozenset({"cpu", "cuda"}),
                         dtypes=frozenset({torch.float32, torch.float64}),
-                        compute_modes=frozenset({ComputeMode.NATIVE}),
                         storage_modes=frozenset(
                             {"auto", "device", "cpu", "disk", "none"}
                         ),
@@ -324,7 +300,6 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
                         operations=frozenset({Operation.SECOND_VJP}),
                         devices=frozenset({"cpu", "cuda"}),
                         dtypes=frozenset({torch.float32, torch.float64}),
-                        compute_modes=frozenset({ComputeMode.NATIVE}),
                         storage_modes=frozenset({"device", "cpu", "disk"}),
                         gradient_targets=model_targets,
                         callbacks=False,
@@ -337,7 +312,6 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
                         operations=frozenset({Operation.JVP}),
                         devices=frozenset({"cpu", "cuda"}),
                         dtypes=frozenset({torch.float32, torch.float64}),
-                        compute_modes=frozenset({ComputeMode.NATIVE}),
                         storage_modes=frozenset({"device", "none"}),
                         gradient_targets=born_targets,
                         callbacks=False,
@@ -349,7 +323,6 @@ def backend_capabilities(name: BackendPreference) -> BackendCapabilities:
                         operations=frozenset({Operation.SECOND_VJP}),
                         devices=frozenset({"cpu", "cuda"}),
                         dtypes=frozenset({torch.float32, torch.float64}),
-                        compute_modes=frozenset({ComputeMode.NATIVE}),
                         storage_modes=frozenset({"device"}),
                         gradient_targets=model_targets,
                         callbacks=False,

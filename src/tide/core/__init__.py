@@ -13,10 +13,13 @@ from .backends import (
     backend_capabilities,
     select_backend,
 )
-from .plan import compile_simulation_plan, derive_gradient_targets, normalize_backend_request
+from .plan import (
+    compile_simulation_plan,
+    derive_gradient_targets,
+    normalize_backend_request,
+)
 from .types import (
     BackendPreference,
-    ComputeMode,
     Dimension,
     FallbackPolicy,
     GradientTarget,
@@ -32,7 +35,6 @@ __all__ = [
     "BackendCapability",
     "BackendDecision",
     "BackendPreference",
-    "ComputeMode",
     "Dimension",
     "FallbackPolicy",
     "GradientTarget",

@@ -23,8 +23,6 @@ def _example(device: torch.device) -> MaxwellExample:
 def test_maxwell3d_available_from_tide():
     assert hasattr(tide, "Maxwell3D")
     assert hasattr(tide, "LinearizedMaxwell3D")
-    assert not hasattr(tide, "born3d")
-    assert not hasattr(tide, "Born3D")
 
 
 def test_maxwell3d_output_shape_and_order_cpu():

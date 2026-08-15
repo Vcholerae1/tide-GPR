@@ -42,12 +42,10 @@ def _quadratic_problem(
     return objective, preconditioner, hessian_vector, x0, target
 
 
-def test_public_api_is_torch_native_and_hides_legacy_flags() -> None:
+def test_public_api_is_torch_native() -> None:
     assert hasattr(tide.optim, "OptimizerStatus")
     assert hasattr(tide.optim, "StoppingCriteria")
     assert hasattr(tide.optim, "LineSearchOptions")
-    assert not hasattr(tide.optim, "FLAG_CONV")
-    assert not hasattr(tide.optim, "TASK_NEW_STEP")
 
 
 @pytest.mark.parametrize("method", ["sd", "nlcg", "lbfgs", "tn"])

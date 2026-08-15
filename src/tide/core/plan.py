@@ -9,7 +9,6 @@ import torch
 
 from .types import (
     BackendPreference,
-    ComputeMode,
     Dimension,
     FallbackPolicy,
     GradientTarget,
@@ -23,19 +22,13 @@ from .types import (
 
 def normalize_backend_request(
     python_backend: bool | str,
-    *,
-    execution_backend: str = "standard",
 ) -> BackendPreference:
-    """Normalize legacy ``python_backend`` and 3-D execution flags."""
+    """Normalize the legacy ``python_backend`` flag."""
 
     if not isinstance(python_backend, (bool, str)):
         raise TypeError(
             "python_backend must be bool or str, "
             f"but got {type(python_backend).__name__}."
-        )
-    if execution_backend != "standard":
-        raise ValueError(
-            f"execution_backend must be 'standard', got {execution_backend!r}."
         )
     if python_backend is True:
         return BackendPreference.REFERENCE
@@ -72,8 +65,7 @@ def derive_gradient_targets(
     if mu is not None and mu.requires_grad:
         targets.add(GradientTarget.MU)
     if any(
-        tensor is not None and tensor.requires_grad
-        for tensor in perturbation_tensors
+        tensor is not None and tensor.requires_grad for tensor in perturbation_tensors
     ):
         targets.add(GradientTarget.PERTURBATION)
     if source_amplitude is not None and source_amplitude.requires_grad:
@@ -103,16 +95,6 @@ def _normalize_gradient_targets(
     return frozenset(targets)
 
 
-def _normalize_compute_mode(value: str) -> ComputeMode:
-    try:
-        mode = ComputeMode(str(value).lower())
-    except ValueError as exc:
-        raise ValueError(
-            "compute_mode must be 'native'; FP16 support was removed."
-        ) from exc
-    return mode
-
-
 def _normalize_storage_mode(value: str) -> StorageMode:
     try:
         return StorageMode(str(value).lower())
@@ -136,8 +118,6 @@ def compile_simulation_plan(
     sigma: torch.Tensor | None = None,
     mu: torch.Tensor | None = None,
     python_backend: bool | str = False,
-    execution_backend: str = "standard",
-    compute_mode: str = "native",
     storage_mode: str = "device",
     storage_path: str = ".",
     storage_compression: bool | str = False,
@@ -154,7 +134,10 @@ def compile_simulation_plan(
     | str = Operation.FORWARD,
     model_gradient_sampling_interval: int = 1,
     hessian_mode: str | None = None,
-    gradient_targets: GradientTarget | str | Sequence[str | GradientTarget] | None = None,
+    gradient_targets: GradientTarget
+    | str
+    | Sequence[str | GradientTarget]
+    | None = None,
     has_dispersion: bool = False,
 ) -> SimulationPlan:
     """Compile a dimension-independent execution plan.
@@ -197,11 +180,7 @@ def compile_simulation_plan(
             f"or a leading model-batch dimension, got rank {epsilon.ndim}."
         )
 
-    backend = normalize_backend_request(
-        python_backend,
-        execution_backend=execution_backend,
-    )
-    resolved_compute_mode = _normalize_compute_mode(compute_mode)
+    backend = normalize_backend_request(python_backend)
     resolved_storage_mode = _normalize_storage_mode(storage_mode)
     if not isinstance(model_gradient_sampling_interval, int):
         raise TypeError("model_gradient_sampling_interval must be an integer.")
@@ -245,8 +224,6 @@ def compile_simulation_plan(
         runtime=RuntimeOptions(
             backend=backend,
             fallback=_normalize_fallback(fallback),
-            compute_mode=resolved_compute_mode,
-            execution_backend=execution_backend,
             n_threads=n_threads,
         ),
         storage=StorageOptions(

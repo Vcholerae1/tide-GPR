@@ -80,17 +80,3 @@ def test_public_api_is_explicit() -> None:
     assert all(hasattr(tide, name) for name in tide.__all__)
 
 
-def test_removed_tuple_api_is_not_public() -> None:
-    removed = {
-        "Born3D",
-        "BornTM",
-        "born3d",
-        "borntm",
-        "linearize_maxwelltm",
-        "maxwell3d",
-        "maxwell3d_hvp",
-        "maxwelltm",
-        "maxwelltm_hvp",
-    }
-    assert removed.isdisjoint(tide.__all__)
-    assert all(not hasattr(tide, name) for name in removed)

@@ -1,6 +1,5 @@
 import warnings
 from collections.abc import Sequence
-from typing import Literal
 
 import torch
 
@@ -85,7 +84,6 @@ def maxwell3d_python(
     callback_frequency: int,
     source_component: str,
     receiver_component: str,
-    execution_backend: str = "standard",
     storage_mode: str = "device",
     storage_path: str = ".",
     storage_compression: bool | str = False,
@@ -95,7 +93,6 @@ def maxwell3d_python(
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
     *,
-    compute_mode: Literal["native"] = "native",
     validate_material_inputs: bool = True,
     fallback: str = "reference",
 ):
@@ -107,12 +104,10 @@ def maxwell3d_python(
         time_taper,
         save_snapshots,
         backward_callback,
-        execution_backend,
         storage_path,
         storage_bytes_limit_device,
         storage_bytes_limit_host,
         storage_chunk_steps,
-        compute_mode,
         n_threads,
         fallback,
     )

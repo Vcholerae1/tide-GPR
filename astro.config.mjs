@@ -21,6 +21,12 @@ const guideItems = [
   'verification',
 ].map((slug) => ({ slug: `guides/${slug}` }));
 
+const exampleItems = [
+  'multiscale-inversion',
+  'source-wavelet-inversion',
+  'simultaneous-sources',
+].map((slug) => ({ slug: `examples/${slug}` }));
+
 const apiItems = [
   'index',
   'tide',
@@ -119,6 +125,7 @@ export default defineConfig({
           ],
         },
         { label: 'Research workflows', items: guideItems },
+        { label: 'Worked examples', items: exampleItems },
         { label: 'API reference', items: apiItems },
         { label: 'Developer internals', items: developerItems },
       ],

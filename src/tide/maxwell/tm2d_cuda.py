@@ -62,7 +62,6 @@ def maxwell_c_cuda(
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
-    compute_mode: str = "native",
     fallback: str = "reference",
 ):
     """Performs Maxwell propagation using the native C/CUDA backend."""
@@ -87,11 +86,6 @@ def maxwell_c_cuda(
         raise NotImplementedError("C/CUDA backend supports only cpu and cuda devices.")
     grid_spacing = _normalize_grid_spacing_2d(grid_spacing)
     dy, dx = grid_spacing
-
-    if compute_mode != "native":
-        raise NotImplementedError(
-            "FP16 support was removed; compute_mode must be 'native'."
-        )
 
     n_threads_val = 0
     if n_threads is not None:

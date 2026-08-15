@@ -9,7 +9,7 @@ to reproducible research workflows. Run commands from the repository root.
 | Minimal shot-batched 2D inversion | `uv run python -m examples.inversion.fwi_2d` |
 | 3D HashGrid implicit full-waveform inversion | `uv run --extra experiments python -m examples.inversion.implicit_3d --help` |
 | 4-GPU single-band HashGrid 3D inversion | `uv run --extra experiments torchrun --standalone --nproc-per-node=4 -m examples.inversion.implicit_3d --distributed --expected-world-size=4 --frequency-mhz=900 --output-dir=artifacts/tide-runs/hydro_3d_hashgrid_4gpu` |
-| IFWI showcase | See `examples/ifwi_showcase/README.md` |
+| Paper tutorials | See `examples/paper/README.md` |
 | Implicit FWI methods | See `examples/implicit_fwi/README.md` |
 
 Only examples documented here are maintained. One-off studies, superseded

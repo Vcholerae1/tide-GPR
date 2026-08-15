@@ -238,7 +238,6 @@ def maxwell3d(
     callback_frequency: int = 1,
     source_component: str = "ey",
     receiver_component: str = "ey",
-    execution_backend: str = "standard",
     python_backend: bool | str = False,
     storage_mode: str = "device",
     storage_path: str = ".",
@@ -248,7 +247,6 @@ def maxwell3d(
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
-    compute_mode: Literal["native"] = "native",
     fallback: Literal["reference", "error"] = "reference",
 ):
     """3D Maxwell equations solver.
@@ -344,8 +342,6 @@ def maxwell3d(
         epsilon=epsilon,
         sigma=sigma,
         mu=mu,
-        execution_backend=execution_backend,
-        compute_mode=compute_mode,
         storage_mode=storage_mode,
         storage_path=storage_path,
         storage_compression=storage_compression,
@@ -387,9 +383,7 @@ def maxwell3d(
         has_dispersion=dispersion is not None,
     )
     plan = execution.plan
-    compute_mode = plan.compute_mode.value
     storage_mode = plan.storage.mode.value
-    execution_backend = plan.runtime.execution_backend
 
     model_gradient_sampling_interval = validate_model_gradient_sampling_interval(
         model_gradient_sampling_interval
@@ -403,11 +397,6 @@ def maxwell3d(
     receiver_component = _normalize_component_3d(
         receiver_component, name="receiver_component"
     )
-    execution_backend = str(execution_backend).lower()
-    if execution_backend != "standard":
-        raise ValueError(
-            f"execution_backend must be 'standard', but got {execution_backend!r}"
-        )
 
     _validate_location_bounds(
         source_location,
@@ -451,10 +440,6 @@ def maxwell3d(
         nt_internal = source_amplitude_internal.shape[-1]
 
     use_python = execution.use_python
-    if compute_mode != "native":
-        raise NotImplementedError(
-            "FP16 support was removed; compute_mode must be 'native'."
-        )
 
     if batch_meta["model_batched"] and use_python:
         if forward_callback is not None or backward_callback is not None:
@@ -680,7 +665,6 @@ def maxwell3d(
                 callback_frequency,
                 source_component,
                 receiver_component,
-                execution_backend,
                 storage_mode,
                 storage_path,
                 storage_compression,
@@ -875,7 +859,6 @@ def maxwell3d(
         callback_frequency,
         source_component,
         receiver_component,
-        execution_backend,
         storage_mode,
         storage_path,
         storage_compression,
@@ -884,7 +867,6 @@ def maxwell3d(
         storage_chunk_steps,
         n_threads,
         dispersion,
-        compute_mode=compute_mode,
         fallback=fallback,
     )
 

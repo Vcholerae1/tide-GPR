@@ -9,7 +9,6 @@ from tide.core import (
     BackendCapabilities,
     BackendCapability,
     BackendPreference,
-    ComputeMode,
     Dimension,
     FallbackPolicy,
     GradientTarget,
@@ -31,13 +30,11 @@ def test_compile_plan_normalizes_legacy_options() -> None:
         mu=torch.ones_like(epsilon),
         python_backend="eager",
         storage_mode="DEVICE",
-        compute_mode="native",
         storage_chunk_steps=3,
     )
 
     assert plan.dimension is Dimension.TM2D
     assert plan.backend is BackendPreference.REFERENCE
-    assert plan.compute_mode is ComputeMode.NATIVE
     assert plan.storage.mode.value == "device"
     assert plan.storage.chunk_steps == 3
 
@@ -253,7 +250,9 @@ def test_select_backend_rejects_dispersion_gradients_on_native() -> None:
         has_dispersion=True,
         fallback=FallbackPolicy.ERROR.value,
     )
-    with pytest.raises(NotImplementedError, match="does not support gradients with dispersion"):
+    with pytest.raises(
+        NotImplementedError, match="does not support gradients with dispersion"
+    ):
         select_backend(strict_plan, native_available=True)
 
     reference_plan = compile_simulation_plan(
@@ -373,16 +372,6 @@ def test_linearization_decision_owns_background_reuse_capability() -> None:
 
     assert decision.selected is BackendPreference.NATIVE
     assert decision.can_reuse_background(plan)
-
-
-def test_compile_plan_rejects_removed_reduced_precision_mode() -> None:
-    with pytest.raises(ValueError, match="FP16 support was removed"):
-        compile_simulation_plan(
-            dimension="tm2d",
-            epsilon=torch.ones(4, 4),
-            python_backend=True,
-            compute_mode="fp16_io",
-        )
 
 
 def test_backend_templates_are_validated_and_named() -> None:
@@ -507,15 +496,10 @@ def test_capability_matrix_matches_documented_cells() -> None:
         assert {row.dimension for row in capabilities.matrix} == set(Dimension)
         assert all(isinstance(row, BackendCapability) for row in capabilities.matrix)
         assert all(
-            row.devices == frozenset({"cpu", "cuda"})
-            for row in capabilities.matrix
+            row.devices == frozenset({"cpu", "cuda"}) for row in capabilities.matrix
         )
         assert all(
             row.dtypes == frozenset({torch.float32, torch.float64})
-            for row in capabilities.matrix
-        )
-        assert all(
-            row.compute_modes == frozenset({ComputeMode.NATIVE})
             for row in capabilities.matrix
         )
 
@@ -527,7 +511,9 @@ def test_em3d_jvp_is_in_the_capability_matrix() -> None:
         epsilon=torch.ones(3, 4, 4, 4),
         storage_mode="device",
     )
-    assert select_backend(plan, native_available=True).selected is BackendPreference.NATIVE
+    assert (
+        select_backend(plan, native_available=True).selected is BackendPreference.NATIVE
+    )
 
 
 def test_native_em3d_born_rejects_host_backed_storage() -> None:
@@ -595,5 +581,4 @@ def test_execution_policy_is_the_shared_solver_dispatch_boundary() -> None:
 
     assert policy.use_python
     assert policy.dispatch_backend is True
-    assert policy.compute_mode == "native"
     assert policy.storage_mode == "device"

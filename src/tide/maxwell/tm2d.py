@@ -55,7 +55,6 @@ def _resolve_tm2d_execution_policy(
     sigma: torch.Tensor,
     mu: torch.Tensor,
     python_backend: Literal["eager", "jit", "compile"] | bool,
-    compute_mode: str,
     storage_mode: str,
     storage_path: str,
     storage_compression: bool | str,
@@ -77,7 +76,6 @@ def _resolve_tm2d_execution_policy(
         epsilon=epsilon,
         sigma=sigma,
         mu=mu,
-        compute_mode=compute_mode,
         storage_mode=storage_mode,
         storage_path=storage_path,
         storage_compression=storage_compression,
@@ -294,12 +292,9 @@ def maxwelltm(
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
-    compute_mode: Literal["native"] = "native",
     fallback: Literal["reference", "error"] = "reference",
 ):
-    """2D TM mode Maxwell equations solver.
-
-    """
+    """2D TM mode Maxwell equations solver."""
 
     epsilon_input = epsilon
     sigma_input = sigma
@@ -354,7 +349,6 @@ def maxwelltm(
         sigma=sigma,
         mu=mu,
         python_backend=python_backend,
-        compute_mode=compute_mode,
         storage_mode=storage_mode,
         storage_path=storage_path,
         storage_compression=storage_compression,
@@ -382,7 +376,6 @@ def maxwelltm(
         ),
         has_dispersion=dispersion is not None,
     )
-    compute_mode = execution.compute_mode
     storage_mode = execution.storage_mode
     use_python = execution.use_python
     dispatch_backend = execution.dispatch_backend
@@ -704,7 +697,6 @@ def maxwelltm(
         storage_chunk_steps,
         n_threads,
         dispersion,
-        compute_mode=compute_mode,
         fallback=fallback,
     )
 

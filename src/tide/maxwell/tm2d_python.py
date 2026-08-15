@@ -30,7 +30,6 @@ def maxwell_func(
     python_backend: bool | str,
     *args,
     validate_material_inputs: bool = True,
-    compute_mode: str = "native",
     fallback: str = "reference",
 ) -> tuple[
     torch.Tensor,
@@ -75,10 +74,6 @@ def maxwell_func(
             use_python = True
 
     if use_python:
-        if compute_mode != "native":
-            raise NotImplementedError(
-                "FP16 support was removed; compute_mode must be 'native'."
-            )
         if python_backend is True or python_backend is False:
             mode = "eager"
         elif isinstance(python_backend, str):
@@ -112,7 +107,7 @@ def maxwell_func(
 
     from .tm2d_cuda import maxwell_c_cuda
 
-    return maxwell_c_cuda(*args, compute_mode=compute_mode, fallback=fallback)
+    return maxwell_c_cuda(*args, fallback=fallback)
 
 
 def maxwell_python(

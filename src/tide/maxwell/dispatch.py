@@ -43,16 +43,11 @@ class ExecutionPolicy:
         """
         if not self.use_python:
             return False
-        if (
-            isinstance(self.requested_backend, str)
-            and self.requested_backend.lower() in {"eager", "jit", "compile"}
-        ):
+        if isinstance(
+            self.requested_backend, str
+        ) and self.requested_backend.lower() in {"eager", "jit", "compile"}:
             return self.requested_backend
         return True
-
-    @property
-    def compute_mode(self) -> str:
-        return self.plan.compute_mode.value
 
     @property
     def storage_mode(self) -> str:

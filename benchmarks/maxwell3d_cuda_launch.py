@@ -81,7 +81,6 @@ def main() -> None:
             n_threads=n_threads,
             python_backend=False,
             save_snapshots=args.backward,
-            compute_mode="native",
             model_gradient_sampling_interval=args.gradient_sampling_interval,
         )
         if args.backward:
@@ -100,7 +99,6 @@ def main() -> None:
         "stencil": args.stencil,
         "backward": args.backward,
         "gradient_sampling_interval": args.gradient_sampling_interval,
-        "compute_mode": "native",
     }
     print(json.dumps(metadata), flush=True)
     for n_threads in thread_counts:

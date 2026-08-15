@@ -24,10 +24,6 @@ class FallbackPolicy(StrEnum):
     ERROR = "error"
 
 
-class ComputeMode(StrEnum):
-    NATIVE = "native"
-
-
 class StorageMode(StrEnum):
     AUTO = "auto"
     DEVICE = "device"
@@ -97,15 +93,9 @@ class RuntimeOptions:
 
     backend: BackendPreference = BackendPreference.AUTO
     fallback: FallbackPolicy = FallbackPolicy.REFERENCE
-    compute_mode: ComputeMode = ComputeMode.NATIVE
-    execution_backend: str = "standard"
     n_threads: int | None = None
 
     def __post_init__(self) -> None:
-        if self.execution_backend != "standard":
-            raise ValueError(
-                f"execution_backend must be 'standard', got {self.execution_backend!r}."
-            )
         if self.n_threads is not None and self.n_threads < 0:
             raise ValueError("n_threads must be non-negative when provided.")
 
@@ -141,10 +131,6 @@ class SimulationPlan:
     def backend(self) -> BackendPreference:
         return self.runtime.backend
 
-    @property
-    def compute_mode(self) -> ComputeMode:
-        return self.runtime.compute_mode
-
     def require_native(self, reason: str) -> None:
         if self.backend is BackendPreference.REFERENCE:
             raise NotImplementedError(
@@ -155,7 +141,6 @@ class SimulationPlan:
 
 __all__ = [
     "BackendPreference",
-    "ComputeMode",
     "Dimension",
     "FallbackPolicy",
     "GradientTarget",

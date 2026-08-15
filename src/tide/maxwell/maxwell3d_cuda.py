@@ -1,6 +1,5 @@
 import warnings
 from collections.abc import Sequence
-from typing import Literal
 
 import torch
 
@@ -62,7 +61,6 @@ def maxwell3d_c_cuda(
     callback_frequency: int,
     source_component: str,
     receiver_component: str,
-    execution_backend: str = "standard",
     storage_mode: str = "device",
     storage_path: str = ".",
     storage_compression: bool | str = False,
@@ -71,7 +69,6 @@ def maxwell3d_c_cuda(
     storage_chunk_steps: int = 0,
     n_threads: int | None = None,
     dispersion: DebyeDispersion | None = None,
-    compute_mode: Literal["native"] = "native",
     fallback: str = "reference",
 ):
     """3D C/CUDA forward propagation path with Python fallback for gradients."""
@@ -93,19 +90,10 @@ def maxwell3d_c_cuda(
         raise RuntimeError("mu must have same shape as epsilon")
 
     storage_mode_str = str(storage_mode).lower()
-    execution_backend_str = str(execution_backend).lower()
     if storage_mode_str not in {"device", "cpu", "disk", "none", "auto"}:
         raise ValueError(
             "storage_mode must be 'device', 'cpu', 'disk', 'none', or 'auto', "
             f"but got {storage_mode!r}"
-        )
-    if execution_backend_str != "standard":
-        raise ValueError(
-            f"execution_backend must be 'standard', but got {execution_backend!r}"
-        )
-    if compute_mode != "native":
-        raise NotImplementedError(
-            "FP16 support was removed; compute_mode must be 'native'."
         )
     execution_backend_id = 0
 
@@ -176,7 +164,6 @@ def maxwell3d_c_cuda(
             callback_frequency,
             source_component,
             receiver_component,
-            execution_backend_str,
             storage_mode=fallback_storage_mode,
             storage_compression=storage_compression,
             n_threads=n_threads,
@@ -189,8 +176,6 @@ def maxwell3d_c_cuda(
         epsilon=epsilon,
         sigma=sigma,
         mu=mu,
-        execution_backend=execution_backend_str,
-        compute_mode=compute_mode,
         storage_mode=storage_mode_str,
         storage_path=storage_path,
         storage_compression=storage_compression,
