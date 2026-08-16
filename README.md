@@ -1,7 +1,10 @@
 # TIDE
 
+**[Documentation](https://vcholerae1.github.io/tide-GPR/)**
+
 **T**orch-based **I**nversion & **D**evelopment **E**ngine
 
+[![Test coverage](https://codecov.io/gh/Vcholerae1/tide-GPR/branch/main/graph/badge.svg)](https://codecov.io/gh/Vcholerae1/tide-GPR)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 TIDE is a PyTorch-first electromagnetic FDTD library for forward modeling and full-waveform inversion. It provides differentiable 2D and 3D Maxwell solvers, native C/CUDA kernels, and configurable snapshot storage for memory-intensive gradient calculations.

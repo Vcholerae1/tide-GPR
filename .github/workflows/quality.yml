@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   static-and-cpu:
@@ -42,7 +43,14 @@ jobs:
       - name: Python coverage
         run: >-
           uv run coverage combine &&
-          uv run coverage report
+          uv run coverage report &&
+          uv run coverage xml
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          use_oidc: true
 
       - name: Benchmark CLI smoke
         run: >-
