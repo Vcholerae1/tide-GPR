@@ -115,8 +115,10 @@ def _weak_wolfe(
             return _failure(x, f, grad, evaluations, OptimizerStatus.MAX_EVALUATIONS)
         evaluations += 1
         slope = _dot(trial_grad, direction)
-        finite = isfinite(trial_f) and isfinite(slope) and bool(
-            torch.isfinite(trial_grad).all()
+        finite = (
+            isfinite(trial_f)
+            and isfinite(slope)
+            and bool(torch.isfinite(trial_grad).all())
         )
         if not finite:
             return _failure(x, f, grad, evaluations, OptimizerStatus.NONFINITE)
@@ -145,9 +147,7 @@ def _weak_wolfe(
 
     if last_trial is not None and last_trial[1] < f:
         trial_x, trial_f, trial_grad, alpha = last_trial
-        return _LineSearchResult(
-            True, trial_x, trial_f, trial_grad, alpha, evaluations
-        )
+        return _LineSearchResult(True, trial_x, trial_f, trial_grad, alpha, evaluations)
     return _failure(x, f, grad, evaluations, OptimizerStatus.LINE_SEARCH_FAILED)
 
 
@@ -243,9 +243,7 @@ def _line_search(
     options: LineSearchOptions,
 ) -> _LineSearchResult:
     if options.method == "weak_wolfe":
-        return _weak_wolfe(
-            evaluator, x, f, grad, direction, lower, upper, options
-        )
+        return _weak_wolfe(evaluator, x, f, grad, direction, lower, upper, options)
     if lower is not None and upper is not None:
         return _projected_armijo(
             evaluator, x, f, grad, direction, lower, upper, options

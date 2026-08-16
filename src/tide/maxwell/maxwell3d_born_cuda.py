@@ -987,9 +987,7 @@ def born3d_c_cuda(
             )
         else:
             receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
-            background_receiver_amplitudes = torch.empty(
-                0, device=device, dtype=dtype
-            )
+            background_receiver_amplitudes = torch.empty(0, device=device, dtype=dtype)
 
         compute_stream_handle = 0
         if device.type == "cuda":

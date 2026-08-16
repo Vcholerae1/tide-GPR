@@ -1,9 +1,102 @@
+from __future__ import annotations
+
 import numpy as np
 import pytest
+import tide
 import torch
 from jaxtyping import TypeCheckError
+from tide.validation import (
+    validate_freq_taper_frac,
+    validate_model_gradient_sampling_interval,
+    validate_time_pad_frac,
+)
 
-import tide
+# --- test_public_api.py ---
+
+"""Intentional public API snapshot; additions require a documented review."""
+
+
+EXPECTED_PUBLIC_NAMES = {
+    "Acquisition",
+    "BatchedModel2D",
+    "BatchedModel3D",
+    "BackendPreference",
+    "CPML",
+    "Callback",
+    "CallbackState",
+    "DebyeDispersion",
+    "Field2DLike",
+    "Field3DLike",
+    "Discretization",
+    "EM3DState",
+    "EMDirection",
+    "EMGradient",
+    "EMModel",
+    "ExecutionOptions",
+    "Experiment",
+    "FallbackPolicy",
+    "ForwardResult",
+    "Location2D",
+    "Location3D",
+    "MatrixF32",
+    "Model2D",
+    "Model2DLike",
+    "Model3D",
+    "Model3DLike",
+    "ReceiverData",
+    "ReceiverLocation2D",
+    "ReceiverLocation3D",
+    "SourceLocation2D",
+    "SourceLocation3D",
+    "LinearizedMaxwell3D",
+    "LinearizedMaxwellTM",
+    "Maxwell3D",
+    "MaxwellTM",
+    "Observers",
+    "SourceConvention",
+    "StorageMode",
+    "StorageOptions",
+    "TMState",
+    "TangentResult",
+    "VectorF32",
+    "WaveletBatch",
+    "callbacks",
+    "cfl",
+    "cfl_condition",
+    "core",
+    "create_or_pad",
+    "downsample",
+    "downsample_and_movedim",
+    "gaussian",
+    "gaussian_derivative",
+    "maxwell",
+    "morlet",
+    "optim",
+    "padding",
+    "resampling",
+    "reverse_pad",
+    "ricker",
+    "sine_burst",
+    "runtime_typecheck",
+    "staggered",
+    "upsample",
+    "utils",
+    "validate_freq_taper_frac",
+    "validate_model_gradient_sampling_interval",
+    "validate_time_pad_frac",
+    "validation",
+    "wavelets",
+    "workflow",
+    "zero_interior",
+}
+
+
+def test_public_api_is_explicit() -> None:
+    assert set(tide.__all__) == EXPECTED_PUBLIC_NAMES
+    assert all(hasattr(tide, name) for name in tide.__all__)
+
+
+# --- test_runtime_typecheck.py ---
 
 
 def _tm_inputs() -> tuple[torch.Tensor, ...]:
@@ -24,25 +117,6 @@ def _em3d_inputs() -> tuple[torch.Tensor, ...]:
     source_location = torch.tensor([[[2, 3, 3]]], dtype=torch.long)
     receiver_location = torch.tensor([[[2, 3, 4]]], dtype=torch.long)
     return epsilon, sigma, mu, source_amplitude, source_location, receiver_location
-
-
-def test_shape_aliases_are_public() -> None:
-    for name in (
-        "Model2D",
-        "Model2DLike",
-        "Model3D",
-        "Model3DLike",
-        "Location2D",
-        "Location3D",
-        "ReceiverLocation2D",
-        "ReceiverLocation3D",
-        "SourceLocation2D",
-        "SourceLocation3D",
-        "WaveletBatch",
-        "runtime_typecheck",
-    ):
-        assert name in tide.__all__
-        assert hasattr(tide, name)
 
 
 def test_numpy_shape_aliases_support_runtime_typechecking() -> None:
@@ -140,3 +214,27 @@ def test_maxwelltm_operator_rejects_rank4_model() -> None:
 
     with pytest.raises(ValueError, match="2-D or batched 3-D"):
         operator(model)
+
+
+# --- test_validation.py ---
+
+
+def test_validate_freq_taper_frac_bounds():
+    assert validate_freq_taper_frac(0.25) == pytest.approx(0.25)
+    with pytest.raises(ValueError):
+        validate_freq_taper_frac(1.5)
+
+
+def test_validate_time_pad_frac_bounds():
+    assert validate_time_pad_frac(0.5) == pytest.approx(0.5)
+    with pytest.raises(ValueError):
+        validate_time_pad_frac(-0.1)
+
+
+def test_validate_model_gradient_sampling_interval():
+    assert validate_model_gradient_sampling_interval(0) == 0
+    assert validate_model_gradient_sampling_interval(3) == 3
+    with pytest.raises(TypeError):
+        validate_model_gradient_sampling_interval(1.5)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        validate_model_gradient_sampling_interval(-1)

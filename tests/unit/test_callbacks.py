@@ -1,9 +1,37 @@
-import pytest
-import torch
+from __future__ import annotations
 
+import pytest
 import tide
-from tide.callbacks import CallbackState
+import torch
 from tide import backend_utils
+from tide.callbacks import CallbackState
+
+# --- test_callbacks.py ---
+
+
+def test_callback_state_views():
+    ey = torch.arange(36, dtype=torch.float32).reshape(6, 6)
+    models = {"epsilon": torch.ones_like(ey)}
+    state = CallbackState(
+        dt=0.1,
+        step=2,
+        nt=5,
+        wavefields={"Ey": ey},
+        models=models,
+        fd_pad=[1, 1, 1, 1],
+        pml_width=[1, 1, 1, 1],
+    )
+
+    torch.testing.assert_close(state.get_wavefield("Ey", view="full"), ey)
+    torch.testing.assert_close(state.get_wavefield("Ey", view="pml"), ey[1:-1, 1:-1])
+    torch.testing.assert_close(state.get_wavefield("Ey", view="inner"), ey[2:-2, 2:-2])
+    torch.testing.assert_close(
+        state.get_model("epsilon", view="inner"),
+        models["epsilon"][2:-2, 2:-2],
+    )
+
+
+# --- test_callbacks_3d.py ---
 
 
 def test_callback_state_views_for_3d():

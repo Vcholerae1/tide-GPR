@@ -105,9 +105,39 @@ class _LinearizedMaxwell(Generic[StateT]):
         """Apply the adjoint Jacobian ``J(model).T`` to receiver cotangents."""
         receiver_data = self.primal.receiver_data
         if cotangent.shape != receiver_data.shape:
-            raise ValueError("Receiver cotangent must match primal receiver data shape.")
+            raise ValueError(
+                "Receiver cotangent must match primal receiver data shape."
+            )
         gradients = torch.autograd.grad(
             receiver_data,
+            self._parameters(),
+            cotangent,
+            retain_graph=True,
+            allow_unused=True,
+        )
+        return self._gradient(gradients)
+
+    def _run_jvp(
+        self, direction: EMDirection
+    ) -> tuple[TangentResult[StateT], torch.Tensor]:
+        raise NotImplementedError
+
+    def jvp(self, direction: EMDirection) -> TangentResult[StateT]:
+        tangent, _ = self._run_jvp(direction)
+        return tangent
+
+    def second_vjp(
+        self,
+        direction: EMDirection,
+        cotangent: torch.Tensor,
+    ) -> EMGradient:
+        tangent, tangent_receiver = self._run_jvp(direction)
+        if cotangent.shape != tangent.receiver_data.shape:
+            raise ValueError(
+                "Receiver cotangent must match tangent receiver data shape."
+            )
+        gradients = torch.autograd.grad(
+            tangent_receiver,
             self._parameters(),
             cotangent,
             retain_graph=True,
@@ -145,17 +175,21 @@ class LinearizedMaxwellTM(_LinearizedMaxwell[TMState]):
         super().__init__(operator, model, storage=storage, targets=targets)
         self.operator = operator
 
-    def _run_jvp(self, direction: EMDirection) -> tuple[TangentResult[TMState], torch.Tensor]:
+    def _run_jvp(
+        self, direction: EMDirection
+    ) -> tuple[TangentResult[TMState], torch.Tensor]:
         self._validate_open()
         direction.validate_for(self.model)
         if direction.mu is not None:
-            raise NotImplementedError("TM2D tangent propagation for mu is not available.")
-        from .derivatives import tm2d_jvp
+            raise NotImplementedError(
+                "TM2D tangent propagation for mu is not available."
+            )
+        from .tm2d_born import borntm
 
         discretization = self.operator.discretization
         experiment = self.operator.experiment
         execution = self.operator.execution
-        result = tm2d_jvp(
+        result = borntm(
             self.model.epsilon,
             self.model.sigma,
             self.model.mu,
@@ -194,27 +228,6 @@ class LinearizedMaxwellTM(_LinearizedMaxwell[TMState]):
         self._primal = ForwardResult(result[-2], background_state)
         return TangentResult(result[-1], tangent_state), result[-1]
 
-    def jvp(self, direction: EMDirection) -> TangentResult[TMState]:
-        tangent, _ = self._run_jvp(direction)
-        return tangent
-
-    def second_vjp(
-        self,
-        direction: EMDirection,
-        cotangent: torch.Tensor,
-    ) -> EMGradient:
-        tangent, tangent_receiver = self._run_jvp(direction)
-        if cotangent.shape != tangent.receiver_data.shape:
-            raise ValueError("Receiver cotangent must match tangent receiver data shape.")
-        gradients = torch.autograd.grad(
-            tangent_receiver,
-            self._parameters(),
-            cotangent,
-            retain_graph=True,
-            allow_unused=True,
-        )
-        return self._gradient(gradients)
-
 
 class LinearizedMaxwell3D(_LinearizedMaxwell[EM3DState]):
     """Derivative of a :class:`Maxwell3D` operator at one background model."""
@@ -232,17 +245,21 @@ class LinearizedMaxwell3D(_LinearizedMaxwell[EM3DState]):
         super().__init__(operator, model, storage=storage, targets=targets)
         self.operator = operator
 
-    def _run_jvp(self, direction: EMDirection) -> tuple[TangentResult[EM3DState], torch.Tensor]:
+    def _run_jvp(
+        self, direction: EMDirection
+    ) -> tuple[TangentResult[EM3DState], torch.Tensor]:
         self._validate_open()
         direction.validate_for(self.model)
         if direction.mu is not None:
-            raise NotImplementedError("3-D tangent propagation for mu is not available.")
-        from .derivatives import em3d_jvp
+            raise NotImplementedError(
+                "3-D tangent propagation for mu is not available."
+            )
+        from .maxwell3d_born import born3d
 
         discretization = self.operator.discretization
         experiment = self.operator.experiment
         execution = self.operator.execution
-        result = em3d_jvp(
+        result = born3d(
             self.model.epsilon,
             self.model.sigma,
             self.model.mu,
@@ -282,27 +299,6 @@ class LinearizedMaxwell3D(_LinearizedMaxwell[EM3DState]):
         )
         self._primal = ForwardResult(result[-2], background_state)
         return TangentResult(result[-1], tangent_state), result[-1]
-
-    def jvp(self, direction: EMDirection) -> TangentResult[EM3DState]:
-        tangent, _ = self._run_jvp(direction)
-        return tangent
-
-    def second_vjp(
-        self,
-        direction: EMDirection,
-        cotangent: torch.Tensor,
-    ) -> EMGradient:
-        tangent, tangent_receiver = self._run_jvp(direction)
-        if cotangent.shape != tangent.receiver_data.shape:
-            raise ValueError("Receiver cotangent must match tangent receiver data shape.")
-        gradients = torch.autograd.grad(
-            tangent_receiver,
-            self._parameters(),
-            cotangent,
-            retain_graph=True,
-            allow_unused=True,
-        )
-        return self._gradient(gradients)
 
 
 __all__ = ["LinearizedMaxwell3D", "LinearizedMaxwellTM"]

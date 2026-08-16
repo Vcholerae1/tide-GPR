@@ -1,9 +1,10 @@
-from dataclasses import replace
+from __future__ import annotations
 
 import pytest
-import torch
-
 import tide
+import torch
+from dataclasses import replace
+from numerical_utils import make_maxwell3d_example, make_tm2d_example, MaxwellExample
 from tide import backend_utils
 from tide.core import (
     BackendCapabilities,
@@ -19,6 +20,418 @@ from tide.core import (
 )
 from tide.core.backends import backend_capabilities
 from tide.maxwell.dispatch import compile_execution_policy
+
+# --- test_edge_cases.py ---
+
+"""Tests for edge cases and error handling."""
+
+
+class TestEdgeCaseGridSizes:
+    """Tests for edge cases related to grid sizes."""
+
+    def test_small_grid_cpu(self):
+        """Test with very small grid size on CPU."""
+        device = torch.device("cpu")
+        dtype = torch.float32
+
+        ny, nx = 4, 4
+        nt = 5
+
+        epsilon = torch.ones(ny, nx, device=device, dtype=dtype)
+        sigma = torch.zeros_like(epsilon)
+        mu = torch.ones_like(epsilon)
+
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
+        )
+        receiver_locations = torch.tensor(
+            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
+        )
+
+        wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
+        source_amplitude = wavelet.view(1, 1, nt)
+
+        # Should not raise an error for small grid
+        out = tide.maxwell._kernel_api.maxwelltm(
+            epsilon,
+            sigma,
+            mu,
+            grid_spacing=0.02,
+            dt=4e-11,
+            source_amplitude=source_amplitude,
+            source_location=source_locations,
+            receiver_location=receiver_locations,
+            pml_width=1,
+            stencil=2,
+        )[-1]
+
+        assert torch.isfinite(out).all()
+
+    def test_single_cell_grid_cpu(self):
+        """Test with single cell grid (minimum viable)."""
+        device = torch.device("cpu")
+        dtype = torch.float32
+
+        ny, nx = 1, 1
+        nt = 3
+
+        epsilon = torch.ones(ny, nx, device=device, dtype=dtype)
+        sigma = torch.zeros_like(epsilon)
+        mu = torch.ones_like(epsilon)
+
+        source_locations = torch.tensor([[[0, 0]]], dtype=torch.long, device=device)
+        receiver_locations = torch.tensor([[[0, 0]]], dtype=torch.long, device=device)
+
+        wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
+        source_amplitude = wavelet.view(1, 1, nt)
+
+        # Should handle single cell grid
+        out = tide.maxwell._kernel_api.maxwelltm(
+            epsilon,
+            sigma,
+            mu,
+            grid_spacing=0.02,
+            dt=4e-11,
+            source_amplitude=source_amplitude,
+            source_location=source_locations,
+            receiver_location=receiver_locations,
+            pml_width=0,
+            stencil=2,
+        )[-1]
+
+        assert torch.isfinite(out).all()
+
+
+class TestEdgeCaseSourceReceiver:
+    """Tests for edge cases related to sources and receivers."""
+
+    def test_source_at_boundary(self):
+        """Test with source at domain boundary."""
+        device = torch.device("cpu")
+        dtype = torch.float32
+
+        ny, nx = 10, 10
+        nt = 10
+
+        epsilon = torch.ones(ny, nx, device=device, dtype=dtype) * 4.0
+        sigma = torch.zeros_like(epsilon)
+        mu = torch.ones_like(epsilon)
+
+        # Source at corner
+        source_locations = torch.tensor([[[0, 0]]], dtype=torch.long, device=device)
+        receiver_locations = torch.tensor(
+            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
+        )
+
+        wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
+        source_amplitude = wavelet.view(1, 1, nt)
+
+        out = tide.maxwell._kernel_api.maxwelltm(
+            epsilon,
+            sigma,
+            mu,
+            grid_spacing=0.02,
+            dt=4e-11,
+            source_amplitude=source_amplitude,
+            source_location=source_locations,
+            receiver_location=receiver_locations,
+            pml_width=0,
+            stencil=2,
+        )[-1]
+
+        assert torch.isfinite(out).all()
+
+    def test_single_time_step(self):
+        """Test with single time step."""
+        device = torch.device("cpu")
+        dtype = torch.float32
+
+        ny, nx = 8, 8
+        nt = 1
+
+        epsilon = torch.ones(ny, nx, device=device, dtype=dtype) * 4.0
+        sigma = torch.zeros_like(epsilon)
+        mu = torch.ones_like(epsilon)
+
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
+        )
+        receiver_locations = torch.tensor(
+            [[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device
+        )
+
+        wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
+        source_amplitude = wavelet.view(1, 1, nt)
+
+        out = tide.maxwell._kernel_api.maxwelltm(
+            epsilon,
+            sigma,
+            mu,
+            grid_spacing=0.02,
+            dt=4e-11,
+            source_amplitude=source_amplitude,
+            source_location=source_locations,
+            receiver_location=receiver_locations,
+            pml_width=1,
+            stencil=2,
+        )[-1]
+
+        assert torch.isfinite(out).all()
+        assert out.shape[0] == nt
+
+
+class TestEdgeCasePML:
+    """Tests for edge cases related to PML."""
+
+    def test_large_pml(self):
+        """Test with large PML width."""
+        device = torch.device("cpu")
+        dtype = torch.float32
+
+        ny, nx = 12, 12
+        nt = 10
+
+        epsilon = torch.ones(ny, nx, device=device, dtype=dtype) * 4.0
+        sigma = torch.zeros_like(epsilon)
+        mu = torch.ones_like(epsilon)
+
+        source_locations = torch.tensor(
+            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
+        )
+        receiver_locations = torch.tensor(
+            [[[ny // 2, nx // 2 + 1]]], dtype=torch.long, device=device
+        )
+
+        wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
+        source_amplitude = wavelet.view(1, 1, nt)
+
+        # Large PML (almost half the domain)
+        out = tide.maxwell._kernel_api.maxwelltm(
+            epsilon,
+            sigma,
+            mu,
+            grid_spacing=0.02,
+            dt=4e-11,
+            source_amplitude=source_amplitude,
+            source_location=source_locations,
+            receiver_location=receiver_locations,
+            pml_width=5,
+            stencil=2,
+        )[-1]
+
+        assert torch.isfinite(out).all()
+
+
+# --- test_api_wrappers.py ---
+
+"""Contracts for the structured Maxwell operator API."""
+
+
+def _tm_case():
+    return make_tm2d_example(
+        shape=(12, 14),
+        nt=20,
+        grid_spacing=0.02,
+        dt=2e-11,
+        frequency=100e6,
+        source_location=(4, 6),
+        receiver_locations=((4, 8),),
+        pml_width=2,
+        python_backend=True,
+    )
+
+
+def _tm_operator(case) -> tide.MaxwellTM:
+    return tide.MaxwellTM(
+        tide.Discretization(
+            case.grid_spacing,
+            case.dt,
+            boundary=tide.CPML(case.pml_width),
+        ),
+        tide.Experiment(
+            tide.Acquisition(case.source_location, case.receiver_location),
+            case.source_amplitude,
+        ),
+        execution=tide.ExecutionOptions(backend=tide.BackendPreference.REFERENCE),
+    )
+
+
+def _model(case) -> tide.EMModel:
+    return tide.EMModel(case.epsilon, case.sigma, case.mu)
+
+
+def test_maxwelltm_returns_named_result_matching_reference_kernel() -> None:
+    case = _tm_case()
+    operator = _tm_operator(case)
+
+    actual = operator(_model(case))
+    expected = case.run(python_backend=True)
+
+    torch.testing.assert_close(actual.receiver_data, expected[-1])
+    torch.testing.assert_close(actual.final_state.Ey, expected[0])
+    assert isinstance(actual, tide.ForwardResult)
+    assert isinstance(actual.final_state, tide.TMState)
+
+
+def test_linearized_tm_jvp_matches_reference_tangent_kernel() -> None:
+    case = _tm_case()
+    operator = _tm_operator(case)
+    direction = tide.EMDirection(epsilon=torch.full_like(case.epsilon, 0.05))
+
+    with operator.linearize(_model(case)) as linearized:
+        actual = linearized.jvp(direction)
+    expected = case.run_born(depsilon=direction.epsilon, python_backend=True)
+
+    torch.testing.assert_close(actual.receiver_data, expected[-1])
+    torch.testing.assert_close(actual.final_state.Ey, expected[7])
+
+
+def test_linearized_tm_vjp_satisfies_discrete_adjoint_identity() -> None:
+    case = _tm_case()
+    operator = _tm_operator(case)
+    direction_tensor = torch.randn_like(case.epsilon)
+    direction = tide.EMDirection(epsilon=direction_tensor)
+
+    with operator.linearize(_model(case), targets=("epsilon",)) as linearized:
+        tangent = linearized.jvp(direction).receiver_data
+        cotangent = torch.randn_like(tangent)
+        gradient = linearized.vjp(cotangent)
+
+    assert gradient.epsilon is not None
+    torch.testing.assert_close(
+        (tangent * cotangent).sum(),
+        (direction_tensor * gradient.epsilon).sum(),
+        rtol=2e-5,
+        atol=2e-7,
+    )
+
+
+def test_receiver_objective_composes_gauss_newton_hvp() -> None:
+    case = _tm_case()
+    operator = _tm_operator(case)
+    direction = tide.EMDirection(epsilon=torch.randn_like(case.epsilon))
+
+    with operator.linearize(_model(case), targets=("epsilon",)) as linearized:
+        observed = torch.zeros_like(linearized.primal.receiver_data)
+        objective = tide.workflow.ReceiverObjective(observed)
+        result = objective.hvp(linearized, direction, mode="gauss_newton")
+        expected = linearized.vjp(linearized.jvp(direction).receiver_data)
+
+    torch.testing.assert_close(result.epsilon, expected.epsilon)
+    assert result.sigma is expected.sigma is None
+
+
+def test_maxwell3d_returns_named_result_matching_reference_kernel() -> None:
+    case = make_maxwell3d_example(
+        shape=(6, 7, 8),
+        nt=10,
+        grid_spacing=(0.03, 0.02, 0.02),
+        dt=4e-11,
+        frequency=80e6,
+        source_location=(2, 3, 2),
+        receiver_locations=((2, 3, 4),),
+        pml_width=(2, 2, 2, 2, 2, 2),
+        python_backend=True,
+    )
+    operator = tide.Maxwell3D(
+        tide.Discretization(
+            case.grid_spacing,
+            case.dt,
+            boundary=tide.CPML(case.pml_width),
+        ),
+        tide.Experiment(
+            tide.Acquisition(case.source_location, case.receiver_location),
+            case.source_amplitude,
+            source_component=case.source_component,
+            receiver_component=case.receiver_component,
+        ),
+        execution=tide.ExecutionOptions(backend=tide.BackendPreference.REFERENCE),
+    )
+
+    actual = operator(_model(case))
+    expected = case.run(python_backend=True)
+
+    torch.testing.assert_close(actual.receiver_data, expected[-1])
+    torch.testing.assert_close(actual.final_state.Ey, expected[1])
+    assert isinstance(actual.final_state, tide.EM3DState)
+
+
+# --- test_maxwell3d_api.py ---
+
+
+def _example(device: torch.device) -> MaxwellExample:
+    return make_maxwell3d_example(
+        shape=(6, 7, 8),
+        nt=12,
+        grid_spacing=[0.03, 0.02, 0.02],
+        dt=4e-11,
+        frequency=80e6,
+        device=device,
+        source_location=(2, 3, 2),
+        receiver_locations=((2, 3, 4),),
+        pml_width=[2, 2, 2, 2, 2, 2],
+        python_backend=True,
+    )
+
+
+def test_maxwell3d_output_shape_and_order_cpu():
+    example = _example(torch.device("cpu"))
+    output = example.run()
+    assert len(output) == 19
+    assert output[-1].shape == (example.source_amplitude.shape[-1], 1, 1)
+    for field in output[:-1]:
+        assert field.ndim == 4
+        assert field.shape[0] == 1
+
+
+def test_linearized_maxwell3d_matches_reference_jvp_cpu():
+    example = _example(torch.device("cpu"))
+    depsilon = torch.full_like(example.epsilon, 0.05)
+    operator = tide.Maxwell3D(
+        tide.Discretization(
+            tuple(example.grid_spacing),
+            example.dt,
+            boundary=tide.CPML(tuple(example.pml_width)),
+        ),
+        tide.Experiment(
+            tide.Acquisition(example.source_location, example.receiver_location),
+            example.source_amplitude,
+            source_component=example.source_component,
+            receiver_component=example.receiver_component,
+        ),
+        execution=tide.ExecutionOptions(backend=tide.BackendPreference.REFERENCE),
+    )
+    with operator.linearize(
+        tide.EMModel(example.epsilon, example.sigma, example.mu)
+    ) as linearized:
+        actual = linearized.jvp(tide.EMDirection(epsilon=depsilon))
+    expected = example.run_born(depsilon=depsilon, python_backend=True)
+    torch.testing.assert_close(actual.receiver_data, expected[-1])
+
+
+def test_maxwell3d_component_validation():
+    example = _example(torch.device("cpu"))
+    with pytest.raises(ValueError):
+        example.run(source_component="bad")
+    with pytest.raises(ValueError):
+        example.run(receiver_component="bad")
+
+
+def test_maxwell3d_location_bounds():
+    example = _example(torch.device("cpu"))
+    bad_source = example.source_location.clone()
+    bad_source[0, 0, 0] = example.epsilon.shape[0]
+    with pytest.raises(RuntimeError):
+        example.run(source_location=bad_source)
+
+
+def test_maxwell3d_requires_nt_if_no_source():
+    example = _example(torch.device("cpu"))
+    with pytest.raises(ValueError):
+        example.run(source_amplitude=None)
+
+
+# --- test_core_plan.py ---
 
 
 def test_compile_plan_normalizes_legacy_options() -> None:

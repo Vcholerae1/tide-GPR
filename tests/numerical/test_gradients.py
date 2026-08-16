@@ -1,22 +1,23 @@
-"""Tests for gradient computation correctness and sampling interval."""
+from __future__ import annotations
 
 import pytest
+import tide
+import torch
 from numerical_utils import (
     MaxwellExample,
+    convergence_orders,
+    cosine_similarity,
     deterministic_direction,
     directional_derivative_errors,
     make_tm2d_example,
+    relative_l2,
     taylor_remainders,
+    make_maxwell3d_example,
 )
-import torch
 
-import tide
+# --- test_gradients.py ---
 
-
-def _cosine_similarity(a: torch.Tensor, b: torch.Tensor) -> float:
-    numerator = a.flatten() @ b.flatten()
-    denominator = torch.norm(a) * torch.norm(b) + 1e-30
-    return float(numerator / denominator)
+"""Tests for gradient computation correctness and sampling interval."""
 
 
 class TestGradientAccuracy2D:
@@ -68,18 +69,6 @@ class TestGradientAccuracy2D:
             abs(finite_difference) + 1e-10
         )
         assert relative_error < 0.5, f"Gradient FD mismatch too large: {relative_error}"
-
-    def test_sigma_gradient_is_nonzero_2d(
-        self,
-        setup_2d: MaxwellExample,
-    ):
-        """Sigma gradient should be non-zero for loss function."""
-        sigma = torch.full_like(setup_2d.epsilon, 1e-3, requires_grad=True)
-        receiver = setup_2d.run(sigma=sigma)[-1]
-        receiver.pow(2).sum().backward()
-        assert sigma.grad is not None
-        assert sigma.grad.abs().sum() > 0, "Sigma gradient should be non-zero"
-        assert torch.isfinite(sigma.grad).all(), "Sigma gradient should be finite"
 
 
 class TestGradientSamplingInterval:
@@ -160,151 +149,6 @@ class TestGradientSamplingInterval:
             f"Unexpected gradient correlation: {correlation}"
         )
 
-    def test_gradient_sampling_interval_values(self):
-        """Test various sampling interval values."""
-        device = torch.device("cpu")
-        dtype = torch.float32
-
-        ny, nx = 10, 12
-        nt = 10
-
-        epsilon = torch.ones(ny, nx, device=device, dtype=dtype) * 4.0
-        sigma = torch.zeros_like(epsilon)
-        mu = torch.ones_like(epsilon)
-
-        source_locations = torch.tensor(
-            [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
-        )
-        receiver_locations = torch.tensor(
-            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
-        )
-
-        wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
-        source_amplitude = wavelet.view(1, 1, nt)
-
-        # Test that different sampling intervals work without error
-        for interval in [1, 2, 5]:
-            eps = epsilon.clone().detach().requires_grad_(True)
-            out = tide.maxwell._kernel_api.maxwelltm(
-                eps,
-                sigma,
-                mu,
-                grid_spacing=0.02,
-                dt=4e-11,
-                source_amplitude=source_amplitude,
-                source_location=source_locations,
-                receiver_location=receiver_locations,
-                pml_width=2,
-                stencil=2,
-                model_gradient_sampling_interval=interval,
-            )[-1]
-
-            loss = out.pow(2).sum()
-            loss.backward()
-
-            assert eps.grad is not None
-            grad = eps.grad
-
-            assert torch.isfinite(grad).all(), (
-                f"Gradient should be finite for interval={interval}"
-            )
-
-
-class TestGradientBoundaryConditions:
-    """Tests for gradient computation with boundary conditions."""
-
-    def test_gradient_with_pml(self):
-        """Test gradient computation with PML boundaries."""
-        device = torch.device("cpu")
-        dtype = torch.float32
-
-        ny, nx = 12, 16
-        nt = 12
-
-        epsilon = torch.ones(ny, nx, device=device, dtype=dtype) * 4.0
-        sigma = torch.zeros_like(epsilon)
-        mu = torch.ones_like(epsilon)
-
-        source_locations = torch.tensor(
-            [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
-        )
-        receiver_locations = torch.tensor(
-            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
-        )
-
-        wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
-        source_amplitude = wavelet.view(1, 1, nt)
-
-        # Test with PML
-        eps = epsilon.clone().detach().requires_grad_(True)
-        out = tide.maxwell._kernel_api.maxwelltm(
-            eps,
-            sigma,
-            mu,
-            grid_spacing=0.02,
-            dt=4e-11,
-            source_amplitude=source_amplitude,
-            source_location=source_locations,
-            receiver_location=receiver_locations,
-            pml_width=4,
-            stencil=2,
-        )[-1]
-
-        loss = out.pow(2).sum()
-        loss.backward()
-
-        assert eps.grad is not None
-        grad = eps.grad
-
-        assert torch.isfinite(grad).all(), "Gradient should be finite with PML"
-        assert grad.abs().sum() > 0, "Gradient should be non-zero with PML"
-
-    def test_gradient_without_pml(self):
-        """Test gradient computation without PML boundaries."""
-        device = torch.device("cpu")
-        dtype = torch.float32
-
-        ny, nx = 12, 16
-        nt = 10
-
-        epsilon = torch.ones(ny, nx, device=device, dtype=dtype) * 4.0
-        sigma = torch.zeros_like(epsilon)
-        mu = torch.ones_like(epsilon)
-
-        source_locations = torch.tensor(
-            [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
-        )
-        receiver_locations = torch.tensor(
-            [[[ny // 2, nx // 2]]], dtype=torch.long, device=device
-        )
-
-        wavelet = tide.ricker(100e6, nt, 4e-11, dtype=dtype, device=device)
-        source_amplitude = wavelet.view(1, 1, nt)
-
-        # Test without PML
-        eps = epsilon.clone().detach().requires_grad_(True)
-        out = tide.maxwell._kernel_api.maxwelltm(
-            eps,
-            sigma,
-            mu,
-            grid_spacing=0.02,
-            dt=4e-11,
-            source_amplitude=source_amplitude,
-            source_location=source_locations,
-            receiver_location=receiver_locations,
-            pml_width=0,
-            stencil=2,
-        )[-1]
-
-        loss = out.pow(2).sum()
-        loss.backward()
-
-        # Gradient might have reflections at boundaries, but should still be finite
-        assert eps.grad is not None
-        grad = eps.grad
-
-        assert torch.isfinite(grad).all(), "Gradient should be finite without PML"
-
 
 class TestGradientMultiSource:
     """Tests for gradient computation with multiple sources."""
@@ -366,72 +210,6 @@ class TestGradientMultiSource:
 
 class TestGradientBackendConsistency:
     """Regression tests for eager vs native backend gradient consistency."""
-
-    def test_eager_vs_native_gradients_cpu_no_pml_match_reference(self):
-        try:
-            from tide import backend_utils
-        except Exception:  # pragma: no cover
-            pytest.skip("backend_utils unavailable")
-
-        if not backend_utils.is_backend_available():
-            pytest.skip("native backend unavailable")
-
-        device = torch.device("cpu")
-        dtype = torch.float64
-        ny, nx = 8, 9
-        nt = 12
-
-        epsilon = torch.full((ny, nx), 4.0, device=device, dtype=dtype)
-        epsilon[ny // 2 - 1 : ny // 2 + 1, nx // 2 - 1 : nx // 2 + 1] = 4.3
-        sigma = torch.full((ny, nx), 5e-4, device=device, dtype=dtype)
-        mu = torch.ones_like(epsilon)
-
-        source_locations = torch.tensor(
-            [[[ny // 2, nx // 3]]], dtype=torch.long, device=device
-        )
-        receiver_locations = torch.tensor(
-            [[[ny // 2, nx // 2], [ny // 2, nx // 2 + 1]]],
-            dtype=torch.long,
-            device=device,
-        )
-        source_amplitude = tide.ricker(
-            90e6,
-            nt,
-            4e-11,
-            peak_time=1.0 / 90e6,
-            dtype=dtype,
-            device=device,
-        ).view(1, 1, nt)
-
-        def compute_grads(backend: bool | str) -> tuple[torch.Tensor, torch.Tensor]:
-            eps = epsilon.clone().detach().requires_grad_(True)
-            sig = sigma.clone().detach().requires_grad_(True)
-            rec = tide.maxwell._kernel_api.maxwelltm(
-                eps,
-                sig,
-                mu,
-                grid_spacing=0.02,
-                dt=4e-11,
-                source_amplitude=source_amplitude,
-                source_location=source_locations,
-                receiver_location=receiver_locations,
-                pml_width=0,
-                stencil=2,
-                python_backend=backend,
-            )[-1]
-            loss = 0.5 * rec.square().sum() + 0.01 * rec.sin().sum()
-            loss.backward()
-            assert eps.grad is not None
-            assert sig.grad is not None
-            return eps.grad.detach().clone(), sig.grad.detach().clone()
-
-        g_eps_ref, g_sig_ref = compute_grads("eager")
-        g_eps_native, g_sig_native = compute_grads(False)
-
-        cos_eps = _cosine_similarity(g_eps_native, g_eps_ref)
-        cos_sig = _cosine_similarity(g_sig_native, g_sig_ref)
-        assert cos_eps > 0.999, f"epsilon gradient cosine too low: {cos_eps:.6f}"
-        assert cos_sig > 0.999, f"sigma gradient cosine too low: {cos_sig:.6f}"
 
     def test_eager_vs_native_source_and_model_gradients_cpu_no_pml_match_reference(
         self,
@@ -504,9 +282,9 @@ class TestGradientBackendConsistency:
         g_eps_ref, g_sig_ref, g_src_ref = compute_grads("eager")
         g_eps_native, g_sig_native, g_src_native = compute_grads(False)
 
-        cos_eps = _cosine_similarity(g_eps_native, g_eps_ref)
-        cos_sig = _cosine_similarity(g_sig_native, g_sig_ref)
-        cos_src = _cosine_similarity(g_src_native, g_src_ref)
+        cos_eps = cosine_similarity(g_eps_native, g_eps_ref)
+        cos_sig = cosine_similarity(g_sig_native, g_sig_ref)
+        cos_src = cosine_similarity(g_src_native, g_src_ref)
         assert cos_eps > 0.999, f"epsilon gradient cosine too low: {cos_eps:.6f}"
         assert cos_sig > 0.999, f"sigma gradient cosine too low: {cos_sig:.6f}"
         assert cos_src > 0.999, f"source gradient cosine too low: {cos_src:.6f}"
@@ -654,87 +432,6 @@ class TestGradientBackendConsistency:
             atol=1e-3,
         )
 
-    def test_eager_vs_native_gradients_cpu(self):
-        try:
-            from tide import backend_utils
-        except Exception:  # pragma: no cover
-            pytest.skip("backend_utils unavailable")
-
-        if not backend_utils.is_backend_available():
-            pytest.skip("native backend unavailable")
-
-        device = torch.device("cpu")
-        dtype = torch.float32
-        ny, nx = 16, 20
-        nt = 24
-
-        y = torch.linspace(0.0, 1.0, ny, device=device, dtype=dtype)
-        x = torch.linspace(0.0, 1.0, nx, device=device, dtype=dtype)
-        yy, xx = torch.meshgrid(y, x, indexing="ij")
-
-        epsilon = (
-            4.0 + 0.8 * torch.exp(-((xx - 0.45) ** 2 + (yy - 0.55) ** 2) / 0.05)
-        ).detach()
-        sigma = (
-            6e-4 + 1.0e-3 * torch.exp(-((xx - 0.65) ** 2 + (yy - 0.40) ** 2) / 0.08)
-        ).detach()
-        mu = torch.ones_like(epsilon)
-
-        source_locations = torch.tensor(
-            [[[ny // 2, nx // 4]]], dtype=torch.long, device=device
-        )
-        receiver_locations = torch.tensor(
-            [[[ny // 2, nx // 2], [ny // 2, nx // 2 + 2]]],
-            dtype=torch.long,
-            device=device,
-        )
-        wavelet = tide.ricker(140e6, nt, 4e-11, dtype=dtype, device=device)
-        source_amplitude = wavelet.view(1, 1, nt)
-
-        def compute_grads(backend: bool | str) -> tuple[torch.Tensor, torch.Tensor]:
-            eps = epsilon.clone().detach().requires_grad_(True)
-            sig = sigma.clone().detach().requires_grad_(True)
-            rec = tide.maxwell._kernel_api.maxwelltm(
-                eps,
-                sig,
-                mu,
-                grid_spacing=0.02,
-                dt=4e-11,
-                source_amplitude=source_amplitude,
-                source_location=source_locations,
-                receiver_location=receiver_locations,
-                pml_width=4,
-                stencil=2,
-                python_backend=backend,
-            )[-1]
-            loss = 0.5 * rec.square().mean()
-            loss.backward()
-            assert eps.grad is not None
-            assert sig.grad is not None
-            return eps.grad.detach().clone(), sig.grad.detach().clone()
-
-        g_eps_ref, g_sig_ref = compute_grads("eager")
-        g_eps_test, g_sig_test = compute_grads(False)
-
-        mask = torch.ones_like(g_eps_ref, dtype=torch.bool)
-        mask[:, 0] = False
-        mask[:, -1] = False
-
-        def cosine(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-            return (a.flatten() @ b.flatten()) / (torch.norm(a) * torch.norm(b) + 1e-12)
-
-        cos_eps = cosine(g_eps_ref[mask], g_eps_test[mask])
-        cos_sig = cosine(g_sig_ref[mask], g_sig_test[mask])
-        assert float(cos_eps) > 0.99, f"epsilon cosine too low: {float(cos_eps):.6f}"
-        assert float(cos_sig) > 0.99, f"sigma cosine too low: {float(cos_sig):.6f}"
-
-        rel_eps = (g_eps_test - g_eps_ref).abs() / (g_eps_ref.abs() + 1e-8)
-        rel_sig = (g_sig_test - g_sig_ref).abs() / (g_sig_ref.abs() + 1e-8)
-        p95_eps = torch.quantile(rel_eps[mask], 0.95)
-        p95_sig = torch.quantile(rel_sig[mask], 0.95)
-        assert float(p95_eps) < 0.35, f"epsilon p95 rel too high: {float(p95_eps):.4f}"
-        assert float(p95_sig) < 0.35, f"sigma p95 rel too high: {float(p95_sig):.4f}"
-
 
 def test_eager_vs_native_gradients_cuda_include_pml_foldback():
     try:
@@ -857,7 +554,7 @@ def test_tm2d_native_directional_derivative(parameter: str, stencil: int) -> Non
         base.shape, seed=7100 + stencil, device=device, dtype=dtype
     )
     scale = 1.0e-2 if parameter == "epsilon" else 1.0e-5
-    steps = (scale, scale / 2.0, scale / 4.0)
+    steps = tuple(scale / 2**i for i in range(5))
     errors = directional_derivative_errors(
         objective,
         base.detach(),
@@ -874,6 +571,408 @@ def test_tm2d_native_directional_derivative(parameter: str, stencil: int) -> Non
         base_value=loss,
     )
     assert min(errors) < 5.0e-3, errors
-    assert first_order[1] < 0.35 * first_order[0], (zero_order, first_order)
-    assert first_order[2] < 0.35 * first_order[1], (zero_order, first_order)
+    zero_orders = convergence_orders(zero_order)
+    first_orders = convergence_orders(first_order)
+    assert all(0.9 <= order <= 1.1 for order in zero_orders[:2]), zero_orders
+    assert all(order >= 1.7 for order in first_orders[:2]), first_orders
     assert first_order[-1] < zero_order[-1], (zero_order, first_order)
+
+
+@pytest.mark.slow
+@pytest.mark.numerical
+@pytest.mark.parametrize("parameter", ["epsilon", "sigma"])
+def test_tm2d_sampled_model_gradient_matches_central_difference(
+    parameter: str,
+) -> None:
+    example = make_tm2d_example(
+        shape=(6, 7),
+        nt=18,
+        grid_spacing=0.02,
+        dt=4.0e-11,
+        frequency=100e6,
+        peak_time=4.0e-10,
+        dtype=torch.float64,
+        sigma=5.0e-4,
+        source_location=(3, 2),
+        receiver_locations=((3, 3), (3, 4)),
+        pml_width=2,
+        stencil=2,
+        python_backend=True,
+    )
+    residual = torch.linspace(-0.5, 1.0, 18, dtype=torch.float64).view(18, 1, 1)
+
+    def objective(value: torch.Tensor) -> torch.Tensor:
+        receiver = example.run(
+            epsilon=value if parameter == "epsilon" else example.epsilon,
+            sigma=value if parameter == "sigma" else example.sigma,
+        )[-1]
+        return (receiver * residual).sum()
+
+    base = (
+        (example.epsilon if parameter == "epsilon" else example.sigma)
+        .clone()
+        .requires_grad_(True)
+    )
+    (gradient,) = torch.autograd.grad(objective(base), base)
+    coordinates = ((0, 0), (0, 3), (1, 1), (3, 3), (4, 5), (5, 6))
+    step = 1.0e-4 if parameter == "epsilon" else 1.0e-7
+    finite_difference = []
+    for coordinate in coordinates:
+        perturbation = torch.zeros_like(base)
+        perturbation[coordinate] = step
+        finite_difference.append(
+            float(
+                (
+                    objective(base.detach() + perturbation)
+                    - objective(base.detach() - perturbation)
+                )
+                / (2.0 * step)
+            )
+        )
+    actual = torch.stack([gradient[coordinate] for coordinate in coordinates])
+    expected = torch.tensor(finite_difference, dtype=torch.float64)
+    assert relative_l2(actual, expected) <= 2.0e-4
+    assert cosine_similarity(actual, expected) >= 0.99999
+
+
+# --- test_maxwell3d_gradients.py ---
+
+
+def _maxwell3d_directional_metrics(
+    parameter: str, stencil: int, *, python_backend: bool
+) -> tuple[list[float], list[float], list[float]]:
+    dtype = torch.float64
+    example = make_maxwell3d_example(
+        shape=(9, 10, 11),
+        nt=45,
+        grid_spacing=[0.016, 0.018, 0.022],
+        dt=2.0e-11,
+        frequency=500e6,
+        peak_time=6.0e-10,
+        dtype=dtype,
+        sigma=2.0e-4,
+        source_location=(4, 5, 4),
+        receiver_locations=((4, 5, 7), (5, 7, 7)),
+        pml_width=4,
+        stencil=stencil,
+        python_backend=python_backend,
+    )
+    residual = torch.linspace(-0.6, 1.0, 45, dtype=dtype).view(45, 1, 1)
+
+    def objective(value: torch.Tensor) -> torch.Tensor:
+        receiver = example.run(
+            epsilon=value if parameter == "epsilon" else example.epsilon,
+            sigma=value if parameter == "sigma" else example.sigma,
+            storage_compression=False,
+        )[-1]
+        return (receiver * residual).sum()
+
+    base = (
+        (example.epsilon if parameter == "epsilon" else example.sigma)
+        .clone()
+        .requires_grad_(True)
+    )
+    loss = objective(base)
+    (gradient,) = torch.autograd.grad(loss, base)
+    direction = deterministic_direction(
+        base.shape,
+        seed=9100 + stencil,
+        device=torch.device("cpu"),
+        dtype=dtype,
+    )
+    scale = 1.0e-2 if parameter == "epsilon" else 1.0e-5
+    steps = tuple(scale / 2**i for i in range(5))
+    errors = directional_derivative_errors(
+        objective,
+        base.detach(),
+        direction,
+        gradient,
+        steps,
+    )
+    zero_order, first_order = taylor_remainders(
+        objective,
+        base.detach(),
+        direction,
+        gradient,
+        steps,
+        base_value=loss,
+    )
+    return errors, zero_order, first_order
+
+
+@pytest.mark.numerical
+@pytest.mark.parametrize("stencil", [2, 4, 6, 8])
+@pytest.mark.parametrize("parameter", ["epsilon", "sigma"])
+def test_maxwell3d_native_directional_derivative(parameter: str, stencil: int) -> None:
+    errors, zero_order, first_order = _maxwell3d_directional_metrics(
+        parameter, stencil, python_backend=False
+    )
+    assert min(errors) < 1.0e-3, errors
+    assert first_order[-1] < zero_order[-1], (zero_order, first_order)
+
+
+@pytest.mark.numerical
+@pytest.mark.parametrize("stencil", [2, 4, 6, 8])
+@pytest.mark.parametrize("parameter", ["epsilon", "sigma"])
+def test_maxwell3d_reference_gradient_has_second_order_taylor_remainder(
+    parameter: str, stencil: int
+) -> None:
+    errors, zero_order, first_order = _maxwell3d_directional_metrics(
+        parameter, stencil, python_backend=True
+    )
+    assert min(errors) < 1.0e-5, errors
+    zero_orders = convergence_orders(zero_order)
+    first_orders = convergence_orders(first_order)
+    assert all(0.9 <= order <= 1.1 for order in zero_orders[:2]), zero_orders
+    assert all(order >= 1.8 for order in first_orders[:2]), first_orders
+    assert first_order[-1] < zero_order[-1], (zero_order, first_order)
+
+
+# --- test_tm2d_native_coeff_gradient.py ---
+
+
+pytestmark = [pytest.mark.cuda, pytest.mark.numerical]
+
+
+def _tm2d_examples(
+    device: torch.device,
+) -> tuple[MaxwellExample, MaxwellExample]:
+    example = make_tm2d_example(
+        shape=(24, 30),
+        nt=64,
+        grid_spacing=0.02,
+        dt=4e-11,
+        frequency=180e6,
+        device=device,
+        sigma=1e-4,
+        source_location=(6, 10),
+        receiver_locations=((6, 15), (6, 20)),
+        pml_width=4,
+        stencil=2,
+    )
+    y = torch.arange(24, device=device, dtype=example.epsilon.dtype)[:, None]
+    x = torch.arange(30, device=device, dtype=example.epsilon.dtype)[None, :]
+    blob = torch.exp(-(((y - 14) / 4) ** 2 + ((x - 18) / 5) ** 2) * 0.5)
+    truth = example.updated(
+        epsilon=example.epsilon + 0.35 * blob,
+        sigma=example.sigma + 2e-4 * blob,
+    )
+    return example, truth
+
+
+def _gradient(
+    example: MaxwellExample,
+    truth: MaxwellExample,
+    *,
+    python_backend: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    with torch.no_grad():
+        observed = truth.run(
+            python_backend=python_backend,
+            storage_mode="none",
+        )[-1]
+
+    epsilon = example.epsilon.clone().requires_grad_(True)
+    sigma = example.sigma.clone().requires_grad_(True)
+    predicted = example.run(
+        epsilon=epsilon,
+        sigma=sigma,
+        model_gradient_sampling_interval=1,
+        save_snapshots=True,
+        python_backend=python_backend,
+        storage_mode="device",
+    )[-1]
+    (0.5 * (predicted - observed).square().sum()).backward()
+    assert epsilon.grad is not None
+    assert sigma.grad is not None
+    return epsilon.grad.detach(), sigma.grad.detach()
+
+
+def _cosine(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    av = a.reshape(-1).double()
+    bv = b.reshape(-1).double()
+    return (av @ bv) / (av.norm() * bv.norm())
+
+
+def _relative_error(lhs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
+    floor = torch.tensor(1e-30, device=lhs.device, dtype=lhs.dtype)
+    denom = torch.maximum(torch.maximum(lhs.abs(), rhs.abs()), floor)
+    return (lhs - rhs).abs() / denom
+
+
+def test_tm2d_cuda_coeff_backward_default_matches_python_direction():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the TM2D native coeff-gradient test.")
+
+    example, truth = _tm2d_examples(torch.device("cuda"))
+    reference_eps, reference_sig = _gradient(
+        example,
+        truth,
+        python_backend=True,
+    )
+    native_eps, native_sig = _gradient(
+        example,
+        truth,
+        python_backend=False,
+    )
+
+    assert _cosine(reference_eps, native_eps) > 0.98
+    assert _cosine(reference_sig, native_sig) > 0.98
+
+
+def test_tm2d_cuda_coeff_backward_default_dot_product_is_close_without_pml():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the TM2D native coeff-gradient test.")
+
+    torch.manual_seed(123)
+    device = torch.device("cuda")
+    dtype = torch.float64
+    ny, nx, nt = 24, 30, 64
+    dx = 0.02
+    dt = 4e-11
+    y = torch.arange(ny, device=device, dtype=dtype)[:, None]
+    x = torch.arange(nx, device=device, dtype=dtype)[None, :]
+    blob = torch.exp(-(((y - 14) / 4) ** 2 + ((x - 18) / 5) ** 2) * 0.5)
+    epsilon = torch.ones(ny, nx, device=device, dtype=dtype) * 4.0 + 0.1 * blob
+    sigma = torch.ones_like(epsilon) * 1e-4
+    mu = torch.ones_like(epsilon)
+    source_location = torch.tensor([[[ny // 4, nx // 3]]], device=device)
+    receiver_location = torch.tensor(
+        [[[ny // 4, nx // 2], [ny // 4, 2 * nx // 3]]], device=device
+    )
+    source_amplitude = tide.ricker(
+        180e6,
+        nt,
+        dt,
+        peak_time=1.0 / 180e6,
+        dtype=dtype,
+        device=device,
+    ).view(1, 1, nt)
+    depsilon = 0.05 * torch.randn_like(epsilon)
+    dsigma = 1e-4 * torch.randn_like(sigma)
+    data_weight = torch.randn(nt, 1, 2, device=device, dtype=dtype)
+
+    born_data = tide.maxwell._kernel_api.borntm(
+        epsilon,
+        sigma,
+        mu,
+        dx,
+        dt,
+        source_amplitude,
+        source_location,
+        receiver_location,
+        depsilon=depsilon,
+        dsigma=dsigma,
+        pml_width=0,
+        stencil=2,
+        linearize_source=True,
+        python_backend=False,
+        storage_mode="device",
+    )[-1]
+    lhs = torch.sum(born_data * data_weight)
+
+    eps_req = epsilon.detach().clone().requires_grad_(True)
+    sig_req = sigma.detach().clone().requires_grad_(True)
+    predicted = tide.maxwell._kernel_api.maxwelltm(
+        eps_req,
+        sig_req,
+        mu,
+        dx,
+        dt,
+        source_amplitude,
+        source_location,
+        receiver_location,
+        pml_width=0,
+        stencil=2,
+        model_gradient_sampling_interval=1,
+        save_snapshots=True,
+        python_backend=False,
+        storage_mode="device",
+    )[-1]
+    grad_eps, grad_sig = torch.autograd.grad(
+        torch.sum(predicted * data_weight),
+        (eps_req, sig_req),
+    )
+    rhs = torch.sum(depsilon * grad_eps + dsigma * grad_sig)
+
+    assert _relative_error(lhs, rhs) < 1e-2
+
+
+def test_tm2d_cuda_coeff_backward_is_exact_at_high_side_pml():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the TM2D native coeff-gradient test.")
+
+    torch.manual_seed(41)
+    device = torch.device("cuda")
+    dtype = torch.float64
+    ny, nx, nt = 18, 20, 180
+    dx = 0.02
+    dt = 2e-11
+    epsilon = torch.full((ny, nx), 4.0, device=device, dtype=dtype)
+    sigma = torch.zeros_like(epsilon)
+    mu = torch.ones_like(epsilon)
+    source_location = torch.tensor([[[ny - 2, nx - 2]]], device=device)
+    receiver_location = torch.tensor(
+        [[[ny - 2, nx - 1], [ny - 1, nx - 2], [ny - 3, nx - 3]]],
+        device=device,
+    )
+    source_amplitude = tide.ricker(
+        1.2e9,
+        nt,
+        dt,
+        peak_time=7e-10,
+        dtype=dtype,
+        device=device,
+    ).view(1, 1, nt)
+    depsilon = 0.08 * torch.randn_like(epsilon)
+    dsigma = 5e-5 * torch.randn_like(sigma)
+    data_weight = torch.randn(nt, 1, 3, device=device, dtype=dtype)
+    common = {
+        "grid_spacing": dx,
+        "dt": dt,
+        "source_amplitude": source_amplitude,
+        "source_location": source_location,
+        "receiver_location": receiver_location,
+        "pml_width": [0, 6, 0, 6],
+        "stencil": 2,
+        "model_gradient_sampling_interval": 1,
+        "save_snapshots": True,
+    }
+
+    def reference_forward(
+        epsilon_arg: torch.Tensor, sigma_arg: torch.Tensor
+    ) -> torch.Tensor:
+        return tide.maxwell._kernel_api.maxwelltm(
+            epsilon_arg,
+            sigma_arg,
+            mu,
+            python_backend=True,
+            storage_mode="none",
+            **common,
+        )[-1]
+
+    _, jv = torch.autograd.functional.jvp(
+        reference_forward,
+        (epsilon, sigma),
+        (depsilon, dsigma),
+        strict=True,
+    )
+    lhs = torch.sum(jv * data_weight)
+
+    epsilon_req = epsilon.clone().requires_grad_(True)
+    sigma_req = sigma.clone().requires_grad_(True)
+    predicted = tide.maxwell._kernel_api.maxwelltm(
+        epsilon_req,
+        sigma_req,
+        mu,
+        python_backend=False,
+        storage_mode="device",
+        **common,
+    )[-1]
+    grad_epsilon, grad_sigma = torch.autograd.grad(
+        torch.sum(predicted * data_weight),
+        (epsilon_req, sigma_req),
+    )
+    rhs = torch.sum(depsilon * grad_epsilon + dsigma * grad_sigma)
+
+    assert _relative_error(lhs, rhs) < 1e-12

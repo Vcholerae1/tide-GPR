@@ -37,7 +37,9 @@ class MaxwellTM:
     ) -> None:
         spatial_ndim = experiment.acquisition.spatial_ndim
         if spatial_ndim not in {None, 2}:
-            raise ValueError("MaxwellTM requires two-dimensional acquisition coordinates.")
+            raise ValueError(
+                "MaxwellTM requires two-dimensional acquisition coordinates."
+            )
         self.discretization = discretization
         self.experiment = experiment
         self.execution = execution
@@ -52,7 +54,9 @@ class MaxwellTM:
         observers: Observers = Observers(),
     ) -> ForwardResult[TMState]:
         if model.epsilon.ndim not in {2, 3}:
-            raise ValueError("MaxwellTM model tensors must be 2-D or batched 3-D tensors.")
+            raise ValueError(
+                "MaxwellTM model tensors must be 2-D or batched 3-D tensors."
+            )
         from .tm2d import maxwelltm
 
         initial = state or (None,) * 7
@@ -139,7 +143,9 @@ class Maxwell3D:
     ) -> None:
         spatial_ndim = experiment.acquisition.spatial_ndim
         if spatial_ndim not in {None, 3}:
-            raise ValueError("Maxwell3D requires three-dimensional acquisition coordinates.")
+            raise ValueError(
+                "Maxwell3D requires three-dimensional acquisition coordinates."
+            )
         self.discretization = discretization
         self.experiment = experiment
         self.execution = execution
@@ -154,7 +160,9 @@ class Maxwell3D:
         observers: Observers = Observers(),
     ) -> ForwardResult[EM3DState]:
         if model.epsilon.ndim not in {3, 4}:
-            raise ValueError("Maxwell3D model tensors must be 3-D or batched 4-D tensors.")
+            raise ValueError(
+                "Maxwell3D model tensors must be 3-D or batched 4-D tensors."
+            )
         from .maxwell3d import maxwell3d
 
         initial: tuple[object, ...] = (None,) * 18

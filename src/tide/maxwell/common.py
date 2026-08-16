@@ -64,11 +64,6 @@ def _make_compute_stream(
     return compute_stream_handle, keepalive
 
 
-def _copy_if_present(dst: torch.Tensor, src: torch.Tensor) -> None:
-    if dst.numel() > 0:
-        dst.copy_(src)
-
-
 def _clone_param(param: torch.Tensor) -> torch.Tensor:
     return param.detach().clone().requires_grad_(True)
 
@@ -231,8 +226,7 @@ def _directional_receiver_hvp_from_born(
     """Apply an HVP through the background and direction VJPs of one Born run."""
     if hessian_mode not in {"full", "gauss_newton"}:
         raise ValueError(
-            "hessian_mode must be 'full' or 'gauss_newton', "
-            f"but got {hessian_mode!r}."
+            f"hessian_mode must be 'full' or 'gauss_newton', but got {hessian_mode!r}."
         )
 
     data_variable = predicted_data.detach().requires_grad_(True)
@@ -708,7 +702,6 @@ def _wrap_structured_callback(
 
 
 __all__ = [
-    "_copy_if_present",
     "_debye_polarization_term",
     "_get_ctx_handle",
     "_init_polarization_state",

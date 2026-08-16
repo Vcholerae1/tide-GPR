@@ -14,7 +14,7 @@ from . import (
     wavelets,
     workflow,
 )
-from .callbacks import Callback, CallbackState, create_callback_state
+from .callbacks import Callback, CallbackState
 from .cfl import cfl_condition
 from .core import BackendPreference, FallbackPolicy, StorageMode, StorageOptions
 from .dispersion import DebyeDispersion
@@ -66,7 +66,7 @@ from .validation import (
     validate_model_gradient_sampling_interval,
     validate_time_pad_frac,
 )
-from .wavelets import ricker
+from .wavelets import gaussian, gaussian_derivative, morlet, ricker, sine_burst
 
 __all__ = [
     "Acquisition",
@@ -116,16 +116,19 @@ __all__ = [
     "cfl",
     "cfl_condition",
     "core",
-    "create_callback_state",
     "create_or_pad",
     "downsample",
     "downsample_and_movedim",
+    "gaussian",
+    "gaussian_derivative",
     "maxwell",
+    "morlet",
     "optim",
     "padding",
     "resampling",
     "reverse_pad",
     "ricker",
+    "sine_burst",
     "staggered",
     "upsample",
     "utils",

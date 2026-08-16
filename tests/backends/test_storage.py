@@ -1,20 +1,24 @@
+from __future__ import annotations
+
 import ctypes
-import tempfile
-from contextlib import nullcontext
-
+import os
 import pytest
-import torch
-
+import tempfile
 import tide
+import torch
+from contextlib import nullcontext
+from numerical_utils import cosine_similarity, make_tm2d_example, relative_l2
 from tide import backend_utils
 from tide.maxwell.tm2d_helpers import _make_tm_storage_streams
 from tide.storage import (
     STORAGE_CPU,
     STORAGE_DEVICE,
+    STORAGE_DISK,
     SnapshotAllocator,
     resolve_snapshot_storage,
 )
-from numerical_utils import cosine_similarity, relative_l2
+
+# --- test_maxwell_storage.py ---
 
 
 def test_snapshot_storage_resolver_normalizes_shape_sampling_and_cpu_alias():
@@ -51,6 +55,29 @@ def test_snapshot_allocator_allocates_enabled_groups_and_shared_empty_tensors():
 
     assert all(tensor.shape == (3, 2, 4, 5) for tensor in enabled)
     assert all(tensor.numel() == 0 for tensor in disabled)
+
+
+def test_snapshot_allocator_disk_uses_temporary_directory():
+    with tempfile.TemporaryDirectory() as storage_path:
+        spec = resolve_snapshot_storage(
+            storage_mode="disk",
+            storage_compression=False,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+            nt=2,
+            step_ratio=1,
+            shot_shape=(2, 3, 4),
+            cpu_alias_modes=(),
+        )
+        allocator = SnapshotAllocator(spec, torch.device("cpu"), storage_path)
+        allocation = allocator.allocate(True)
+        directory = allocator.storage_objects[0]
+
+        assert spec.mode == STORAGE_DISK
+        assert allocation.filenames_ptr
+        assert os.path.isdir(directory.name)
+        directory.cleanup()
+        assert not os.path.exists(directory.name)
 
 
 def _run_grad(
@@ -270,59 +297,39 @@ def test_storage_mode_none_routes_gradients_per_fallback_policy():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for this test.")
 
-    device = torch.device("cuda")
-    dtype = torch.float32
-
-    epsilon = torch.full((16, 16), 5.0, device=device, dtype=dtype, requires_grad=True)
-    sigma = torch.full_like(epsilon, 1e-3, requires_grad=True)
-    mu = torch.ones_like(epsilon)
-
-    dt = 1e-11
-    nt = 16
-    freq0 = 9e8
-    wavelet = tide.ricker(
-        freq0, nt, dt, peak_time=1.0 / freq0, dtype=dtype, device=device
+    example = make_tm2d_example(
+        shape=(16, 16),
+        nt=16,
+        grid_spacing=0.005,
+        dt=1e-11,
+        frequency=9e8,
+        device="cuda",
+        source_location=(8, 8),
+        receiver_locations=((8, 9),),
+        pml_width=4,
+        stencil=2,
     )
+    epsilon = example.epsilon.clone().requires_grad_(True)
+    sigma = example.sigma.clone().requires_grad_(True)
 
-    source_amplitude = wavelet.view(1, 1, nt)
-    source_location = torch.tensor([[[8, 8]]], device=device, dtype=torch.int64)
-    receiver_location = torch.tensor([[[8, 9]]], device=device, dtype=torch.int64)
-
-    # Model gradients with storage_mode="none" are rejected by the capability
-    # matrix under fallback="error" (native cannot snapshot wavefields).
     with pytest.raises(NotImplementedError, match="storage_mode='none'"):
-        tide.maxwell._kernel_api.maxwelltm(
-            epsilon,
-            sigma,
-            mu,
-            grid_spacing=0.005,
-            dt=dt,
-            source_amplitude=source_amplitude,
-            source_location=source_location,
-            receiver_location=receiver_location,
-            stencil=2,
-            pml_width=4,
+        example.run(
+            epsilon=epsilon,
+            sigma=sigma,
             storage_mode="none",
             fallback="error",
         )
 
-    # Under the default reference policy the same plan runs on the Python
-    # reference backend instead of raising in the adapter.
-    out = tide.maxwell._kernel_api.maxwelltm(
-        epsilon,
-        sigma,
-        mu,
-        grid_spacing=0.005,
-        dt=dt,
-        source_amplitude=source_amplitude,
-        source_location=source_location,
-        receiver_location=receiver_location,
-        stencil=2,
-        pml_width=4,
+    receiver = example.run(
+        epsilon=epsilon,
+        sigma=sigma,
         storage_mode="none",
         fallback="reference",
-    )
-    assert torch.isfinite(out[-1]).all()
+    )[-1]
+    gradients = torch.autograd.grad(receiver.square().sum(), (epsilon, sigma))
+    for gradient in gradients:
+        assert torch.isfinite(gradient).all()
+        assert torch.count_nonzero(gradient) > 0
 
 
 def _run_tm_forward(stream: torch.cuda.Stream | None = None) -> torch.Tensor:
@@ -405,3 +412,191 @@ def test_tm_plain_forward_matches_on_custom_current_stream():
     rec_stream = _run_tm_forward(stream=torch.cuda.Stream())
 
     torch.testing.assert_close(rec_stream, rec_base, rtol=1e-5, atol=1e-6)
+
+
+# --- test_maxwell3d_storage_modes.py ---
+
+
+def _run_3d_grad(
+    storage_mode: str,
+    storage_path: str,
+    *,
+    stream: torch.cuda.Stream | None = None,
+    storage_compression: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    device = torch.device("cuda")
+    dtype = torch.float32
+    nz, ny, nx = 6, 7, 8
+    nt = 10
+
+    epsilon = torch.full(
+        (nz, ny, nx), 4.0, device=device, dtype=dtype, requires_grad=True
+    )
+    sigma = torch.full_like(epsilon, 2e-4, requires_grad=True)
+    mu = torch.ones_like(epsilon)
+
+    source_location = torch.tensor([[[2, 3, 2]]], dtype=torch.long, device=device)
+    receiver_location = torch.tensor([[[2, 3, 5]]], dtype=torch.long, device=device)
+    source_amplitude = tide.ricker(
+        80e6, nt, 4e-11, peak_time=1.0 / 80e6, dtype=dtype, device=device
+    ).view(1, 1, nt)
+
+    context = torch.cuda.stream(stream) if stream is not None else nullcontext()
+    with context:
+        receivers = tide.maxwell._kernel_api.maxwell3d(
+            epsilon,
+            sigma,
+            mu,
+            grid_spacing=[0.03, 0.02, 0.02],
+            dt=4e-11,
+            source_amplitude=source_amplitude,
+            source_location=source_location,
+            receiver_location=receiver_location,
+            pml_width=2,
+            python_backend=False,
+            storage_mode=storage_mode,
+            storage_path=storage_path,
+            storage_compression=storage_compression,
+        )[-1]
+        receivers.square().sum().backward()
+    torch.cuda.synchronize()
+
+    assert epsilon.grad is not None
+    assert sigma.grad is not None
+    return (
+        epsilon.grad.detach().cpu(),
+        sigma.grad.detach().cpu(),
+        receivers.detach().cpu(),
+    )
+
+
+def test_maxwell3d_storage_backend_argtypes_include_stream_handles():
+    forward_argtypes = backend_utils._template_argtypes(
+        "maxwell_3d_forward_with_storage", "float"
+    )
+    backward_argtypes = backend_utils._template_argtypes("maxwell_3d_backward", "float")
+
+    assert forward_argtypes[-2:] == [ctypes.c_void_p, ctypes.c_void_p]
+    assert backward_argtypes[-2:] == [ctypes.c_void_p, ctypes.c_void_p]
+
+
+def test_maxwell3d_forward_backend_argtypes_include_compute_stream_handle():
+    forward_argtypes = backend_utils._template_argtypes("maxwell_3d_forward", "float")
+
+    assert forward_argtypes[-1] == ctypes.c_void_p
+
+
+def test_maxwell3d_snapshot_storage_modes_match():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for Maxwell3D snapshot storage tests.")
+
+    with tempfile.TemporaryDirectory() as storage_path:
+        eps_dev, sig_dev, rec_dev = _run_3d_grad("device", storage_path)
+        eps_cpu, sig_cpu, rec_cpu = _run_3d_grad("cpu", storage_path)
+        eps_disk, sig_disk, rec_disk = _run_3d_grad("disk", storage_path)
+
+    torch.testing.assert_close(rec_cpu, rec_dev, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(rec_disk, rec_dev, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(eps_cpu, eps_dev, rtol=2e-4, atol=1e-5)
+    torch.testing.assert_close(eps_disk, eps_dev, rtol=2e-4, atol=1e-5)
+    torch.testing.assert_close(sig_cpu, sig_dev, rtol=2e-4, atol=1e-5)
+    torch.testing.assert_close(sig_disk, sig_dev, rtol=2e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize("storage_mode", ["cpu", "disk"])
+def test_maxwell3d_host_backed_storage_matches_on_custom_current_stream(
+    storage_mode: str,
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for stream-aware Maxwell3D storage tests.")
+
+    with tempfile.TemporaryDirectory() as storage_path:
+        eps_base, sig_base, rec_base = _run_3d_grad(storage_mode, storage_path)
+        custom_stream = torch.cuda.Stream()
+        eps_stream, sig_stream, rec_stream = _run_3d_grad(
+            storage_mode, storage_path, stream=custom_stream
+        )
+
+    torch.testing.assert_close(rec_stream, rec_base, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(eps_stream, eps_base, rtol=2e-4, atol=1e-5)
+    torch.testing.assert_close(sig_stream, sig_base, rtol=2e-4, atol=1e-5)
+
+
+def _run_3d_forward(
+    stream: torch.cuda.Stream | None = None,
+    *,
+    callback_frequency: int = 1,
+    callback_steps: list[int] | None = None,
+) -> torch.Tensor:
+    device = torch.device("cuda")
+    dtype = torch.float32
+    nz, ny, nx = 6, 7, 8
+    nt = 10
+
+    epsilon = torch.full((nz, ny, nx), 4.0, device=device, dtype=dtype)
+    sigma = torch.full_like(epsilon, 2e-4)
+    mu = torch.ones_like(epsilon)
+    source_location = torch.tensor([[[2, 3, 2]]], dtype=torch.long, device=device)
+    receiver_location = torch.tensor([[[2, 3, 5]]], dtype=torch.long, device=device)
+    source_amplitude = tide.ricker(
+        80e6, nt, 4e-11, peak_time=1.0 / 80e6, dtype=dtype, device=device
+    ).view(1, 1, nt)
+
+    kwargs = {}
+    if callback_steps is not None:
+
+        def _forward_callback(state):
+            callback_steps.append(state.step)
+            assert state.get_wavefield("Ey", view="inner").shape == (1, nz, ny, nx)
+
+        kwargs["forward_callback"] = _forward_callback
+        kwargs["callback_frequency"] = callback_frequency
+
+    context = torch.cuda.stream(stream) if stream is not None else nullcontext()
+    with context:
+        receivers = tide.maxwell._kernel_api.maxwell3d(
+            epsilon,
+            sigma,
+            mu,
+            grid_spacing=[0.03, 0.02, 0.02],
+            dt=4e-11,
+            source_amplitude=source_amplitude,
+            source_location=source_location,
+            receiver_location=receiver_location,
+            pml_width=2,
+            python_backend=False,
+            storage_mode="none",
+            **kwargs,
+        )[-1]
+    torch.cuda.synchronize()
+    return receivers.detach().cpu()
+
+
+def test_maxwell3d_plain_forward_matches_on_custom_current_stream():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for stream-aware Maxwell3D tests.")
+
+    rec_base = _run_3d_forward()
+    rec_stream = _run_3d_forward(stream=torch.cuda.Stream())
+
+    torch.testing.assert_close(rec_stream, rec_base, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.cuda
+@pytest.mark.numerical
+def test_maxwell3d_bf16_storage_preserves_forward_and_gradient_direction():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for Maxwell3D BF16 storage tests.")
+
+    with tempfile.TemporaryDirectory() as storage_path:
+        eps_full, sig_full, rec_full = _run_3d_grad(
+            "device", storage_path, storage_compression=False
+        )
+        eps_bf16, sig_bf16, rec_bf16 = _run_3d_grad(
+            "device", storage_path, storage_compression=True
+        )
+
+    torch.testing.assert_close(rec_bf16, rec_full, rtol=0.0, atol=0.0)
+    for compressed, full in ((eps_bf16, eps_full), (sig_bf16, sig_full)):
+        assert relative_l2(compressed, full) < 1.0e-2
+        assert cosine_similarity(compressed, full) > 0.999

@@ -29,24 +29,20 @@ jobs:
       - name: Ruff
         run: uv run ruff check src tests benchmarks/maxwell_runtime.py
 
-      - name: Architecture and CPU smoke tests
+      - name: Unit and contract tests
         run: >-
-          uv run pytest -q
-          tests/test_architecture.py
-          tests/test_public_api.py
-          tests/test_core_plan.py
-          tests/test_validation.py
-          tests/test_wavelets.py
-          tests/test_staggered.py
-          tests/test_utils.py
-          tests/test_optim_methods.py
-          tests/test_workflow_distributed.py
-          tests/test_native_cpu_parity.py
-          tests/test_maxwell3d_backend_parity.py
-
+          uv run coverage run --parallel-mode -m pytest -q
+          -m "not numerical and not cuda and not slow and not openmp and not benchmark"
 
       - name: Fast numerical correctness
-        run: uv run pytest -q -m "numerical and not cuda and not slow"
+        run: >-
+          uv run coverage run --parallel-mode -m pytest -q
+          -m "numerical and not cuda and not slow"
+
+      - name: Python coverage
+        run: >-
+          uv run coverage combine &&
+          uv run coverage report
 
       - name: Benchmark CLI smoke
         run: >-

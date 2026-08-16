@@ -16,4 +16,3 @@ class DebyeDispersion:
 
     delta_epsilon: torch.Tensor | float
     tau: torch.Tensor | float
-

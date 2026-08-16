@@ -1,22 +1,26 @@
-"""Static dependency boundaries for the maintainable package layers."""
+from __future__ import annotations
 
 import ast
 from pathlib import Path
+
+# --- test_architecture.py ---
+
+"""Static dependency boundaries for the maintainable package layers."""
 
 
 ROOT = Path(__file__).parents[1] / "src" / "tide"
 
 
 def _internal_imports(path: Path) -> set[str]:
-    relative_module = ".".join(
-        ("tide", *path.relative_to(ROOT).with_suffix("").parts)
-    )
+    relative_module = ".".join(("tide", *path.relative_to(ROOT).with_suffix("").parts))
     package = relative_module.split(".")[:-1]
     tree = ast.parse(path.read_text())
     result: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            result.update(alias.name for alias in node.names if alias.name.startswith("tide."))
+            result.update(
+                alias.name for alias in node.names if alias.name.startswith("tide.")
+            )
         elif isinstance(node, ast.ImportFrom):
             if node.module and node.module.startswith("tide."):
                 result.add(node.module)

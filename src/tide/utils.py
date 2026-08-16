@@ -369,85 +369,21 @@ def setup_pml_half(
     grid_spacing: float = 1.0,
     eps_scale: float = EP0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Creates a, b, and k profiles for C-PML at half grid points.
-
-    This is used for staggered grid implementations where some field components
-    are located at half grid points (e.g., H fields in Yee grid).
-
-    Args:
-        Same as setup_pml.
-
-    Returns:
-        A tuple containing the (a_half, b_half, k_half) profiles as Tensors.
-
-    """
-    # CPML parameters for electromagnetic waves
-    k_max_cpml = 5.0
-    alpha_max_cpml = 0.008
-
-    a = torch.zeros(n, device=device, dtype=dtype)
-    b = torch.zeros(n, device=device, dtype=dtype)
-    k = torch.ones(n, device=device, dtype=dtype)
-
-    if max_pml == 0 or (pml_width[0] == 0 and pml_width[1] == 0):
-        return a, b, k
-
-    # Standard CPML sigma_max: sig0 = (Npower+1) / (150 * pi * dx)
-    sigma0 = (n_power + 1) / (150.0 * math.pi * grid_spacing)
-
-    # Half grid positions (shifted by dx/2 or dy/2)
-    x = torch.arange(start, start + n, device=device, dtype=dtype) + 0.5
-
-    # Left/bottom PML region (half grid)
-    if pml_width[0] > 0:
-        origin_left = pml_start[0]  # Inner edge of PML (in grid cells)
-        abscissa_left = origin_left - x  # Distance in grid cells
-        mask_left = abscissa_left >= 0
-
-        # Normalized distance (both in grid cells)
-        abscissa_norm_left = torch.clamp(abscissa_left / pml_width[0], 0, 1)
-
-        sigma_left = sigma0 * (abscissa_norm_left**n_power)
-        k_left = 1.0 + (k_max_cpml - 1.0) * (abscissa_norm_left**n_power)
-        alpha_left = alpha_max_cpml * (1.0 - abscissa_norm_left) + 0.1 * alpha_max_cpml
-
-        k = torch.where(mask_left, k_left, k)
-
-        # b = exp(-(sigma/k + alpha) * dt / eps_scale)
-        b_left = torch.exp(-(sigma_left / k_left + alpha_left) * dt / eps_scale)
-        b = torch.where(mask_left, b_left, b)
-
-        # a = sigma * (b - 1) / (k * (sigma + k * alpha))
-        denom_left = k_left * (sigma_left + k_left * alpha_left) + eps
-        a_left = sigma_left * (b_left - 1.0) / denom_left
-        a_left = torch.where(sigma_left > 1e-6, a_left, torch.zeros_like(a_left))
-        a = torch.where(mask_left, a_left, a)
-
-    # Right/top PML region (half grid)
-    if pml_width[1] > 0:
-        origin_right = pml_start[1]  # Inner edge of PML (in grid cells)
-        abscissa_right = x - origin_right  # Distance in grid cells
-        mask_right = abscissa_right >= 0
-
-        # Normalized distance (both in grid cells)
-        abscissa_norm_right = torch.clamp(abscissa_right / pml_width[1], 0, 1)
-
-        sigma_right = sigma0 * (abscissa_norm_right**n_power)
-        k_right = 1.0 + (k_max_cpml - 1.0) * (abscissa_norm_right**n_power)
-        alpha_right = (
-            alpha_max_cpml * (1.0 - abscissa_norm_right) + 0.1 * alpha_max_cpml
-        )
-
-        k = torch.where(mask_right, k_right, k)
-
-        # b = exp(-(sigma/k + alpha) * dt / eps_scale)
-        b_right = torch.exp(-(sigma_right / k_right + alpha_right) * dt / eps_scale)
-        b = torch.where(mask_right, b_right, b)
-
-        # a = sigma * (b - 1) / (k * (sigma + k * alpha))
-        denom_right = k_right * (sigma_right + k_right * alpha_right) + eps
-        a_right = sigma_right * (b_right - 1.0) / denom_right
-        a_right = torch.where(sigma_right > 1e-6, a_right, torch.zeros_like(a_right))
-        a = torch.where(mask_right, a_right, a)
-
-    return a, b, k
+    """Create C-PML profiles at half-grid positions."""
+    return setup_pml(
+        pml_width,
+        pml_start,
+        max_pml,
+        dt,
+        n,
+        max_vel,
+        dtype,
+        device,
+        pml_freq,
+        start=start + 0.5,
+        r_val=r_val,
+        n_power=n_power,
+        eps=eps,
+        grid_spacing=grid_spacing,
+        eps_scale=eps_scale,
+    )

@@ -6,7 +6,12 @@ description: "Generate source wavelets with explicit sampling and timing control
 Wavelet generators used for source design in FDTD propagation.
 
 ## Functions
-- ricker
+
+- `ricker`
+- `gaussian`
+- `gaussian_derivative`
+- `morlet`
+- `sine_burst`
 
 ## ricker
 
@@ -46,6 +51,23 @@ $$
 that the finite trace contains negligible endpoint energy. Choose `length` and
 timing from the full source spectrum required by the experiment.
 
+## Other pulse shapes
+
+All generators use the same `freq`, `length`, `dt`, `peak_time`, `dtype`, and
+`device` arguments as `ricker`. When omitted, `peak_time` defaults to `1/freq`.
+
+```python
+gaussian(freq, length, dt, peak_time=None, dtype=None, device=None)
+gaussian_derivative(freq, length, dt, peak_time=None, dtype=None, device=None)
+morlet(freq, length, dt, peak_time=None, cycles=3.0, dtype=None, device=None)
+sine_burst(freq, length, dt, peak_time=None, cycles=3.0, dtype=None, device=None)
+```
+
+`gaussian` returns a unit Gaussian pulse. `gaussian_derivative` returns its
+first derivative normalized to unit magnitude. `morlet` returns a real,
+Gaussian-windowed cosine. `sine_burst` returns a cosine limited to `cycles`
+periods by a Hann envelope.
+
 ## Expanding to shots
 
 ```python
@@ -68,5 +90,5 @@ The generator returns one dimension. Maxwell experiments require
 
 ## Validation
 
-Frequency and length must be positive. `dt` must be non-zero. Match dtype and
-device to the material tensors to avoid an implicit copy during setup.
+Frequency, sample interval, length, and cycle count must be positive. Match
+dtype and device to the material tensors to avoid an implicit copy during setup.

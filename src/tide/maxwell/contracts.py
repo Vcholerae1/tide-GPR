@@ -43,7 +43,9 @@ class Discretization:
     max_velocity: float | None = None
 
     def __post_init__(self) -> None:
-        spacing = (self.spacing,) if isinstance(self.spacing, (int, float)) else self.spacing
+        spacing = (
+            (self.spacing,) if isinstance(self.spacing, (int, float)) else self.spacing
+        )
         if not spacing or any(value <= 0 for value in spacing):
             raise ValueError("Grid spacing must be positive.")
         if self.dt <= 0:
@@ -67,6 +69,7 @@ class Acquisition:
             if tensor is not None:
                 return int(tensor.shape[0])
         return 1
+
     @property
     def n_receivers(self) -> int:
         if self.receiver_location is None:
@@ -120,11 +123,20 @@ class EMModel:
     dispersion: DebyeDispersion | None = None
 
     def __post_init__(self) -> None:
-        if self.sigma.shape != self.epsilon.shape or self.mu.shape != self.epsilon.shape:
+        if (
+            self.sigma.shape != self.epsilon.shape
+            or self.mu.shape != self.epsilon.shape
+        ):
             raise ValueError("epsilon, sigma, and mu must have the same shape.")
-        if self.sigma.device != self.epsilon.device or self.mu.device != self.epsilon.device:
+        if (
+            self.sigma.device != self.epsilon.device
+            or self.mu.device != self.epsilon.device
+        ):
             raise ValueError("epsilon, sigma, and mu must be on the same device.")
-        if self.sigma.dtype != self.epsilon.dtype or self.mu.dtype != self.epsilon.dtype:
+        if (
+            self.sigma.dtype != self.epsilon.dtype
+            or self.mu.dtype != self.epsilon.dtype
+        ):
             raise ValueError("epsilon, sigma, and mu must have the same dtype.")
 
 

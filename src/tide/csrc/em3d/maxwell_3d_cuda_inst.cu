@@ -26,7 +26,6 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cuda_bf16.h>
-#include <cooperative_groups.h>
 #define TIDE_STAGGERED_GRID_3D 1
 #include "staggered_grid.h"
 #undef TIDE_STAGGERED_GRID_3D
@@ -526,9 +525,6 @@ __global__ void forward_kernel_e(
 }
 
 
-#if TIDE_EM3D_PERSISTENT_FORWARD
-#include "maxwell_3d_persistent.cuh"
-#endif
 
 __global__ void forward_kernel_e_debye(
     TIDE_DTYPE const *__restrict const ca,
@@ -2961,44 +2957,6 @@ extern "C" void FUNC(forward)(
       n_shots_h, nz_h, ny_h, nx_h, n_sources_per_shot_h,
       n_receivers_per_shot_h, n_threads, false);
 
-#if TIDE_EM3D_PERSISTENT_FORWARD
-  if (!has_dispersion) {
-    PersistentForwardParams3D p{};
-    p.ca=ca; p.cb=cb; p.cq=cq; p.f=f;
-    p.ex=ex; p.ey=ey; p.ez=ez; p.hx=hx; p.hy=hy; p.hz=hz;
-    p.m_hy_z=m_hy_z; p.m_hz_y=m_hz_y; p.m_hz_x=m_hz_x;
-    p.m_hx_z=m_hx_z; p.m_hx_y=m_hx_y; p.m_hy_x=m_hy_x;
-    p.m_ey_z=m_ey_z; p.m_ez_y=m_ez_y; p.m_ez_x=m_ez_x;
-    p.m_ex_z=m_ex_z; p.m_ex_y=m_ex_y; p.m_ey_x=m_ey_x; p.r=r;
-    p.az=az; p.bz=bz; p.azh=azh; p.bzh=bzh;
-    p.ay=ay; p.by=by; p.ayh=ayh; p.byh=byh;
-    p.ax=ax; p.bx=bx; p.axh=axh; p.bxh=bxh;
-    p.kz=kz; p.kzh=kzh; p.ky=ky; p.kyh=kyh; p.kx=kx; p.kxh=kxh;
-    p.sources_i=sources_i; p.receivers_i=receivers_i;
-    p.start_t=start_t; p.nt=nt;
-    p.source_component=static_cast<int>(source_component);
-    p.receiver_component=static_cast<int>(receiver_component);
-    int blocks_per_sm=0, sm_count=0;
-    tide::cuda_check_or_abort(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &blocks_per_sm, persistent_forward_kernel_3d,
-        launch_cfg.threads_cells, 0), __FILE__, __LINE__);
-    tide::cuda_check_or_abort(cudaDeviceGetAttribute(
-        &sm_count, cudaDevAttrMultiProcessorCount, static_cast<int>(device)),
-        __FILE__, __LINE__);
-#if TIDE_EM3D_PERSISTENT_BLOCKS_PER_SM > 0
-    blocks_per_sm=blocks_per_sm<TIDE_EM3D_PERSISTENT_BLOCKS_PER_SM
-        ? blocks_per_sm : TIDE_EM3D_PERSISTENT_BLOCKS_PER_SM;
-#endif
-    void *args[] = {&p};
-    tide::cuda_check_or_abort(cudaLaunchCooperativeKernel(
-        reinterpret_cast<void *>(persistent_forward_kernel_3d),
-        dim3(static_cast<unsigned>(blocks_per_sm*sm_count)),
-        dim3(static_cast<unsigned>(launch_cfg.threads_cells)), args, 0,
-        stream_compute), __FILE__, __LINE__);
-    tide::cuda_check_or_abort(cudaPeekAtLastError(), __FILE__, __LINE__);
-    return;
-  }
-#endif
 
   for (int64_t t = start_t; t < start_t + nt; ++t) {
     forward_kernel_h<<<launch_cfg.cell_grid, launch_cfg.cell_block, 0,

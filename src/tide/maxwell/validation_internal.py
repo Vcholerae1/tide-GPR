@@ -26,15 +26,6 @@ def _validate_positive_int(name: str, value: Any) -> None:
         raise ValueError(f"{name} must be positive.")
 
 
-def _validate_optional_positive_int(name: str, value: Any) -> None:
-    if value is None:
-        return
-    if not isinstance(value, int):
-        raise TypeError(f"{name} must be an int or None.")
-    if value <= 0:
-        raise ValueError(f"{name} must be positive when provided.")
-
-
 def _validate_location_bounds(
     location: torch.Tensor | None,
     *,
@@ -86,7 +77,6 @@ __all__ = [
     "_validate_dispersion_time_step",
     "_validate_location_bounds",
     "_validate_optional_bool",
-    "_validate_optional_positive_int",
     "_validate_positive_int",
     "_validate_tensor_arg",
 ]

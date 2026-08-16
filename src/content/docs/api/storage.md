@@ -8,8 +8,6 @@ Snapshot storage helpers for backward propagation.
 ## Functions
 - storage_mode_to_int
 
-## Classes
-- TemporaryStorage
 
 ## Storage Modes
 
@@ -28,12 +26,6 @@ Maps mode strings to backend integer constants used by native kernels.
 
 - storage_compression supports none and bf16 on default compute path
 - bf16 storage is valid for float32 workflows
-
-## TemporaryStorage
-
-- Creates an isolated temporary directory under the specified base path
-- Generates one file path per logical shot buffer
-- Cleans up directory tree on close or object destruction
 
 ## See Also
 
@@ -61,19 +53,9 @@ Internally, `resolve_snapshot_storage` converts this policy into an immutable
 `SnapshotStorageSpec` containing normalized mode, representation, sample count,
 and shot shape. `SnapshotAllocator` then owns the concrete device, host, or disk
 buffers.
+Disk allocations use `tempfile.TemporaryDirectory`; the allocator retains its
+lifetime and cleanup responsibility.
 
-## TemporaryStorage lifecycle
-
-```python
-temporary = TemporaryStorage("/fast/local/path", num_files=4)
-try:
-    paths = temporary.get_filenames()
-finally:
-    temporary.close()
-```
-
-Use higher-level derivative sessions when possible. Their context manager owns
-temporary storage and closes it even when a derivative operation raises.
 
 ## Capacity planning
 

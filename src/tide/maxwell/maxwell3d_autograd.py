@@ -12,6 +12,7 @@ from ..storage import (
 )
 from .common import _make_storage_streams
 
+
 class Maxwell3DForwardFunc(torch.autograd.Function):
     """Autograd function for 3D C/CUDA backend propagation."""
 
@@ -28,6 +29,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         meta: dict[str, Any],
     ) -> tuple[torch.Tensor, ...]:
         from .. import backend_utils
+
         (
             az,
             bz,
@@ -178,14 +180,14 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 store_curl_z_filenames_ptr,
             ) = (allocation.filenames_ptr for allocation in empty_curl_storage)
         else:
-            store_curl_x, store_curl_x_host, store_curl_x_filenames_ptr = unpack_storage(
-                snapshot_allocator.allocate(cb_requires_grad)
+            store_curl_x, store_curl_x_host, store_curl_x_filenames_ptr = (
+                unpack_storage(snapshot_allocator.allocate(cb_requires_grad))
             )
-            store_curl_y, store_curl_y_host, store_curl_y_filenames_ptr = unpack_storage(
-                snapshot_allocator.allocate(cb_requires_grad)
+            store_curl_y, store_curl_y_host, store_curl_y_filenames_ptr = (
+                unpack_storage(snapshot_allocator.allocate(cb_requires_grad))
             )
-            store_curl_z, store_curl_z_host, store_curl_z_filenames_ptr = unpack_storage(
-                snapshot_allocator.allocate(cb_requires_grad)
+            store_curl_z, store_curl_z_host, store_curl_z_filenames_ptr = (
+                unpack_storage(snapshot_allocator.allocate(cb_requires_grad))
             )
         backward_storage_objects = snapshot_allocator.storage_objects
         backward_storage_filename_arrays = snapshot_allocator.filename_arrays
@@ -665,44 +667,32 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                 backend_utils.tensor_to_ptr(adjoint_memory_scratch),
                 backend_utils.tensor_to_ptr(store_ex),
                 backend_utils.tensor_to_ptr(store_ex_host),
-                ctypes.cast(
-                    ctx.backward_storage_filename_arrays[0], ctypes.c_void_p
-                )
+                ctypes.cast(ctx.backward_storage_filename_arrays[0], ctypes.c_void_p)
                 if storage_mode == STORAGE_DISK
                 else 0,
                 backend_utils.tensor_to_ptr(store_ey),
                 backend_utils.tensor_to_ptr(store_ey_host),
-                ctypes.cast(
-                    ctx.backward_storage_filename_arrays[1], ctypes.c_void_p
-                )
+                ctypes.cast(ctx.backward_storage_filename_arrays[1], ctypes.c_void_p)
                 if storage_mode == STORAGE_DISK
                 else 0,
                 backend_utils.tensor_to_ptr(store_ez),
                 backend_utils.tensor_to_ptr(store_ez_host),
-                ctypes.cast(
-                    ctx.backward_storage_filename_arrays[2], ctypes.c_void_p
-                )
+                ctypes.cast(ctx.backward_storage_filename_arrays[2], ctypes.c_void_p)
                 if storage_mode == STORAGE_DISK
                 else 0,
                 backend_utils.tensor_to_ptr(store_curl_x),
                 backend_utils.tensor_to_ptr(store_curl_x_host),
-                ctypes.cast(
-                    ctx.backward_storage_filename_arrays[3], ctypes.c_void_p
-                )
+                ctypes.cast(ctx.backward_storage_filename_arrays[3], ctypes.c_void_p)
                 if storage_mode == STORAGE_DISK
                 else 0,
                 backend_utils.tensor_to_ptr(store_curl_y),
                 backend_utils.tensor_to_ptr(store_curl_y_host),
-                ctypes.cast(
-                    ctx.backward_storage_filename_arrays[4], ctypes.c_void_p
-                )
+                ctypes.cast(ctx.backward_storage_filename_arrays[4], ctypes.c_void_p)
                 if storage_mode == STORAGE_DISK
                 else 0,
                 backend_utils.tensor_to_ptr(store_curl_z),
                 backend_utils.tensor_to_ptr(store_curl_z_host),
-                ctypes.cast(
-                    ctx.backward_storage_filename_arrays[5], ctypes.c_void_p
-                )
+                ctypes.cast(ctx.backward_storage_filename_arrays[5], ctypes.c_void_p)
                 if storage_mode == STORAGE_DISK
                 else 0,
                 backend_utils.tensor_to_ptr(grad_f),
@@ -825,11 +815,15 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             grad_f_flat = None
 
         grad_ca_out = (
-            grad_ca.unsqueeze(0) if ca_requires_grad and not ca_batched else grad_ca
-        ) if ca_requires_grad else None
+            (grad_ca.unsqueeze(0) if ca_requires_grad and not ca_batched else grad_ca)
+            if ca_requires_grad
+            else None
+        )
         grad_cb_out = (
-            grad_cb.unsqueeze(0) if cb_requires_grad and not cb_batched else grad_cb
-        ) if cb_requires_grad else None
+            (grad_cb.unsqueeze(0) if cb_requires_grad and not cb_batched else grad_cb)
+            if cb_requires_grad
+            else None
+        )
         return (
             grad_ca_out,
             grad_cb_out,
@@ -840,5 +834,6 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
             None,
             None,
         )
+
 
 __all__ = ["Maxwell3DForwardFunc"]

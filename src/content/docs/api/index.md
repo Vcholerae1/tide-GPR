@@ -39,7 +39,7 @@ final_state = result.final_state
 
 | Module | Use |
 | --- | --- |
-| `tide.wavelets` | Ricker source generation |
+| `tide.wavelets` | Ricker, Gaussian, Morlet, and finite-burst source generation |
 | `tide.cfl` | Stable internal time-step planning |
 | `tide.resampling` | Source upsampling and receiver downsampling |
 | `tide.callbacks` | Forward and backward state inspection |

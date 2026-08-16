@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -225,17 +226,24 @@ def make_maxwell3d_example(
 def relative_l2(actual: torch.Tensor, reference: torch.Tensor) -> float:
     actual64 = actual.detach().to(device="cpu", dtype=torch.float64)
     reference64 = reference.detach().to(device="cpu", dtype=torch.float64)
-    numerator = torch.linalg.vector_norm(actual64 - reference64)
-    denominator = torch.linalg.vector_norm(reference64).clamp_min(1.0e-30)
-    return float((numerator / denominator).item())
+    assert bool(torch.isfinite(actual64).all())
+    assert bool(torch.isfinite(reference64).all())
+    denominator = torch.linalg.vector_norm(reference64)
+    assert denominator > 0.0, "relative error requires a nonzero reference"
+    return float(
+        (torch.linalg.vector_norm(actual64 - reference64) / denominator).item()
+    )
 
 
 def cosine_similarity(actual: torch.Tensor, reference: torch.Tensor) -> float:
     actual64 = actual.detach().to(device="cpu", dtype=torch.float64).reshape(-1)
     reference64 = reference.detach().to(device="cpu", dtype=torch.float64).reshape(-1)
-    denominator = (
-        torch.linalg.vector_norm(actual64) * torch.linalg.vector_norm(reference64)
-    ).clamp_min(1.0e-30)
+    assert bool(torch.isfinite(actual64).all())
+    assert bool(torch.isfinite(reference64).all())
+    denominator = torch.linalg.vector_norm(actual64) * torch.linalg.vector_norm(
+        reference64
+    )
+    assert denominator > 0.0, "cosine similarity requires two nonzero vectors"
     return float(torch.dot(actual64, reference64).div(denominator).item())
 
 
@@ -264,7 +272,8 @@ def deterministic_direction(
     direction = direction.to(device=device, dtype=dtype)
     if mask is not None:
         direction = torch.where(mask, direction, torch.zeros_like(direction))
-    norm = torch.linalg.vector_norm(direction.to(torch.float64)).clamp_min(1.0e-30)
+    norm = torch.linalg.vector_norm(direction.to(torch.float64))
+    assert norm > 0.0, "direction mask removed every perturbation"
     return direction / norm.to(direction.dtype)
 
 
@@ -278,6 +287,7 @@ def directional_derivative_errors(
     adjoint = float(
         (gradient.detach().to(torch.float64) * direction.to(torch.float64)).sum()
     )
+    assert math.isfinite(adjoint) and adjoint != 0.0
     errors: list[float] = []
     for step in steps:
         with torch.no_grad():
@@ -288,7 +298,8 @@ def directional_derivative_errors(
                 )
                 / (2.0 * step)
             )
-        denominator = max(abs(adjoint), abs(finite_difference), 1.0e-30)
+        assert math.isfinite(finite_difference) and finite_difference != 0.0
+        denominator = max(abs(adjoint), abs(finite_difference))
         errors.append(abs(adjoint - finite_difference) / denominator)
     return errors
 
@@ -309,6 +320,8 @@ def taylor_remainders(
     directional_derivative = float(
         (gradient.detach().to(torch.float64) * direction.to(torch.float64)).sum()
     )
+    assert math.isfinite(base_scalar)
+    assert math.isfinite(directional_derivative) and directional_derivative != 0.0
     zero_order: list[float] = []
     first_order: list[float] = []
     for step in steps:
@@ -317,7 +330,15 @@ def taylor_remainders(
         difference = perturbed - base_scalar
         zero_order.append(abs(difference))
         first_order.append(abs(difference - step * directional_derivative))
+    assert all(math.isfinite(error) and error > 0.0 for error in zero_order)
+    assert all(math.isfinite(error) and error > 0.0 for error in first_order)
     return zero_order, first_order
+
+
+def convergence_orders(errors: Sequence[float]) -> list[float]:
+    assert len(errors) >= 3
+    assert all(math.isfinite(error) and error > 0.0 for error in errors)
+    return [math.log2(left / right) for left, right in zip(errors, errors[1:])]
 
 
 def require_native_backend() -> None:

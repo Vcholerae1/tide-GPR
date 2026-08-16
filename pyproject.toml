@@ -39,21 +39,16 @@ classifiers = [
 ]
 dependencies = [
     "beartype>=0.22.9",
-    "h5py>=3.16.0",
     "jaxtyping>=0.3.10",
-    "matplotlib>=3.10.9",
     "numpy>=2.3.5",
     "scipy>=1.16.3",
     "torch>=2.12",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=9.0.2",
-    "pytest-cov>=4.0",
-    "ruff>=0.15.2",
-]
 experiments = [
+    "h5py>=3.16.0",
+    "matplotlib>=3.10.9",
     "geomloss>=0.2.6",
     "pyyaml>=6.0",
 ]
@@ -103,6 +98,15 @@ markers = [
     "benchmark: measures performance rather than correctness",
 ]
 
+[tool.coverage.run]
+branch = true
+source = ["tide"]
+
+[tool.coverage.report]
+fail_under = 73
+show_missing = true
+skip_covered = true
+
 [tool.cibuildwheel]
 # Build for Python 3.12 only (python-independent wheel)
 build = "cp312-*"
@@ -135,7 +139,7 @@ test-command = 'pytest -q -m "not cuda and not slow and not benchmark" {project}
 
 [dependency-groups]
 dev = [
+    "coverage>=7.13",
     "pytest>=9.0.2",
-    "pytest-cov>=4.0",
     "ruff>=0.15.2",
 ]

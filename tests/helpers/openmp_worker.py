@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import time
-from pathlib import Path
-
-import torch
-
 import tide
+import time
+import torch
+from pathlib import Path
 
 
 def main() -> None:

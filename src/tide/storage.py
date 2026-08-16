@@ -6,14 +6,12 @@ propagator. Stage 1 supports snapshot storage on device/CPU/disk.
 
 from __future__ import annotations
 
-import contextlib
 import ctypes
-import os
-import shutil
 from dataclasses import dataclass, field
+from math import prod
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from tempfile import TemporaryDirectory
 
 import torch
 
@@ -112,10 +110,7 @@ class SnapshotStorageSpec:
 
     @property
     def shot_numel(self) -> int:
-        result = 1
-        for size in self.shot_shape:
-            result *= size
-        return result
+        return prod(self.shot_shape)
 
     @property
     def shot_bytes(self) -> int:
@@ -184,7 +179,7 @@ class SnapshotAllocator:
     storage_path: str = "."
     host_flatten_spatial: bool = False
     tensors: list[torch.Tensor] = field(default_factory=list)
-    storage_objects: list[TemporaryStorage] = field(default_factory=list)
+    storage_objects: list[TemporaryDirectory[str]] = field(default_factory=list)
     filename_arrays: list[Any] = field(default_factory=list)
     filename_buffers: list[Any] = field(default_factory=list)
 
@@ -208,9 +203,7 @@ class SnapshotAllocator:
         *,
         final_only: bool = False,
     ) -> tuple[torch.Tensor, ...]:
-        return tuple(
-            self.direct(enabled, final_only=final_only) for _ in range(count)
-        )
+        return tuple(self.direct(enabled, final_only=final_only) for _ in range(count))
 
     def allocate(self, enabled: bool) -> SnapshotAllocation:
         empty = self.empty()
@@ -244,14 +237,19 @@ class SnapshotAllocator:
             )
         elif self.spec.mode == STORAGE_DISK:
             is_cuda = self.device.type == "cuda"
-            storage = TemporaryStorage(
-                self.storage_path,
-                1 if is_cuda else self.spec.shot_shape[0],
+            Path(self.storage_path).mkdir(parents=True, exist_ok=True)
+            storage = TemporaryDirectory(
+                prefix="tide_tmp_",
+                dir=self.storage_path,
+                ignore_cleanup_errors=True,
             )
             self.storage_objects.append(storage)
+            filenames = [
+                str(Path(storage.name) / f"shot_{index}.bin")
+                for index in range(1 if is_cuda else self.spec.shot_shape[0])
+            ]
             buffers = [
-                ctypes.create_string_buffer(name.encode("utf-8"))
-                for name in storage.get_filenames()
+                ctypes.create_string_buffer(name.encode("utf-8")) for name in filenames
             ]
             self.filename_buffers.extend(buffers)
             filenames_array = (ctypes.c_char_p * len(buffers))()
@@ -297,28 +295,3 @@ class SnapshotAllocator:
         n_shots = self.spec.shot_shape[0]
         spatial_numel = self.spec.shot_numel // n_shots
         return (_CPU_STORAGE_BUFFERS, n_shots, spatial_numel)
-
-
-class TemporaryStorage:
-    """Manages temporary files for disk storage.
-
-    Creates a unique subdirectory for each instantiation to prevent collisions.
-    """
-
-    def __init__(self, base_path: str, num_files: int) -> None:
-        self.base_dir = Path(base_path) / f"tide_tmp_{os.getpid()}_{uuid4().hex}"
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.filenames: list[str] = [
-            str(self.base_dir / f"shot_{i}.bin") for i in range(num_files)
-        ]
-
-    def get_filenames(self) -> list[str]:
-        return self.filenames
-
-    def close(self) -> None:
-        if self.base_dir.exists():
-            with contextlib.suppress(OSError):
-                shutil.rmtree(self.base_dir)
-
-    def __del__(self) -> None:
-        self.close()

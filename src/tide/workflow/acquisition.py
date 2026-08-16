@@ -10,8 +10,6 @@ from ..maxwell.contracts import Acquisition
 ReceiverMode = Literal["shared", "paired"]
 
 
-
-
 def _as_long_tensor(
     name: str,
     value: torch.Tensor,
@@ -63,9 +61,13 @@ def point_acquisition(
 
     if receiver.ndim == 2:
         if int(receiver.shape[-1]) != spatial_ndim:
-            raise ValueError("source_points and receiver_points must have the same spatial dimension.")
+            raise ValueError(
+                "source_points and receiver_points must have the same spatial dimension."
+            )
         if receiver_mode == "shared":
-            receiver_location = receiver.unsqueeze(0).expand(n_shots, -1, -1).contiguous()
+            receiver_location = (
+                receiver.unsqueeze(0).expand(n_shots, -1, -1).contiguous()
+            )
         else:
             if int(receiver.shape[0]) != n_shots:
                 raise ValueError(
@@ -74,14 +76,21 @@ def point_acquisition(
             receiver_location = receiver.unsqueeze(1)
     elif receiver.ndim == 3:
         if int(receiver.shape[0]) != n_shots:
-            raise ValueError("receiver_points shaped [S, R, D] must match source shot count.")
+            raise ValueError(
+                "receiver_points shaped [S, R, D] must match source shot count."
+            )
         if int(receiver.shape[-1]) != spatial_ndim:
-            raise ValueError("source_points and receiver_points must have the same spatial dimension.")
+            raise ValueError(
+                "source_points and receiver_points must have the same spatial dimension."
+            )
         receiver_location = receiver
     else:
         raise ValueError("receiver_points must be shaped [R, D], [S, D], or [S, R, D].")
 
-    return Acquisition(source_location=source.contiguous(), receiver_location=receiver_location.contiguous())
+    return Acquisition(
+        source_location=source.contiguous(),
+        receiver_location=receiver_location.contiguous(),
+    )
 
 
 def line_acquisition_2d(

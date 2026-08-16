@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import pytest
 import torch
-
+from collections.abc import Callable
+from numerical_utils import (
+    make_maxwell3d_example,
+    make_tm2d_example,
+    relative_l2,
+    require_native_backend,
+)
 from tide import staggered
 
-from numerical_utils import make_tm2d_example, relative_l2, require_native_backend
+# --- test_discrete_adjoint.py ---
 
 
 @pytest.mark.numerical
@@ -92,3 +96,53 @@ def test_tm2d_born_and_model_vjp_are_adjoint(stencil: int, pml_width: int) -> No
     )
     rhs = torch.sum(depsilon * gradient_epsilon + dsigma * gradient_sigma)
     assert relative_l2(lhs.reshape(1), rhs.reshape(1)) < 5.0e-3
+
+
+@pytest.mark.numerical
+@pytest.mark.parametrize("pml_width", [0, 2])
+def test_maxwell3d_joint_born_and_model_vjp_are_adjoint(pml_width: int) -> None:
+    example = make_maxwell3d_example(
+        shape=(7, 8, 9),
+        nt=20,
+        grid_spacing=[0.016, 0.018, 0.022],
+        dt=2.0e-11,
+        frequency=350e6,
+        peak_time=3.0e-10,
+        dtype=torch.float64,
+        sigma=2.0e-4,
+        source_location=(3, 4, 3),
+        receiver_locations=((3, 4, 5), (3, 5, 6)),
+        pml_width=pml_width,
+        stencil=2,
+        python_backend=True,
+    )
+    generator = torch.Generator().manual_seed(6200 + pml_width)
+    depsilon = 0.02 * torch.randn(
+        example.epsilon.shape, generator=generator, dtype=torch.float64
+    )
+    dsigma = 2.0e-5 * torch.randn(
+        example.sigma.shape, generator=generator, dtype=torch.float64
+    )
+    data_weight = torch.randn((20, 1, 2), generator=generator, dtype=torch.float64)
+    born_data = example.run_born(
+        depsilon=depsilon,
+        dsigma=dsigma,
+        linearize_source=True,
+        storage_compression=False,
+    )[-1]
+    lhs = torch.sum(born_data * data_weight)
+
+    epsilon = example.epsilon.clone().requires_grad_(True)
+    sigma = example.sigma.clone().requires_grad_(True)
+    predicted = example.run(
+        epsilon=epsilon,
+        sigma=sigma,
+        storage_compression=False,
+    )[-1]
+    gradient_epsilon, gradient_sigma = torch.autograd.grad(
+        torch.sum(predicted * data_weight),
+        (epsilon, sigma),
+    )
+    rhs = torch.sum(depsilon * gradient_epsilon + dsigma * gradient_sigma)
+    tolerance = 1.0e-6 if pml_width == 0 else 1.0e-5
+    assert relative_l2(lhs.reshape(1), rhs.reshape(1)) <= tolerance

@@ -11,8 +11,6 @@ Callback state objects for inspecting forward and backward propagation.
 ## Types
 - Callback
 
-## Functions
-- create_callback_state
 
 ## Callback Type
 
@@ -40,14 +38,6 @@ View options:
 - full: full padded domain
 - pml: model plus PML region
 - inner: physical model interior
-
-## create_callback_state
-
-Factory helper for constructing CallbackState with consistent metadata.
-
-Typical use:
-- Users usually do not call this directly.
-- It is mainly useful for testing custom callback handlers.
 
 ## Practical Notes
 
