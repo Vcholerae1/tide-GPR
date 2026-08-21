@@ -5,8 +5,12 @@ import torch
 
 from ..callbacks import Callback, CallbackState
 from ..dispersion import DebyeDispersion
-from ..grid_utils import _normalize_grid_spacing_3d, _normalize_pml_width_3d
-from ..padding import create_or_pad, zero_interior
+from ..grid_utils import (
+    _CompactCPMLLayout,
+    _normalize_grid_spacing_3d,
+    _normalize_pml_width_3d,
+)
+from ..padding import create_or_pad
 from ..storage import _normalize_storage_compression
 from ..utils import C0, compile_material_coefficients
 from .common import (
@@ -196,6 +200,24 @@ def maxwell3d_python(
     padded_nz = model_nz + total_pad[0] + total_pad[1]
     padded_ny = model_ny + total_pad[2] + total_pad[3]
     padded_nx = model_nx + total_pad[4] + total_pad[5]
+    compact_layout = _CompactCPMLLayout(
+        n_shots,
+        (padded_nz, padded_ny, padded_nx),
+        (
+            (
+                fd_pad_list[0] + pml_width_list[0],
+                padded_nz - fd_pad_list[1] - pml_width_list[1],
+            ),
+            (
+                fd_pad_list[2] + pml_width_list[2],
+                padded_ny - fd_pad_list[3] - pml_width_list[3],
+            ),
+            (
+                fd_pad_list[4] + pml_width_list[4],
+                padded_nx - fd_pad_list[5] - pml_width_list[5],
+            ),
+        ),
+    )
 
     padded_size = (padded_nz, padded_ny, padded_nx)
     epsilon_padded = create_or_pad(
@@ -267,6 +289,14 @@ def maxwell3d_python(
     m_ex_z = init_wavefield(m_ex_z_0)
     m_ex_y = init_wavefield(m_ex_y_0)
     m_ey_x = init_wavefield(m_ey_x_0)
+    states_by_axis = (
+        (m_hy_z, m_hx_z, m_ey_z, m_ex_z),
+        (m_hz_y, m_hx_y, m_ez_y, m_ex_y),
+        (m_hz_x, m_hy_x, m_ez_x, m_ey_x),
+    )
+    for axis, states in enumerate(states_by_axis):
+        for state in states:
+            compact_layout.zero_interior_(state, axis)
     pol_ex = pol_ey = pol_ez = None
     if has_dispersion and debye is not None:
         pol_ex = _init_polarization_state(
@@ -278,23 +308,6 @@ def maxwell3d_python(
         )
         pol_ey = torch.zeros_like(pol_ex)
         pol_ez = torch.zeros_like(pol_ex)
-
-    pml_aux = [
-        (m_hz_y, 1),
-        (m_hy_z, 0),
-        (m_hx_z, 0),
-        (m_hz_x, 2),
-        (m_hy_x, 2),
-        (m_hx_y, 1),
-        (m_ey_z, 0),
-        (m_ez_y, 1),
-        (m_ez_x, 2),
-        (m_ex_z, 0),
-        (m_ex_y, 1),
-        (m_ey_x, 2),
-    ]
-    for wf, dim in pml_aux:
-        zero_interior(wf, fd_pad_list, pml_width_list, dim)
 
     from .. import staggered as _staggered
 

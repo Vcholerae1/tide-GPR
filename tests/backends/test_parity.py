@@ -149,6 +149,153 @@ def test_maxwell3d_native_cuda_matches_python_without_callback(n_threads):
     )
 
 
+@pytest.mark.cuda
+@pytest.mark.numerical
+def test_maxwell3d_cuda_internal_compact_state_restart_matches_full_run() -> None:
+    require_cuda_backend()
+    example = _example(torch.device("cuda"))
+    split = example.source_amplitude.shape[-1] // 2
+    output = example.run(python_backend=False)
+    first = example.run(
+        python_backend=False,
+        source_amplitude=example.source_amplitude[..., :split],
+    )
+    state_names = (
+        "Ex_0",
+        "Ey_0",
+        "Ez_0",
+        "Hx_0",
+        "Hy_0",
+        "Hz_0",
+        "m_hz_y",
+        "m_hy_z",
+        "m_hx_z",
+        "m_hz_x",
+        "m_hy_x",
+        "m_hx_y",
+        "m_ey_z",
+        "m_ez_y",
+        "m_ez_x",
+        "m_ex_z",
+        "m_ex_y",
+        "m_ey_x",
+    )
+    continued = example.run(
+        python_backend=False,
+        source_amplitude=example.source_amplitude[..., split:],
+        **dict(zip(state_names, first[:18], strict=True)),
+    )
+    continued_python = example.run(
+        python_backend=True,
+        source_amplitude=example.source_amplitude[..., split:],
+        **dict(zip(state_names, first[:18], strict=True)),
+    )
+    torch.cuda.synchronize()
+
+    assert all(state.shape == output[0].shape for state in output[6:18])
+    for actual, expected in zip(continued[:18], output[:18], strict=True):
+        torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
+    torch.testing.assert_close(
+        torch.cat((first[-1], continued[-1])),
+        output[-1],
+        atol=2e-5,
+        rtol=2e-5,
+    )
+    for actual, expected in zip(continued, continued_python, strict=True):
+        torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.cuda
+@pytest.mark.numerical
+def test_maxwell3d_compact_state_float64_batched_models_match_loop() -> None:
+    require_cuda_backend()
+    example = make_maxwell3d_example(
+        shape=(8, 9, 10),
+        nt=6,
+        grid_spacing=0.02,
+        dt=4e-11,
+        frequency=90e6,
+        dtype=torch.float64,
+        device="cuda",
+        pml_width=2,
+        stencil=8,
+    )
+    epsilon = torch.stack((example.epsilon, 1.1 * example.epsilon))
+    sigma = torch.stack((example.sigma, 1.2 * example.sigma))
+    mu = torch.stack((example.mu, example.mu))
+    source_amplitude = example.source_amplitude.unsqueeze(0).expand(2, -1, -1, -1)
+    source_location = example.source_location.unsqueeze(0).expand(2, -1, -1, -1)
+    receiver_location = example.receiver_location.unsqueeze(0).expand(2, -1, -1, -1)
+
+    batched = example.run(
+        epsilon=epsilon,
+        sigma=sigma,
+        mu=mu,
+        source_amplitude=source_amplitude,
+        source_location=source_location,
+        receiver_location=receiver_location,
+        python_backend=False,
+    )
+    singles = [
+        example.run(
+            epsilon=epsilon[batch],
+            sigma=sigma[batch],
+            mu=mu[batch],
+            python_backend=False,
+        )
+        for batch in range(2)
+    ]
+    torch.cuda.synchronize()
+
+    for index, actual in enumerate(batched[:-1]):
+        expected = torch.stack(tuple(single[index] for single in singles))
+        torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+    expected_receivers = torch.stack(tuple(single[-1] for single in singles), dim=1)
+    torch.testing.assert_close(batched[-1], expected_receivers, atol=1e-10, rtol=1e-10)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("requires_grad", [False, True])
+def test_maxwell3d_cuda_callback_exposes_full_cpml_grid(
+    requires_grad: bool,
+) -> None:
+    require_cuda_backend()
+    example = _example(torch.device("cuda"))
+    callback_shapes: list[dict[str, torch.Size]] = []
+
+    def callback(state) -> None:
+        callback_shapes.append(
+            {
+                name: state.get_wavefield(name, view="full").shape
+                for name in state.wavefield_names
+            }
+        )
+
+    example.run(
+        epsilon=example.epsilon.clone().requires_grad_(requires_grad),
+        python_backend=False,
+        forward_callback=callback,
+        callback_frequency=example.source_amplitude.shape[-1],
+    )
+    assert callback_shapes
+    field_shape = callback_shapes[0]["Ex"]
+    for name in (
+        "m_hz_y",
+        "m_hy_z",
+        "m_hx_z",
+        "m_hz_x",
+        "m_hy_x",
+        "m_hx_y",
+        "m_ey_z",
+        "m_ez_y",
+        "m_ez_x",
+        "m_ex_z",
+        "m_ex_y",
+        "m_ey_x",
+    ):
+        assert callback_shapes[0][name] == field_shape
+
+
 # --- test_maxwell3d_backend_gradients.py ---
 
 

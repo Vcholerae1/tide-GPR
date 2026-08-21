@@ -124,6 +124,7 @@ __constant__ int64_t pml_x1;
 __constant__ bool ca_batched;
 __constant__ bool cb_batched;
 __constant__ bool cq_batched;
+__constant__ bool compact_cpml_states;
 
 template <typename T>
 __device__ __forceinline__ void atomic_add_tide(T *addr, T val) {
@@ -303,6 +304,64 @@ __device__ __forceinline__ bool is_active_cell_3d(LinearCellIndex3D const &idx) 
          idx.x < idx.nx_i - FD_PAD + 1;
 }
 
+__device__ __forceinline__ int compact_axis_coordinate(
+    int const coordinate, int const low, int const high) {
+  int const high_start = tide_max(low, high - 1);
+  if (coordinate < low) {
+    return coordinate;
+  }
+  return coordinate >= high_start ? low + coordinate - high_start : 0;
+}
+
+template <int Axis>
+__device__ __forceinline__ int64_t compact_state_index_3d_axis(
+    int const shot, int const z, int const y, int const x, int const nz_i,
+    int const ny_i, int const nx_i) {
+  static_assert(Axis >= 0 && Axis < 3, "invalid compact state axis");
+  if (!compact_cpml_states) {
+    return ((int64_t)shot * nz_i + z) * ny_i * nx_i + (int64_t)y * nx_i + x;
+  }
+  if constexpr (Axis == 0) {
+    int const high_start = tide_max(static_cast<int>(pml_z0),
+                                    static_cast<int>(pml_z1) - 1);
+    int const extent = static_cast<int>(pml_z0) + nz_i - high_start;
+    int const compact_z = compact_axis_coordinate(
+        z, static_cast<int>(pml_z0), static_cast<int>(pml_z1));
+    return ((int64_t)shot * extent + compact_z) * ny_i * nx_i +
+           (int64_t)y * nx_i + x;
+  } else if constexpr (Axis == 1) {
+    int const high_start = tide_max(static_cast<int>(pml_y0),
+                                    static_cast<int>(pml_y1) - 1);
+    int const extent = static_cast<int>(pml_y0) + ny_i - high_start;
+    int const compact_y = compact_axis_coordinate(
+        y, static_cast<int>(pml_y0), static_cast<int>(pml_y1));
+    return ((int64_t)shot * nz_i + z) * extent * nx_i +
+           (int64_t)compact_y * nx_i + x;
+  } else {
+    int const high_start = tide_max(static_cast<int>(pml_x0),
+                                    static_cast<int>(pml_x1) - 1);
+    int const extent = static_cast<int>(pml_x0) + nx_i - high_start;
+    int const compact_x = compact_axis_coordinate(
+        x, static_cast<int>(pml_x0), static_cast<int>(pml_x1));
+    return ((int64_t)shot * nz_i + z) * ny_i * extent +
+           (int64_t)y * extent + compact_x;
+  }
+}
+
+__device__ __forceinline__ int64_t compact_state_index_3d(
+    int const shot, int const z, int const y, int const x, int const axis) {
+  int const nz_i = static_cast<int>(nz);
+  int const ny_i = static_cast<int>(ny);
+  int const nx_i = static_cast<int>(nx);
+  if (axis == 0) {
+    return compact_state_index_3d_axis<0>(shot, z, y, x, nz_i, ny_i, nx_i);
+  }
+  if (axis == 1) {
+    return compact_state_index_3d_axis<1>(shot, z, y, x, nz_i, ny_i, nx_i);
+  }
+  return compact_state_index_3d_axis<2>(shot, z, y, x, nz_i, ny_i, nx_i);
+}
+
 __global__ void forward_kernel_h(
     TIDE_DTYPE const *__restrict const cq,
     TIDE_DTYPE const *__restrict const ex,
@@ -347,16 +406,6 @@ __global__ void forward_kernel_h(
 
   TIDE_DTYPE const cq_val = cq_batched ? cq[i] : cq[j];
 
-  int const pml_z0h = static_cast<int>(pml_z0);
-  int const pml_z1h = tide_max(pml_z0h, static_cast<int>(pml_z1) - 1);
-  int const pml_y0h = static_cast<int>(pml_y0);
-  int const pml_y1h = tide_max(pml_y0h, static_cast<int>(pml_y1) - 1);
-  int const pml_x0h = static_cast<int>(pml_x0);
-  int const pml_x1h = tide_max(pml_x0h, static_cast<int>(pml_x1) - 1);
-
-  bool const pml_z_h = (z < pml_z0h) || (z >= pml_z1h);
-  bool const pml_y_h = (y < pml_y0h) || (y >= pml_y1h);
-  bool const pml_x_h = (x < pml_x0h) || (x >= pml_x1h);
 
   TIDE_DTYPE dEy_dz_pml = 0;
   TIDE_DTYPE dEz_dy_pml = 0;
@@ -367,55 +416,67 @@ __global__ void forward_kernel_h(
 
   if (z < idx.nz_i - FD_PAD) {
     TIDE_DTYPE dEy_dz = DIFFZH1(EY_L);
-    if (pml_z_h) {
-      m_ey_z[i] = bzh[z] * m_ey_z[i] + azh[z] * dEy_dz;
-      dEy_dz = dEy_dz / kzh[z] + m_ey_z[i];
+    TIDE_DTYPE dEx_dz = DIFFZH1(EX_L);
+    if ((z < static_cast<int>(pml_z0)) ||
+        (z >= tide_max(static_cast<int>(pml_z0),
+                       static_cast<int>(pml_z1) - 1))) {
+      int64_t const mz =
+          compact_state_index_3d(idx.shot_idx, z, y, x, 0);
+      TIDE_DTYPE const a = azh[z];
+      TIDE_DTYPE const b = bzh[z];
+      TIDE_DTYPE const inv_k = static_cast<TIDE_DTYPE>(1) / kzh[z];
+      TIDE_DTYPE const next_ey = b * m_ey_z[mz] + a * dEy_dz;
+      TIDE_DTYPE const next_ex = b * m_ex_z[mz] + a * dEx_dz;
+      m_ey_z[mz] = next_ey;
+      m_ex_z[mz] = next_ex;
+      dEy_dz = dEy_dz * inv_k + next_ey;
+      dEx_dz = dEx_dz * inv_k + next_ex;
     }
     dEy_dz_pml = dEy_dz;
-  }
-
-  if (y < idx.ny_i - FD_PAD) {
-    TIDE_DTYPE dEz_dy = DIFFYH1(EZ_L);
-    if (pml_y_h) {
-      m_ez_y[i] = byh[y] * m_ez_y[i] + ayh[y] * dEz_dy;
-      dEz_dy = dEz_dy / kyh[y] + m_ez_y[i];
-    }
-    dEz_dy_pml = dEz_dy;
-  }
-
-  if (x < idx.nx_i - FD_PAD) {
-    TIDE_DTYPE dEz_dx = DIFFXH1(EZ_L);
-    if (pml_x_h) {
-      m_ez_x[i] = bxh[x] * m_ez_x[i] + axh[x] * dEz_dx;
-      dEz_dx = dEz_dx / kxh[x] + m_ez_x[i];
-    }
-    dEz_dx_pml = dEz_dx;
-  }
-
-  if (z < idx.nz_i - FD_PAD) {
-    TIDE_DTYPE dEx_dz = DIFFZH1(EX_L);
-    if (pml_z_h) {
-      m_ex_z[i] = bzh[z] * m_ex_z[i] + azh[z] * dEx_dz;
-      dEx_dz = dEx_dz / kzh[z] + m_ex_z[i];
-    }
     dEx_dz_pml = dEx_dz;
   }
 
   if (y < idx.ny_i - FD_PAD) {
+    TIDE_DTYPE dEz_dy = DIFFYH1(EZ_L);
     TIDE_DTYPE dEx_dy = DIFFYH1(EX_L);
-    if (pml_y_h) {
-      m_ex_y[i] = byh[y] * m_ex_y[i] + ayh[y] * dEx_dy;
-      dEx_dy = dEx_dy / kyh[y] + m_ex_y[i];
+    if ((y < static_cast<int>(pml_y0)) ||
+        (y >= tide_max(static_cast<int>(pml_y0),
+                       static_cast<int>(pml_y1) - 1))) {
+      int64_t const my =
+          compact_state_index_3d(idx.shot_idx, z, y, x, 1);
+      TIDE_DTYPE const a = ayh[y];
+      TIDE_DTYPE const b = byh[y];
+      TIDE_DTYPE const inv_k = static_cast<TIDE_DTYPE>(1) / kyh[y];
+      TIDE_DTYPE const next_ez = b * m_ez_y[my] + a * dEz_dy;
+      TIDE_DTYPE const next_ex = b * m_ex_y[my] + a * dEx_dy;
+      m_ez_y[my] = next_ez;
+      m_ex_y[my] = next_ex;
+      dEz_dy = dEz_dy * inv_k + next_ez;
+      dEx_dy = dEx_dy * inv_k + next_ex;
     }
+    dEz_dy_pml = dEz_dy;
     dEx_dy_pml = dEx_dy;
   }
 
   if (x < idx.nx_i - FD_PAD) {
+    TIDE_DTYPE dEz_dx = DIFFXH1(EZ_L);
     TIDE_DTYPE dEy_dx = DIFFXH1(EY_L);
-    if (pml_x_h) {
-      m_ey_x[i] = bxh[x] * m_ey_x[i] + axh[x] * dEy_dx;
-      dEy_dx = dEy_dx / kxh[x] + m_ey_x[i];
+    if ((x < static_cast<int>(pml_x0)) ||
+        (x >= tide_max(static_cast<int>(pml_x0),
+                       static_cast<int>(pml_x1) - 1))) {
+      int64_t const mx =
+          compact_state_index_3d(idx.shot_idx, z, y, x, 2);
+      TIDE_DTYPE const a = axh[x];
+      TIDE_DTYPE const b = bxh[x];
+      TIDE_DTYPE const inv_k = static_cast<TIDE_DTYPE>(1) / kxh[x];
+      TIDE_DTYPE const next_ez = b * m_ez_x[mx] + a * dEz_dx;
+      TIDE_DTYPE const next_ey = b * m_ey_x[mx] + a * dEy_dx;
+      m_ez_x[mx] = next_ez;
+      m_ey_x[mx] = next_ey;
+      dEz_dx = dEz_dx * inv_k + next_ez;
+      dEy_dx = dEy_dx * inv_k + next_ey;
     }
+    dEz_dx_pml = dEz_dx;
     dEy_dx_pml = dEy_dx;
   }
 
@@ -474,15 +535,6 @@ __global__ void forward_kernel_e(
   TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
   TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];
 
-  int const pml_z0i = static_cast<int>(pml_z0);
-  int const pml_z1i = static_cast<int>(pml_z1);
-  int const pml_y0i = static_cast<int>(pml_y0);
-  int const pml_y1i = static_cast<int>(pml_y1);
-  int const pml_x0i = static_cast<int>(pml_x0);
-  int const pml_x1i = static_cast<int>(pml_x1);
-  bool const pml_z_v = (z < pml_z0i) || (z >= pml_z1i);
-  bool const pml_y_v = (y < pml_y0i) || (y >= pml_y1i);
-  bool const pml_x_v = (x < pml_x0i) || (x >= pml_x1i);
 
   TIDE_DTYPE dHy_dz = DIFFZ1(HY_L);
   TIDE_DTYPE dHz_dy = DIFFY1(HZ_L);
@@ -491,28 +543,49 @@ __global__ void forward_kernel_e(
   TIDE_DTYPE dHx_dy = DIFFY1(HX_L);
   TIDE_DTYPE dHy_dx = DIFFX1(HY_L);
 
-  if (pml_z_v) {
-    m_hy_z[i] = bz[z] * m_hy_z[i] + az[z] * dHy_dz;
-    dHy_dz = dHy_dz / kz[z] + m_hy_z[i];
-
-    m_hx_z[i] = bz[z] * m_hx_z[i] + az[z] * dHx_dz;
-    dHx_dz = dHx_dz / kz[z] + m_hx_z[i];
+  if ((z < static_cast<int>(pml_z0)) ||
+      (z >= static_cast<int>(pml_z1))) {
+    int64_t const mz =
+        compact_state_index_3d(idx.shot_idx, z, y, x, 0);
+    TIDE_DTYPE const a = az[z];
+    TIDE_DTYPE const b = bz[z];
+    TIDE_DTYPE const inv_k = static_cast<TIDE_DTYPE>(1) / kz[z];
+    TIDE_DTYPE const next_hy = b * m_hy_z[mz] + a * dHy_dz;
+    TIDE_DTYPE const next_hx = b * m_hx_z[mz] + a * dHx_dz;
+    m_hy_z[mz] = next_hy;
+    m_hx_z[mz] = next_hx;
+    dHy_dz = dHy_dz * inv_k + next_hy;
+    dHx_dz = dHx_dz * inv_k + next_hx;
   }
 
-  if (pml_y_v) {
-    m_hz_y[i] = by[y] * m_hz_y[i] + ay[y] * dHz_dy;
-    dHz_dy = dHz_dy / ky[y] + m_hz_y[i];
-
-    m_hx_y[i] = by[y] * m_hx_y[i] + ay[y] * dHx_dy;
-    dHx_dy = dHx_dy / ky[y] + m_hx_y[i];
+  if ((y < static_cast<int>(pml_y0)) ||
+      (y >= static_cast<int>(pml_y1))) {
+    int64_t const my =
+        compact_state_index_3d(idx.shot_idx, z, y, x, 1);
+    TIDE_DTYPE const a = ay[y];
+    TIDE_DTYPE const b = by[y];
+    TIDE_DTYPE const inv_k = static_cast<TIDE_DTYPE>(1) / ky[y];
+    TIDE_DTYPE const next_hz = b * m_hz_y[my] + a * dHz_dy;
+    TIDE_DTYPE const next_hx = b * m_hx_y[my] + a * dHx_dy;
+    m_hz_y[my] = next_hz;
+    m_hx_y[my] = next_hx;
+    dHz_dy = dHz_dy * inv_k + next_hz;
+    dHx_dy = dHx_dy * inv_k + next_hx;
   }
 
-  if (pml_x_v) {
-    m_hz_x[i] = bx[x] * m_hz_x[i] + ax[x] * dHz_dx;
-    dHz_dx = dHz_dx / kx[x] + m_hz_x[i];
-
-    m_hy_x[i] = bx[x] * m_hy_x[i] + ax[x] * dHy_dx;
-    dHy_dx = dHy_dx / kx[x] + m_hy_x[i];
+  if ((x < static_cast<int>(pml_x0)) ||
+      (x >= static_cast<int>(pml_x1))) {
+    int64_t const mx =
+        compact_state_index_3d(idx.shot_idx, z, y, x, 2);
+    TIDE_DTYPE const a = ax[x];
+    TIDE_DTYPE const b = bx[x];
+    TIDE_DTYPE const inv_k = static_cast<TIDE_DTYPE>(1) / kx[x];
+    TIDE_DTYPE const next_hz = b * m_hz_x[mx] + a * dHz_dx;
+    TIDE_DTYPE const next_hy = b * m_hy_x[mx] + a * dHy_dx;
+    m_hz_x[mx] = next_hz;
+    m_hy_x[mx] = next_hy;
+    dHz_dx = dHz_dx * inv_k + next_hz;
+    dHy_dx = dHy_dx * inv_k + next_hy;
   }
 
   ex[i] = ca_val * ex[i] + cb_val * (dHy_dz - dHz_dy);
@@ -598,27 +671,33 @@ __global__ void forward_kernel_e_debye(
   TIDE_DTYPE dHy_dx = DIFFX1(HY_L);
 
   if (pml_z_v) {
-    m_hy_z[i] = bz[z] * m_hy_z[i] + az[z] * dHy_dz;
-    dHy_dz = dHy_dz / kz[z] + m_hy_z[i];
+    int64_t const mz =
+        compact_state_index_3d(idx.shot_idx, z, y, x, 0);
+    m_hy_z[mz] = bz[z] * m_hy_z[mz] + az[z] * dHy_dz;
+    dHy_dz = dHy_dz / kz[z] + m_hy_z[mz];
 
-    m_hx_z[i] = bz[z] * m_hx_z[i] + az[z] * dHx_dz;
-    dHx_dz = dHx_dz / kz[z] + m_hx_z[i];
+    m_hx_z[mz] = bz[z] * m_hx_z[mz] + az[z] * dHx_dz;
+    dHx_dz = dHx_dz / kz[z] + m_hx_z[mz];
   }
 
   if (pml_y_v) {
-    m_hz_y[i] = by[y] * m_hz_y[i] + ay[y] * dHz_dy;
-    dHz_dy = dHz_dy / ky[y] + m_hz_y[i];
+    int64_t const my =
+        compact_state_index_3d(idx.shot_idx, z, y, x, 1);
+    m_hz_y[my] = by[y] * m_hz_y[my] + ay[y] * dHz_dy;
+    dHz_dy = dHz_dy / ky[y] + m_hz_y[my];
 
-    m_hx_y[i] = by[y] * m_hx_y[i] + ay[y] * dHx_dy;
-    dHx_dy = dHx_dy / ky[y] + m_hx_y[i];
+    m_hx_y[my] = by[y] * m_hx_y[my] + ay[y] * dHx_dy;
+    dHx_dy = dHx_dy / ky[y] + m_hx_y[my];
   }
 
   if (pml_x_v) {
-    m_hz_x[i] = bx[x] * m_hz_x[i] + ax[x] * dHz_dx;
-    dHz_dx = dHz_dx / kx[x] + m_hz_x[i];
+    int64_t const mx =
+        compact_state_index_3d(idx.shot_idx, z, y, x, 2);
+    m_hz_x[mx] = bx[x] * m_hz_x[mx] + ax[x] * dHz_dx;
+    dHz_dx = dHz_dx / kx[x] + m_hz_x[mx];
 
-    m_hy_x[i] = bx[x] * m_hy_x[i] + ax[x] * dHy_dx;
-    dHy_dx = dHy_dx / kx[x] + m_hy_x[i];
+    m_hy_x[mx] = bx[x] * m_hy_x[mx] + ax[x] * dHy_dx;
+    dHy_dx = dHy_dx / kx[x] + m_hy_x[mx];
   }
 
   TIDE_DTYPE ex_next = ca_val * ex[i] + cb_val * (dHy_dz - dHz_dy);
@@ -727,15 +806,6 @@ __global__ void forward_kernel_e_with_storage(
   TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
   TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];
 
-  int const pml_z0i = static_cast<int>(pml_z0);
-  int const pml_z1i = static_cast<int>(pml_z1);
-  int const pml_y0i = static_cast<int>(pml_y0);
-  int const pml_y1i = static_cast<int>(pml_y1);
-  int const pml_x0i = static_cast<int>(pml_x0);
-  int const pml_x1i = static_cast<int>(pml_x1);
-  bool const pml_z_v = (z < pml_z0i) || (z >= pml_z1i);
-  bool const pml_y_v = (y < pml_y0i) || (y >= pml_y1i);
-  bool const pml_x_v = (x < pml_x0i) || (x >= pml_x1i);
 
   TIDE_DTYPE dHy_dz = DIFFZ1(HY_S);
   TIDE_DTYPE dHz_dy = DIFFY1(HZ_S);
@@ -744,23 +814,32 @@ __global__ void forward_kernel_e_with_storage(
   TIDE_DTYPE dHx_dy = DIFFY1(HX_S);
   TIDE_DTYPE dHy_dx = DIFFX1(HY_S);
 
-  if (pml_z_v) {
-    m_hy_z[i] = bz[z] * m_hy_z[i] + az[z] * dHy_dz;
-    dHy_dz = dHy_dz / kz[z] + m_hy_z[i];
-    m_hx_z[i] = bz[z] * m_hx_z[i] + az[z] * dHx_dz;
-    dHx_dz = dHx_dz / kz[z] + m_hx_z[i];
+  if ((z < static_cast<int>(pml_z0)) ||
+      (z >= static_cast<int>(pml_z1))) {
+    int64_t const mz =
+        compact_state_index_3d(idx.shot_idx, z, y, x, 0);
+    m_hy_z[mz] = bz[z] * m_hy_z[mz] + az[z] * dHy_dz;
+    dHy_dz = dHy_dz / kz[z] + m_hy_z[mz];
+    m_hx_z[mz] = bz[z] * m_hx_z[mz] + az[z] * dHx_dz;
+    dHx_dz = dHx_dz / kz[z] + m_hx_z[mz];
   }
-  if (pml_y_v) {
-    m_hz_y[i] = by[y] * m_hz_y[i] + ay[y] * dHz_dy;
-    dHz_dy = dHz_dy / ky[y] + m_hz_y[i];
-    m_hx_y[i] = by[y] * m_hx_y[i] + ay[y] * dHx_dy;
-    dHx_dy = dHx_dy / ky[y] + m_hx_y[i];
+  if ((y < static_cast<int>(pml_y0)) ||
+      (y >= static_cast<int>(pml_y1))) {
+    int64_t const my =
+        compact_state_index_3d(idx.shot_idx, z, y, x, 1);
+    m_hz_y[my] = by[y] * m_hz_y[my] + ay[y] * dHz_dy;
+    dHz_dy = dHz_dy / ky[y] + m_hz_y[my];
+    m_hx_y[my] = by[y] * m_hx_y[my] + ay[y] * dHx_dy;
+    dHx_dy = dHx_dy / ky[y] + m_hx_y[my];
   }
-  if (pml_x_v) {
-    m_hz_x[i] = bx[x] * m_hz_x[i] + ax[x] * dHz_dx;
-    dHz_dx = dHz_dx / kx[x] + m_hz_x[i];
-    m_hy_x[i] = bx[x] * m_hy_x[i] + ax[x] * dHy_dx;
-    dHy_dx = dHy_dx / kx[x] + m_hy_x[i];
+  if ((x < static_cast<int>(pml_x0)) ||
+      (x >= static_cast<int>(pml_x1))) {
+    int64_t const mx =
+        compact_state_index_3d(idx.shot_idx, z, y, x, 2);
+    m_hz_x[mx] = bx[x] * m_hz_x[mx] + ax[x] * dHz_dx;
+    dHz_dx = dHz_dx / kx[x] + m_hz_x[mx];
+    m_hy_x[mx] = bx[x] * m_hy_x[mx] + ax[x] * dHy_dx;
+    dHy_dx = dHy_dx / kx[x] + m_hy_x[mx];
   }
 
   TIDE_DTYPE const curl_x = dHy_dz - dHz_dy;
@@ -1361,21 +1440,27 @@ __global__ void backward_kernel_e_mem_adj_3d(
     return;
   }
   int const j = idx.j;
+  int64_t const mz =
+      compact_state_index_3d(idx.shot_idx, idx.z, idx.y, idx.x, 0);
+  int64_t const my =
+      compact_state_index_3d(idx.shot_idx, idx.z, idx.y, idx.x, 1);
+  int64_t const mx =
+      compact_state_index_3d(idx.shot_idx, idx.z, idx.y, idx.x, 2);
   TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];
   TIDE_DTYPE const q_ex = cb_val * lambda_ex[i];
   TIDE_DTYPE const q_ey = cb_val * lambda_ey[i];
   TIDE_DTYPE const q_ez = cb_val * lambda_ez[i];
   if (idx.z < pml_z0 || idx.z >= pml_z1) {
-    m_lambda_hy_z[i] = bz[idx.z] * m_lambda_hy_z[i] + q_ex;
-    m_lambda_hx_z[i] = bz[idx.z] * m_lambda_hx_z[i] - q_ey;
+    m_lambda_hy_z[mz] = bz[idx.z] * m_lambda_hy_z[mz] + q_ex;
+    m_lambda_hx_z[mz] = bz[idx.z] * m_lambda_hx_z[mz] - q_ey;
   }
   if (idx.y < pml_y0 || idx.y >= pml_y1) {
-    m_lambda_hz_y[i] = by[idx.y] * m_lambda_hz_y[i] - q_ex;
-    m_lambda_hx_y[i] = by[idx.y] * m_lambda_hx_y[i] + q_ez;
+    m_lambda_hz_y[my] = by[idx.y] * m_lambda_hz_y[my] - q_ex;
+    m_lambda_hx_y[my] = by[idx.y] * m_lambda_hx_y[my] + q_ez;
   }
   if (idx.x < pml_x0 || idx.x >= pml_x1) {
-    m_lambda_hz_x[i] = bx[idx.x] * m_lambda_hz_x[i] + q_ey;
-    m_lambda_hy_x[i] = bx[idx.x] * m_lambda_hy_x[i] - q_ez;
+    m_lambda_hz_x[mx] = bx[idx.x] * m_lambda_hz_x[mx] + q_ey;
+    m_lambda_hy_x[mx] = bx[idx.x] * m_lambda_hy_x[mx] - q_ez;
   }
 }
 
@@ -1387,101 +1472,153 @@ __global__ void backward_kernel_e_mem_adj_3d(
 // inner guard for the H-side), so the multi-point adjoint stencils
 // (DIFF*_ADJ) sum only the forward cells whose derivative actually exists.
 
+template <int Axis, bool Negative>
 __device__ __forceinline__ TIDE_DTYPE raw_e_side(
     TIDE_DTYPE const *coeff, TIDE_DTYPE const *lambda,
     TIDE_DTYPE const *mem, TIDE_DTYPE const *a, TIDE_DTYPE const *b,
-    TIDE_DTYPE const * k, bool batched, int64_t i, int z, int y, int x, int dz,
-    int dy, int dx, int dir, bool neg, bool advance_memory) {
+    TIDE_DTYPE const *k, bool batched, int64_t i, int j, int shot, int z, int y,
+    int x, int dz, int dy, int dx, bool advance_memory) {
+  int const nz_i = static_cast<int>(nz);
+  int const ny_i = static_cast<int>(ny);
+  int const nx_i = static_cast<int>(nx);
   int const oz = z + dz, oy = y + dy, ox = x + dx;
-  if (oz < FD_PAD || oz >= nz - FD_PAD + 1 || oy < FD_PAD ||
-      oy >= ny - FD_PAD + 1 || ox < FD_PAD || ox >= nx - FD_PAD + 1) {
+  if (oz < FD_PAD || oz >= nz_i - FD_PAD + 1 || oy < FD_PAD ||
+      oy >= ny_i - FD_PAD + 1 || ox < FD_PAD ||
+      ox >= nx_i - FD_PAD + 1) {
     return static_cast<TIDE_DTYPE>(0);
   }
-  int64_t const in = i + dz * ny * nx + dy * nx + dx;
-  int64_t const jn = in % shot_numel;
+  int64_t const offset =
+      (int64_t)dz * ny_i * nx_i + (int64_t)dy * nx_i + dx;
+  int64_t const in = i + offset;
+  int64_t const jn = (int64_t)j + offset;
+  int64_t const mi = compact_state_index_3d_axis<Axis>(
+      shot, oz, oy, ox, nz_i, ny_i, nx_i);
   TIDE_DTYPE q = (batched ? coeff[in] : coeff[jn]) * lambda[in];
-  if (neg) {
+  if constexpr (Negative) {
     q = -q;
   }
-  int const coord = dir == 0 ? oz : dir == 1 ? oy : ox;
-  bool const pml = dir == 0 ? (oz < pml_z0 || oz >= pml_z1)
-                 : dir == 1 ? (oy < pml_y0 || oy >= pml_y1)
-                            : (ox < pml_x0 || ox >= pml_x1);
-  TIDE_DTYPE const m_used = advance_memory ? b[coord] * mem[in] + q : mem[in];
+  int coord;
+  bool pml;
+  if constexpr (Axis == 0) {
+    coord = oz;
+    pml = oz < pml_z0 || oz >= pml_z1;
+  } else if constexpr (Axis == 1) {
+    coord = oy;
+    pml = oy < pml_y0 || oy >= pml_y1;
+  } else {
+    coord = ox;
+    pml = ox < pml_x0 || ox >= pml_x1;
+  }
+  TIDE_DTYPE const m_used = advance_memory ? b[coord] * mem[mi] + q : mem[mi];
   return pml ? (a[coord] * m_used + q / k[coord]) : q;
 }
 
+template <int Axis, bool Negative>
 __device__ __forceinline__ TIDE_DTYPE raw_h_side(
     TIDE_DTYPE const *coeff, TIDE_DTYPE const *lambda,
     TIDE_DTYPE const *mem, TIDE_DTYPE const *a, TIDE_DTYPE const *b,
-    TIDE_DTYPE const *k, bool batched, int64_t i, int z, int y, int x, int dz,
-    int dy, int dx, int dir, bool neg, bool advance_memory, int gate_dim,
-    int gate_lim) {
+    TIDE_DTYPE const *k, bool batched, int64_t i, int j, int shot, int z, int y,
+    int x, int dz, int dy, int dx, bool advance_memory, int gate_lim) {
+  int const nz_i = static_cast<int>(nz);
+  int const ny_i = static_cast<int>(ny);
+  int const nx_i = static_cast<int>(nx);
   int const oz = z + dz, oy = y + dy, ox = x + dx;
-  if (oz < FD_PAD || oz >= nz - FD_PAD + 1 || oy < FD_PAD ||
-      oy >= ny - FD_PAD + 1 || ox < FD_PAD || ox >= nx - FD_PAD + 1) {
+  if (oz < FD_PAD || oz >= nz_i - FD_PAD + 1 || oy < FD_PAD ||
+      oy >= ny_i - FD_PAD + 1 || ox < FD_PAD ||
+      ox >= nx_i - FD_PAD + 1) {
     return static_cast<TIDE_DTYPE>(0);
   }
-  if ((gate_dim == 0 && oz >= gate_lim) || (gate_dim == 1 && oy >= gate_lim) ||
-      (gate_dim == 2 && ox >= gate_lim)) {
+  if constexpr (Axis == 0) {
+    if (oz >= gate_lim) {
+      return static_cast<TIDE_DTYPE>(0);
+    }
+  } else if constexpr (Axis == 1) {
+    if (oy >= gate_lim) {
+      return static_cast<TIDE_DTYPE>(0);
+    }
+  } else if (ox >= gate_lim) {
     return static_cast<TIDE_DTYPE>(0);
   }
-  int64_t const in = i + dz * ny * nx + dy * nx + dx;
-  int64_t const jn = in % shot_numel;
+  int64_t const offset =
+      (int64_t)dz * ny_i * nx_i + (int64_t)dy * nx_i + dx;
+  int64_t const in = i + offset;
+  int64_t const jn = (int64_t)j + offset;
+  int64_t const mi = compact_state_index_3d_axis<Axis>(
+      shot, oz, oy, ox, nz_i, ny_i, nx_i);
   TIDE_DTYPE q = (batched ? coeff[in] : coeff[jn]) * lambda[in];
-  if (neg) {
+  if constexpr (Negative) {
     q = -q;
   }
-  int const coord = dir == 0 ? oz : dir == 1 ? oy : ox;
-  int const pml_z1h = pml_z1 > pml_z0 ? pml_z1 - 1 : pml_z0;
-  int const pml_y1h = pml_y1 > pml_y0 ? pml_y1 - 1 : pml_y0;
-  int const pml_x1h = pml_x1 > pml_x0 ? pml_x1 - 1 : pml_x0;
-  bool const pml = dir == 0 ? (oz < pml_z0 || oz >= pml_z1h)
-                 : dir == 1 ? (oy < pml_y0 || oy >= pml_y1h)
-                            : (ox < pml_x0 || ox >= pml_x1h);
-  TIDE_DTYPE const m_used = advance_memory ? b[coord] * mem[in] + q : mem[in];
+  int coord;
+  bool pml;
+  if constexpr (Axis == 0) {
+    coord = oz;
+    int const pml_z1h = pml_z1 > pml_z0 ? pml_z1 - 1 : pml_z0;
+    pml = oz < pml_z0 || oz >= pml_z1h;
+  } else if constexpr (Axis == 1) {
+    coord = oy;
+    int const pml_y1h = pml_y1 > pml_y0 ? pml_y1 - 1 : pml_y0;
+    pml = oy < pml_y0 || oy >= pml_y1h;
+  } else {
+    coord = ox;
+    int const pml_x1h = pml_x1 > pml_x0 ? pml_x1 - 1 : pml_x0;
+    pml = ox < pml_x0 || ox >= pml_x1h;
+  }
+  TIDE_DTYPE const m_used = advance_memory ? b[coord] * mem[mi] + q : mem[mi];
   return pml ? (a[coord] * m_used + q / k[coord]) : q;
 }
 
 #define RAW_ONE(dz, dy, dx) (static_cast<TIDE_DTYPE>(1.0))
 // E-side raws: curl signs follow ex += cb*(+dHy_dz - dHz_dy),
 // ey += cb*(+dHz_dx - dHx_dz), ez += cb*(+dHx_dy - dHy_dx).
-#define RAW_HY_Z(dz, dy, dx)                                                   \
-  raw_e_side(cb, lambda_ex, m_lambda_hy_z, az, bz, kz, cb_batched, i, z, y, x, \
-             (dz), (dy), (dx), 0, false, advance_memory)
-#define RAW_HZ_Y(dz, dy, dx)                                                   \
-  raw_e_side(cb, lambda_ex, m_lambda_hz_y, ay, by, ky, cb_batched, i, z, y, x, \
-             (dz), (dy), (dx), 1, true, advance_memory)
-#define RAW_HZ_X(dz, dy, dx)                                                   \
-  raw_e_side(cb, lambda_ey, m_lambda_hz_x, ax, bx, kx, cb_batched, i, z, y, x, \
-             (dz), (dy), (dx), 2, false, advance_memory)
-#define RAW_HX_Z(dz, dy, dx)                                                   \
-  raw_e_side(cb, lambda_ey, m_lambda_hx_z, az, bz, kz, cb_batched, i, z, y, x, \
-             (dz), (dy), (dx), 0, true, advance_memory)
-#define RAW_HX_Y(dz, dy, dx)                                                   \
-  raw_e_side(cb, lambda_ez, m_lambda_hx_y, ay, by, ky, cb_batched, i, z, y, x, \
-             (dz), (dy), (dx), 1, false, advance_memory)
-#define RAW_HY_X(dz, dy, dx)                                                   \
-  raw_e_side(cb, lambda_ez, m_lambda_hy_x, ax, bx, kx, cb_batched, i, z, y, x, \
-             (dz), (dy), (dx), 2, true, advance_memory)
-#define RAW_EYZ(dz, dy, dx)                                                    \
-  raw_h_side(cq, lambda_hx, m_lambda_ey_z, azh, bzh, kzh, cq_batched, i, z, y, \
-             x, (dz), (dy), (dx), 0, true, advance_memory, 0, nz - FD_PAD)
-#define RAW_EZY(dz, dy, dx)                                                    \
-  raw_h_side(cq, lambda_hx, m_lambda_ez_y, ayh, byh, kyh, cq_batched, i, z, y, \
-             x, (dz), (dy), (dx), 1, false, advance_memory, 1, ny - FD_PAD)
-#define RAW_EZX(dz, dy, dx)                                                    \
-  raw_h_side(cq, lambda_hy, m_lambda_ez_x, axh, bxh, kxh, cq_batched, i, z, y, \
-             x, (dz), (dy), (dx), 2, true, advance_memory, 2, nx - FD_PAD)
-#define RAW_EXZ(dz, dy, dx)                                                    \
-  raw_h_side(cq, lambda_hy, m_lambda_ex_z, azh, bzh, kzh, cq_batched, i, z, y, \
-             x, (dz), (dy), (dx), 0, false, advance_memory, 0, nz - FD_PAD)
-#define RAW_EXY(dz, dy, dx)                                                    \
-  raw_h_side(cq, lambda_hz, m_lambda_ex_y, ayh, byh, kyh, cq_batched, i, z, y, \
-             x, (dz), (dy), (dx), 1, true, advance_memory, 1, ny - FD_PAD)
-#define RAW_EYX(dz, dy, dx)                                                    \
-  raw_h_side(cq, lambda_hz, m_lambda_ey_x, axh, bxh, kxh, cq_batched, i, z, y, \
-             x, (dz), (dy), (dx), 2, false, advance_memory, 2, nx - FD_PAD)
+#define RAW_HY_Z(dz, dy, dx)                                                  \
+  raw_e_side<0, false>(                                                        \
+      cb, lambda_ex, m_lambda_hy_z, az, bz, kz, cb_batched, i, idx.j,          \
+      idx.shot_idx, z, y, x, (dz), (dy), (dx), advance_memory)
+#define RAW_HZ_Y(dz, dy, dx)                                                  \
+  raw_e_side<1, true>(                                                         \
+      cb, lambda_ex, m_lambda_hz_y, ay, by, ky, cb_batched, i, idx.j,          \
+      idx.shot_idx, z, y, x, (dz), (dy), (dx), advance_memory)
+#define RAW_HZ_X(dz, dy, dx)                                                  \
+  raw_e_side<2, false>(                                                        \
+      cb, lambda_ey, m_lambda_hz_x, ax, bx, kx, cb_batched, i, idx.j,          \
+      idx.shot_idx, z, y, x, (dz), (dy), (dx), advance_memory)
+#define RAW_HX_Z(dz, dy, dx)                                                  \
+  raw_e_side<0, true>(                                                         \
+      cb, lambda_ey, m_lambda_hx_z, az, bz, kz, cb_batched, i, idx.j,          \
+      idx.shot_idx, z, y, x, (dz), (dy), (dx), advance_memory)
+#define RAW_HX_Y(dz, dy, dx)                                                  \
+  raw_e_side<1, false>(                                                        \
+      cb, lambda_ez, m_lambda_hx_y, ay, by, ky, cb_batched, i, idx.j,          \
+      idx.shot_idx, z, y, x, (dz), (dy), (dx), advance_memory)
+#define RAW_HY_X(dz, dy, dx)                                                  \
+  raw_e_side<2, true>(                                                         \
+      cb, lambda_ez, m_lambda_hy_x, ax, bx, kx, cb_batched, i, idx.j,          \
+      idx.shot_idx, z, y, x, (dz), (dy), (dx), advance_memory)
+#define RAW_EYZ(dz, dy, dx)                                                   \
+  raw_h_side<0, true>(                                                         \
+      cq, lambda_hx, m_lambda_ey_z, azh, bzh, kzh, cq_batched, i, idx.j,       \
+      idx.shot_idx, z, y, x, (dz), (dy), (dx), advance_memory, nz - FD_PAD)
+#define RAW_EZY(dz, dy, dx)                                                   \
+  raw_h_side<1, false>(                                                        \
+      cq, lambda_hx, m_lambda_ez_y, ayh, byh, kyh, cq_batched, i, idx.j,       \
+      idx.shot_idx, z, y, x, (dz), (dy), (dx), advance_memory, ny - FD_PAD)
+#define RAW_EZX(dz, dy, dx)                                                   \
+  raw_h_side<2, true>(                                                         \
+      cq, lambda_hy, m_lambda_ez_x, axh, bxh, kxh, cq_batched, i, idx.j,       \
+      idx.shot_idx, z, y, x, (dz), (dy), (dx), advance_memory, nx - FD_PAD)
+#define RAW_EXZ(dz, dy, dx)                                                   \
+  raw_h_side<0, false>(                                                        \
+      cq, lambda_hy, m_lambda_ex_z, azh, bzh, kzh, cq_batched, i, idx.j,       \
+      idx.shot_idx, z, y, x, (dz), (dy), (dx), advance_memory, nz - FD_PAD)
+#define RAW_EXY(dz, dy, dx)                                                   \
+  raw_h_side<1, true>(                                                         \
+      cq, lambda_hz, m_lambda_ex_y, ayh, byh, kyh, cq_batched, i, idx.j,       \
+      idx.shot_idx, z, y, x, (dz), (dy), (dx), advance_memory, ny - FD_PAD)
+#define RAW_EYX(dz, dy, dx)                                                   \
+  raw_h_side<2, false>(                                                        \
+      cq, lambda_hz, m_lambda_ey_x, axh, bxh, kxh, cq_batched, i, idx.j,       \
+      idx.shot_idx, z, y, x, (dz), (dy), (dx), advance_memory, nx - FD_PAD)
 
 // Fused adjoint of the forward E-update. Current memory states are immutable
 // for the launch; next states are written to a disjoint ping-pong buffer.
@@ -1523,6 +1660,9 @@ __global__ void backward_kernel_e_adj_fused_3d(
   int const z = idx.z;
   int const y = idx.y;
   int const x = idx.x;
+  int64_t const mz = compact_state_index_3d(idx.shot_idx, z, y, x, 0);
+  int64_t const my = compact_state_index_3d(idx.shot_idx, z, y, x, 1);
+  int64_t const mx = compact_state_index_3d(idx.shot_idx, z, y, x, 2);
   bool const advance_memory = true;
   TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];
   TIDE_DTYPE const q_ex = cb_val * lambda_ex[i];
@@ -1531,18 +1671,18 @@ __global__ void backward_kernel_e_adj_fused_3d(
   bool const pml_z = z < pml_z0 || z >= pml_z1;
   bool const pml_y = y < pml_y0 || y >= pml_y1;
   bool const pml_x = x < pml_x0 || x >= pml_x1;
-  next_m_lambda_hy_z[i] =
-      pml_z ? bz[z] * m_lambda_hy_z[i] + q_ex : static_cast<TIDE_DTYPE>(0);
-  next_m_lambda_hx_z[i] =
-      pml_z ? bz[z] * m_lambda_hx_z[i] - q_ey : static_cast<TIDE_DTYPE>(0);
-  next_m_lambda_hz_y[i] =
-      pml_y ? by[y] * m_lambda_hz_y[i] - q_ex : static_cast<TIDE_DTYPE>(0);
-  next_m_lambda_hx_y[i] =
-      pml_y ? by[y] * m_lambda_hx_y[i] + q_ez : static_cast<TIDE_DTYPE>(0);
-  next_m_lambda_hz_x[i] =
-      pml_x ? bx[x] * m_lambda_hz_x[i] + q_ey : static_cast<TIDE_DTYPE>(0);
-  next_m_lambda_hy_x[i] =
-      pml_x ? bx[x] * m_lambda_hy_x[i] - q_ez : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_hy_z[mz] =
+      pml_z ? bz[z] * m_lambda_hy_z[mz] + q_ex : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_hx_z[mz] =
+      pml_z ? bz[z] * m_lambda_hx_z[mz] - q_ey : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_hz_y[my] =
+      pml_y ? by[y] * m_lambda_hz_y[my] - q_ex : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_hx_y[my] =
+      pml_y ? by[y] * m_lambda_hx_y[my] + q_ez : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_hz_x[mx] =
+      pml_x ? bx[x] * m_lambda_hz_x[mx] + q_ey : static_cast<TIDE_DTYPE>(0);
+  next_m_lambda_hy_x[mx] =
+      pml_x ? bx[x] * m_lambda_hy_x[mx] - q_ez : static_cast<TIDE_DTYPE>(0);
   lambda_hx[i] += DIFFZ1_ADJ(RAW_HX_Z, RAW_ONE) + DIFFY1_ADJ(RAW_HX_Y, RAW_ONE);
   lambda_hy[i] += DIFFZ1_ADJ(RAW_HY_Z, RAW_ONE) + DIFFX1_ADJ(RAW_HY_X, RAW_ONE);
   lambda_hz[i] += DIFFY1_ADJ(RAW_HZ_Y, RAW_ONE) + DIFFX1_ADJ(RAW_HZ_X, RAW_ONE);
@@ -1580,6 +1720,9 @@ __global__ void backward_kernel_h_mem_adj_3d(
   int const z = idx.z;
   int const y = idx.y;
   int const x = idx.x;
+  int64_t const mz = compact_state_index_3d(idx.shot_idx, z, y, x, 0);
+  int64_t const my = compact_state_index_3d(idx.shot_idx, z, y, x, 1);
+  int64_t const mx = compact_state_index_3d(idx.shot_idx, z, y, x, 2);
   int const pml_z1h = pml_z1 > pml_z0 ? pml_z1 - 1 : pml_z0;
   int const pml_y1h = pml_y1 > pml_y0 ? pml_y1 - 1 : pml_y0;
   int const pml_x1h = pml_x1 > pml_x0 ? pml_x1 - 1 : pml_x0;
@@ -1588,16 +1731,16 @@ __global__ void backward_kernel_h_mem_adj_3d(
   bool const pml_x_h = x < pml_x0 || x >= pml_x1h;
   TIDE_DTYPE const cq_val = cq_batched ? cq[i] : cq[j];
   if (z < nz - FD_PAD && pml_z_h) {
-    m_lambda_ey_z[i] = bzh[z] * m_lambda_ey_z[i] - cq_val * lambda_hx[i];
-    m_lambda_ex_z[i] = bzh[z] * m_lambda_ex_z[i] + cq_val * lambda_hy[i];
+    m_lambda_ey_z[mz] = bzh[z] * m_lambda_ey_z[mz] - cq_val * lambda_hx[i];
+    m_lambda_ex_z[mz] = bzh[z] * m_lambda_ex_z[mz] + cq_val * lambda_hy[i];
   }
   if (y < ny - FD_PAD && pml_y_h) {
-    m_lambda_ez_y[i] = byh[y] * m_lambda_ez_y[i] + cq_val * lambda_hx[i];
-    m_lambda_ex_y[i] = byh[y] * m_lambda_ex_y[i] - cq_val * lambda_hz[i];
+    m_lambda_ez_y[my] = byh[y] * m_lambda_ez_y[my] + cq_val * lambda_hx[i];
+    m_lambda_ex_y[my] = byh[y] * m_lambda_ex_y[my] - cq_val * lambda_hz[i];
   }
   if (x < nx - FD_PAD && pml_x_h) {
-    m_lambda_ez_x[i] = bxh[x] * m_lambda_ez_x[i] - cq_val * lambda_hy[i];
-    m_lambda_ey_x[i] = bxh[x] * m_lambda_ey_x[i] + cq_val * lambda_hz[i];
+    m_lambda_ez_x[mx] = bxh[x] * m_lambda_ez_x[mx] - cq_val * lambda_hy[i];
+    m_lambda_ey_x[mx] = bxh[x] * m_lambda_ey_x[mx] + cq_val * lambda_hz[i];
   }
 }
 
@@ -1641,6 +1784,9 @@ __global__ void backward_kernel_h_adj_fused_3d(
   int const z = idx.z;
   int const y = idx.y;
   int const x = idx.x;
+  int64_t const mz = compact_state_index_3d(idx.shot_idx, z, y, x, 0);
+  int64_t const my = compact_state_index_3d(idx.shot_idx, z, y, x, 1);
+  int64_t const mx = compact_state_index_3d(idx.shot_idx, z, y, x, 2);
   bool const advance_memory = true;
   int const pml_z1h = pml_z1 > pml_z0 ? pml_z1 - 1 : pml_z0;
   int const pml_y1h = pml_y1 > pml_y0 ? pml_y1 - 1 : pml_y0;
@@ -1649,29 +1795,29 @@ __global__ void backward_kernel_h_adj_fused_3d(
   bool const pml_y = y < pml_y0 || y >= pml_y1h;
   bool const pml_x = x < pml_x0 || x >= pml_x1h;
   TIDE_DTYPE const cq_val = cq_batched ? cq[i] : cq[j];
-  next_m_lambda_ey_z[i] =
+  next_m_lambda_ey_z[mz] =
       z < nz - FD_PAD && pml_z
-          ? bzh[z] * m_lambda_ey_z[i] - cq_val * lambda_hx[i]
+          ? bzh[z] * m_lambda_ey_z[mz] - cq_val * lambda_hx[i]
           : static_cast<TIDE_DTYPE>(0);
-  next_m_lambda_ex_z[i] =
+  next_m_lambda_ex_z[mz] =
       z < nz - FD_PAD && pml_z
-          ? bzh[z] * m_lambda_ex_z[i] + cq_val * lambda_hy[i]
+          ? bzh[z] * m_lambda_ex_z[mz] + cq_val * lambda_hy[i]
           : static_cast<TIDE_DTYPE>(0);
-  next_m_lambda_ez_y[i] =
+  next_m_lambda_ez_y[my] =
       y < ny - FD_PAD && pml_y
-          ? byh[y] * m_lambda_ez_y[i] + cq_val * lambda_hx[i]
+          ? byh[y] * m_lambda_ez_y[my] + cq_val * lambda_hx[i]
           : static_cast<TIDE_DTYPE>(0);
-  next_m_lambda_ex_y[i] =
+  next_m_lambda_ex_y[my] =
       y < ny - FD_PAD && pml_y
-          ? byh[y] * m_lambda_ex_y[i] - cq_val * lambda_hz[i]
+          ? byh[y] * m_lambda_ex_y[my] - cq_val * lambda_hz[i]
           : static_cast<TIDE_DTYPE>(0);
-  next_m_lambda_ez_x[i] =
+  next_m_lambda_ez_x[mx] =
       x < nx - FD_PAD && pml_x
-          ? bxh[x] * m_lambda_ez_x[i] - cq_val * lambda_hy[i]
+          ? bxh[x] * m_lambda_ez_x[mx] - cq_val * lambda_hy[i]
           : static_cast<TIDE_DTYPE>(0);
-  next_m_lambda_ey_x[i] =
+  next_m_lambda_ey_x[mx] =
       x < nx - FD_PAD && pml_x
-          ? bxh[x] * m_lambda_ey_x[i] + cq_val * lambda_hz[i]
+          ? bxh[x] * m_lambda_ey_x[mx] + cq_val * lambda_hz[i]
           : static_cast<TIDE_DTYPE>(0);
   TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];
   lambda_ex[i] = ca_val * lambda_ex[i];
@@ -1809,6 +1955,9 @@ struct AdjointFields3D {
     TIDE_DTYPE *const next_m_lambda_hx_z = (next).hx_z;                        \
     TIDE_DTYPE *const next_m_lambda_hx_y = (next).hx_y;                        \
     TIDE_DTYPE *const next_m_lambda_hy_x = (next).hy_x;                        \
+    int64_t const mz = compact_state_index_3d(idx.shot_idx, z, y, x, 0);       \
+    int64_t const my = compact_state_index_3d(idx.shot_idx, z, y, x, 1);       \
+    int64_t const mx = compact_state_index_3d(idx.shot_idx, z, y, x, 2);       \
     bool const advance_memory = true;                                          \
     TIDE_DTYPE const cb_val = cb_batched ? cb[i] : cb[j];                      \
     TIDE_DTYPE const q_ex = cb_val * lambda_ex[i];                             \
@@ -1817,18 +1966,18 @@ struct AdjointFields3D {
     bool const pml_z = z < pml_z0 || z >= pml_z1;                             \
     bool const pml_y = y < pml_y0 || y >= pml_y1;                             \
     bool const pml_x = x < pml_x0 || x >= pml_x1;                             \
-    next_m_lambda_hy_z[i] =                                                    \
-        pml_z ? bz[z] * m_lambda_hy_z[i] + q_ex : (TIDE_DTYPE)0;              \
-    next_m_lambda_hx_z[i] =                                                    \
-        pml_z ? bz[z] * m_lambda_hx_z[i] - q_ey : (TIDE_DTYPE)0;              \
-    next_m_lambda_hz_y[i] =                                                    \
-        pml_y ? by[y] * m_lambda_hz_y[i] - q_ex : (TIDE_DTYPE)0;              \
-    next_m_lambda_hx_y[i] =                                                    \
-        pml_y ? by[y] * m_lambda_hx_y[i] + q_ez : (TIDE_DTYPE)0;              \
-    next_m_lambda_hz_x[i] =                                                    \
-        pml_x ? bx[x] * m_lambda_hz_x[i] + q_ey : (TIDE_DTYPE)0;              \
-    next_m_lambda_hy_x[i] =                                                    \
-        pml_x ? bx[x] * m_lambda_hy_x[i] - q_ez : (TIDE_DTYPE)0;              \
+    next_m_lambda_hy_z[mz] =                                                   \
+        pml_z ? bz[z] * m_lambda_hy_z[mz] + q_ex : (TIDE_DTYPE)0;             \
+    next_m_lambda_hx_z[mz] =                                                   \
+        pml_z ? bz[z] * m_lambda_hx_z[mz] - q_ey : (TIDE_DTYPE)0;             \
+    next_m_lambda_hz_y[my] =                                                   \
+        pml_y ? by[y] * m_lambda_hz_y[my] - q_ex : (TIDE_DTYPE)0;             \
+    next_m_lambda_hx_y[my] =                                                   \
+        pml_y ? by[y] * m_lambda_hx_y[my] + q_ez : (TIDE_DTYPE)0;             \
+    next_m_lambda_hz_x[mx] =                                                   \
+        pml_x ? bx[x] * m_lambda_hz_x[mx] + q_ey : (TIDE_DTYPE)0;             \
+    next_m_lambda_hy_x[mx] =                                                   \
+        pml_x ? bx[x] * m_lambda_hy_x[mx] - q_ez : (TIDE_DTYPE)0;             \
     lambda_hx[i] +=                                                            \
         DIFFZ1_ADJ(RAW_HX_Z, RAW_ONE) + DIFFY1_ADJ(RAW_HX_Y, RAW_ONE);        \
     lambda_hy[i] +=                                                            \
@@ -1857,6 +2006,9 @@ struct AdjointFields3D {
     TIDE_DTYPE *const next_m_lambda_ex_z = (next).ex_z;                        \
     TIDE_DTYPE *const next_m_lambda_ex_y = (next).ex_y;                        \
     TIDE_DTYPE *const next_m_lambda_ey_x = (next).ey_x;                        \
+    int64_t const mz = compact_state_index_3d(idx.shot_idx, z, y, x, 0);       \
+    int64_t const my = compact_state_index_3d(idx.shot_idx, z, y, x, 1);       \
+    int64_t const mx = compact_state_index_3d(idx.shot_idx, z, y, x, 2);       \
     bool const advance_memory = true;                                          \
     int const pml_z1h = pml_z1 > pml_z0 ? pml_z1 - 1 : pml_z0;                \
     int const pml_y1h = pml_y1 > pml_y0 ? pml_y1 - 1 : pml_y0;                \
@@ -1865,29 +2017,29 @@ struct AdjointFields3D {
     bool const pml_y = y < pml_y0 || y >= pml_y1h;                            \
     bool const pml_x = x < pml_x0 || x >= pml_x1h;                            \
     TIDE_DTYPE const cq_val = cq_batched ? cq[i] : cq[j];                      \
-    next_m_lambda_ey_z[i] =                                                    \
+    next_m_lambda_ey_z[mz] =                                                   \
         z < nz - FD_PAD && pml_z                                               \
-            ? bzh[z] * m_lambda_ey_z[i] - cq_val * lambda_hx[i]               \
+            ? bzh[z] * m_lambda_ey_z[mz] - cq_val * lambda_hx[i]              \
             : (TIDE_DTYPE)0;                                                   \
-    next_m_lambda_ex_z[i] =                                                    \
+    next_m_lambda_ex_z[mz] =                                                   \
         z < nz - FD_PAD && pml_z                                               \
-            ? bzh[z] * m_lambda_ex_z[i] + cq_val * lambda_hy[i]               \
+            ? bzh[z] * m_lambda_ex_z[mz] + cq_val * lambda_hy[i]              \
             : (TIDE_DTYPE)0;                                                   \
-    next_m_lambda_ez_y[i] =                                                    \
+    next_m_lambda_ez_y[my] =                                                   \
         y < ny - FD_PAD && pml_y                                               \
-            ? byh[y] * m_lambda_ez_y[i] + cq_val * lambda_hx[i]               \
+            ? byh[y] * m_lambda_ez_y[my] + cq_val * lambda_hx[i]              \
             : (TIDE_DTYPE)0;                                                   \
-    next_m_lambda_ex_y[i] =                                                    \
+    next_m_lambda_ex_y[my] =                                                   \
         y < ny - FD_PAD && pml_y                                               \
-            ? byh[y] * m_lambda_ex_y[i] - cq_val * lambda_hz[i]               \
+            ? byh[y] * m_lambda_ex_y[my] - cq_val * lambda_hz[i]              \
             : (TIDE_DTYPE)0;                                                   \
-    next_m_lambda_ez_x[i] =                                                    \
+    next_m_lambda_ez_x[mx] =                                                   \
         x < nx - FD_PAD && pml_x                                               \
-            ? bxh[x] * m_lambda_ez_x[i] - cq_val * lambda_hy[i]               \
+            ? bxh[x] * m_lambda_ez_x[mx] - cq_val * lambda_hy[i]              \
             : (TIDE_DTYPE)0;                                                   \
-    next_m_lambda_ey_x[i] =                                                    \
+    next_m_lambda_ey_x[mx] =                                                   \
         x < nx - FD_PAD && pml_x                                               \
-            ? bxh[x] * m_lambda_ey_x[i] + cq_val * lambda_hz[i]               \
+            ? bxh[x] * m_lambda_ey_x[mx] + cq_val * lambda_hz[i]              \
             : (TIDE_DTYPE)0;                                                   \
     TIDE_DTYPE const ca_val = ca_batched ? ca[i] : ca[j];                      \
     lambda_ex[i] = ca_val * lambda_ex[i];                                      \
@@ -2116,6 +2268,29 @@ static inline void copy_adjoint_memory_if_needed_3d(
     if (originals[i] != currents[i]) {
       tide::cuda_check_or_abort(
           cudaMemcpyAsync(originals[i], currents[i], bytes,
+                          cudaMemcpyDeviceToDevice, stream),
+          __FILE__, __LINE__);
+    }
+  }
+}
+
+static inline void copy_compact_adjoint_memory_if_needed_3d(
+    cudaStream_t const stream, size_t const state_numel[12],
+    AdjointMemoryState3D const &original,
+    AdjointMemoryState3D const &current) {
+  TIDE_DTYPE *const originals[12] = {
+      original.ey_z, original.ez_y, original.ez_x, original.ex_z,
+      original.ex_y, original.ey_x, original.hz_y, original.hy_z,
+      original.hx_z, original.hz_x, original.hy_x, original.hx_y};
+  TIDE_DTYPE *const currents[12] = {
+      current.ey_z, current.ez_y, current.ez_x, current.ex_z,
+      current.ex_y, current.ey_x, current.hz_y, current.hy_z,
+      current.hx_z, current.hz_x, current.hy_x, current.hx_y};
+  for (int i = 0; i < 12; ++i) {
+    if (originals[i] != currents[i]) {
+      tide::cuda_check_or_abort(
+          cudaMemcpyAsync(originals[i], currents[i],
+                          state_numel[i] * sizeof(TIDE_DTYPE),
                           cudaMemcpyDeviceToDevice, stream),
           __FILE__, __LINE__);
     }
@@ -2620,7 +2795,8 @@ static void set_constants(
     int64_t const pml_x1_h,
     bool const ca_batched_h,
     bool const cb_batched_h,
-    bool const cq_batched_h) {
+    bool const cq_batched_h,
+    bool const compact_cpml_states_h) {
   struct ConstantCache3D {
     bool initialized = false;
     TIDE_DTYPE rdz_h = (TIDE_DTYPE)0;
@@ -2642,6 +2818,7 @@ static void set_constants(
     bool ca_batched_h = false;
     bool cb_batched_h = false;
     bool cq_batched_h = false;
+    bool compact_cpml_states_h = false;
   };
   static ConstantCache3D cache{};
   if (cache.initialized && cache.rdz_h == rdz_h && cache.rdy_h == rdy_h &&
@@ -2655,7 +2832,8 @@ static void set_constants(
       cache.pml_y1_h == pml_y1_h && cache.pml_x1_h == pml_x1_h &&
       cache.ca_batched_h == ca_batched_h &&
       cache.cb_batched_h == cb_batched_h &&
-      cache.cq_batched_h == cq_batched_h) {
+      cache.cq_batched_h == cq_batched_h &&
+      cache.compact_cpml_states_h == compact_cpml_states_h) {
     return;
   }
 
@@ -2702,6 +2880,10 @@ static void set_constants(
                             __FILE__, __LINE__);
   tide::cuda_check_or_abort(cudaMemcpyToSymbol(cq_batched, &cq_batched_h, sizeof(bool)),
                             __FILE__, __LINE__);
+  tide::cuda_check_or_abort(
+      cudaMemcpyToSymbol(compact_cpml_states, &compact_cpml_states_h,
+                         sizeof(bool)),
+      __FILE__, __LINE__);
 
   cache.initialized = true;
   cache.rdz_h = rdz_h;
@@ -2723,6 +2905,7 @@ static void set_constants(
   cache.ca_batched_h = ca_batched_h;
   cache.cb_batched_h = cb_batched_h;
   cache.cq_batched_h = cq_batched_h;
+  cache.compact_cpml_states_h = compact_cpml_states_h;
 }
 
 struct ScalarLaunchConfig3D {
@@ -2937,7 +3120,8 @@ extern "C" void FUNC(forward)(
       pml_x1_h,
       ca_batched_h,
       cb_batched_h,
-      cq_batched_h);
+      cq_batched_h,
+      true);
 
   TIDE_DTYPE *source_field = ey;
   if (source_component == 0) {
@@ -3249,7 +3433,8 @@ extern "C" void FUNC(forward_with_storage)(
       pml_x1_h,
       ca_batched_h,
       cb_batched_h,
-      cq_batched_h);
+      cq_batched_h,
+      true);
 
   TIDE_DTYPE *source_field = ey;
   if (source_component == 0) {
@@ -3702,7 +3887,8 @@ extern "C" void FUNC(born_forward)(
       pml_x1_h,
       ca_batched_h,
       cb_batched_h,
-      cq_batched_h);
+      cq_batched_h,
+      false);
 
   TIDE_DTYPE *source_field_bg = ey;
   TIDE_DTYPE *source_field_sc = dey;
@@ -4033,7 +4219,8 @@ extern "C" void FUNC(born_forward_with_storage)(
       pml_x1_h,
       ca_batched_h,
       cb_batched_h,
-      cq_batched_h);
+      cq_batched_h,
+      false);
 
   TIDE_DTYPE *source_field_bg = ey;
   TIDE_DTYPE *source_field_sc = dey;
@@ -4511,7 +4698,8 @@ extern "C" void FUNC(backward)(
       pml_x1_h,
       ca_batched_h,
       cb_batched_h,
-      cq_batched_h);
+      cq_batched_h,
+      true);
 
   TIDE_DTYPE *lambda_src_field = lambda_ey;
   if (source_component == 0) {
@@ -4530,29 +4718,49 @@ extern "C" void FUNC(backward)(
   ScalarLaunchConfig3D const launch_cfg = make_scalar_launch_config_3d(
       n_shots_h, nz_h, ny_h, nx_h, n_sources_per_shot_h,
       n_receivers_per_shot_h, n_threads, false);
-  size_t const adjoint_state_numel = (size_t)n_shots_h * shot_numel_h;
-  size_t const adjoint_state_bytes =
-      adjoint_state_numel * sizeof(TIDE_DTYPE);
+  int64_t const pml_z1_compact = pml_z1_h > pml_z0_h ? pml_z1_h - 1 : pml_z0_h;
+  int64_t const pml_y1_compact = pml_y1_h > pml_y0_h ? pml_y1_h - 1 : pml_y0_h;
+  int64_t const pml_x1_compact = pml_x1_h > pml_x0_h ? pml_x1_h - 1 : pml_x0_h;
+  size_t const compact_z_numel =
+      (size_t)n_shots_h * (size_t)(pml_z0_h + nz_h - pml_z1_compact) *
+      (size_t)ny_h * (size_t)nx_h;
+  size_t const compact_y_numel =
+      (size_t)n_shots_h * (size_t)nz_h *
+      (size_t)(pml_y0_h + ny_h - pml_y1_compact) * (size_t)nx_h;
+  size_t const compact_x_numel =
+      (size_t)n_shots_h * (size_t)nz_h * (size_t)ny_h *
+      (size_t)(pml_x0_h + nx_h - pml_x1_compact);
+  size_t const adjoint_state_sizes[12] = {
+      compact_z_numel, compact_y_numel, compact_x_numel, compact_z_numel,
+      compact_y_numel, compact_x_numel, compact_y_numel, compact_z_numel,
+      compact_z_numel, compact_x_numel, compact_x_numel, compact_y_numel};
+  size_t adjoint_state_offsets[12] = {};
+  size_t adjoint_scratch_numel = 0;
+  for (int state = 0; state < 12; ++state) {
+    adjoint_state_offsets[state] = adjoint_scratch_numel;
+    adjoint_scratch_numel += adjoint_state_sizes[state];
+  }
   AdjointMemoryState3D const original_adjoint_memory{
       m_lambda_ey_z, m_lambda_ez_y, m_lambda_ez_x, m_lambda_ex_z,
       m_lambda_ex_y, m_lambda_ey_x, m_lambda_hz_y, m_lambda_hy_z,
       m_lambda_hx_z, m_lambda_hz_x, m_lambda_hy_x, m_lambda_hx_y};
   AdjointMemoryState3D current_adjoint_memory = original_adjoint_memory;
   AdjointMemoryState3D next_adjoint_memory{
-      adjoint_memory_scratch,
-      adjoint_memory_scratch + adjoint_state_numel,
-      adjoint_memory_scratch + 2 * adjoint_state_numel,
-      adjoint_memory_scratch + 3 * adjoint_state_numel,
-      adjoint_memory_scratch + 4 * adjoint_state_numel,
-      adjoint_memory_scratch + 5 * adjoint_state_numel,
-      adjoint_memory_scratch + 6 * adjoint_state_numel,
-      adjoint_memory_scratch + 7 * adjoint_state_numel,
-      adjoint_memory_scratch + 8 * adjoint_state_numel,
-      adjoint_memory_scratch + 9 * adjoint_state_numel,
-      adjoint_memory_scratch + 10 * adjoint_state_numel,
-      adjoint_memory_scratch + 11 * adjoint_state_numel};
+      adjoint_memory_scratch + adjoint_state_offsets[0],
+      adjoint_memory_scratch + adjoint_state_offsets[1],
+      adjoint_memory_scratch + adjoint_state_offsets[2],
+      adjoint_memory_scratch + adjoint_state_offsets[3],
+      adjoint_memory_scratch + adjoint_state_offsets[4],
+      adjoint_memory_scratch + adjoint_state_offsets[5],
+      adjoint_memory_scratch + adjoint_state_offsets[6],
+      adjoint_memory_scratch + adjoint_state_offsets[7],
+      adjoint_memory_scratch + adjoint_state_offsets[8],
+      adjoint_memory_scratch + adjoint_state_offsets[9],
+      adjoint_memory_scratch + adjoint_state_offsets[10],
+      adjoint_memory_scratch + adjoint_state_offsets[11]};
   tide::cuda_check_or_abort(
-      cudaMemsetAsync(adjoint_memory_scratch, 0, 12 * adjoint_state_bytes,
+      cudaMemsetAsync(adjoint_memory_scratch, 0,
+                      adjoint_scratch_numel * sizeof(TIDE_DTYPE),
                       stream_compute),
       __FILE__, __LINE__);
 
@@ -5009,9 +5217,9 @@ extern "C" void FUNC(backward)(
     }
   }
 
-  copy_adjoint_memory_if_needed_3d(stream_compute, adjoint_state_bytes,
-                                   original_adjoint_memory,
-                                   current_adjoint_memory);
+  copy_compact_adjoint_memory_if_needed_3d(
+      stream_compute, adjoint_state_sizes, original_adjoint_memory,
+      current_adjoint_memory);
   if (reduce_grad_ca || reduce_grad_cb) {
     int const threads_reduce = 256;
     int64_t const blocks_reduce =
@@ -5265,7 +5473,8 @@ extern "C" void FUNC(born_backward_bggrad)(
       pml_x1_h,
       ca_batched_h,
       cb_batched_h,
-      cq_batched_h);
+      cq_batched_h,
+      false);
 
   TIDE_DTYPE *lambda_src_field = lambda_ey;
   TIDE_DTYPE *eta_src_field = eta_ey;
@@ -5848,7 +6057,8 @@ extern "C" void FUNC(born_backward)(
       pml_x1_h,
       ca_batched_h,
       cb_batched_h,
-      cq_batched_h);
+      cq_batched_h,
+      false);
 
   TIDE_DTYPE *lambda_src_field = lambda_ey;
   if (source_component == 0) {

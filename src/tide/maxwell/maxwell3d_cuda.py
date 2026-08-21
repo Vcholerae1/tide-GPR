@@ -6,7 +6,11 @@ import torch
 from ..callbacks import Callback, CallbackState
 from ..core import BackendPreference
 from ..dispersion import DebyeDispersion
-from ..grid_utils import _normalize_grid_spacing_3d, _normalize_pml_width_3d
+from ..grid_utils import (
+    _CompactCPMLLayout,
+    _normalize_grid_spacing_3d,
+    _normalize_pml_width_3d,
+)
 from ..storage import _normalize_storage_compression, _resolve_storage_compression
 from ..utils import C0, compile_material_coefficients
 from .common import (
@@ -73,7 +77,7 @@ def maxwell3d_c_cuda(
 ):
     """3D C/CUDA forward propagation path with Python fallback for gradients."""
     from .. import backend_utils, staggered
-    from ..padding import create_or_pad, zero_interior
+    from ..padding import create_or_pad
 
     del (
         storage_chunk_steps,
@@ -314,6 +318,12 @@ def maxwell3d_c_cuda(
     padded_nz = model_nz + total_pad[0] + total_pad[1]
     padded_ny = model_ny + total_pad[2] + total_pad[3]
     padded_nx = model_nx + total_pad[4] + total_pad[5]
+    pml_z0 = fd_pad_list[0] + pml_width_list[0]
+    pml_z1 = padded_nz - fd_pad_list[1] - pml_width_list[1]
+    pml_y0 = fd_pad_list[2] + pml_width_list[2]
+    pml_y1 = padded_ny - fd_pad_list[3] - pml_width_list[3]
+    pml_x0 = fd_pad_list[4] + pml_width_list[4]
+    pml_x1 = padded_nx - fd_pad_list[5] - pml_width_list[5]
 
     padded_size = (
         (int(epsilon.shape[0]), padded_nz, padded_ny, padded_nx)
@@ -368,6 +378,20 @@ def maxwell3d_c_cuda(
             ).contiguous()
         return torch.zeros(size_with_batch, device=device, dtype=field_dtype)
 
+    compact_cuda_states = device.type == "cuda"
+    compact_layout = _CompactCPMLLayout(
+        n_shots,
+        (padded_nz, padded_ny, padded_nx),
+        ((pml_z0, pml_z1), (pml_y0, pml_y1), (pml_x0, pml_x1)),
+    )
+
+    def init_pml_state(field_0: torch.Tensor | None, axis: int) -> torch.Tensor:
+        if not compact_cuda_states:
+            return init_wavefield(field_0)
+        if field_0 is None:
+            return compact_layout.zeros(axis, device=device, dtype=dtype)
+        return compact_layout.pack(init_wavefield(field_0), axis)
+
     Ex = init_wavefield(Ex_0)
     Ey = init_wavefield(Ey_0)
     Ez = init_wavefield(Ez_0)
@@ -375,35 +399,31 @@ def maxwell3d_c_cuda(
     Hy = init_wavefield(Hy_0)
     Hz = init_wavefield(Hz_0)
 
-    m_hz_y = init_wavefield(m_hz_y_0)
-    m_hy_z = init_wavefield(m_hy_z_0)
-    m_hx_z = init_wavefield(m_hx_z_0)
-    m_hz_x = init_wavefield(m_hz_x_0)
-    m_hy_x = init_wavefield(m_hy_x_0)
-    m_hx_y = init_wavefield(m_hx_y_0)
-    m_ey_z = init_wavefield(m_ey_z_0)
-    m_ez_y = init_wavefield(m_ez_y_0)
-    m_ez_x = init_wavefield(m_ez_x_0)
-    m_ex_z = init_wavefield(m_ex_z_0)
-    m_ex_y = init_wavefield(m_ex_y_0)
-    m_ey_x = init_wavefield(m_ey_x_0)
+    m_hz_y = init_pml_state(m_hz_y_0, 1)
+    m_hy_z = init_pml_state(m_hy_z_0, 0)
+    m_hx_z = init_pml_state(m_hx_z_0, 0)
+    m_hz_x = init_pml_state(m_hz_x_0, 2)
+    m_hy_x = init_pml_state(m_hy_x_0, 2)
+    m_hx_y = init_pml_state(m_hx_y_0, 1)
+    m_ey_z = init_pml_state(m_ey_z_0, 0)
+    m_ez_y = init_pml_state(m_ez_y_0, 1)
+    m_ez_x = init_pml_state(m_ez_x_0, 2)
+    m_ex_z = init_pml_state(m_ex_z_0, 0)
+    m_ex_y = init_pml_state(m_ex_y_0, 1)
+    m_ey_x = init_pml_state(m_ey_x_0, 2)
 
-    pml_aux = [
-        (m_hz_y, 1),
-        (m_hy_z, 0),
-        (m_hx_z, 0),
-        (m_hz_x, 2),
-        (m_hy_x, 2),
-        (m_hx_y, 1),
-        (m_ey_z, 0),
-        (m_ez_y, 1),
-        (m_ez_x, 2),
-        (m_ex_z, 0),
-        (m_ex_y, 1),
-        (m_ey_x, 2),
-    ]
-    for wf, dim in pml_aux:
-        zero_interior(wf, fd_pad_list, pml_width_list, dim)
+    if not compact_cuda_states:
+        states_by_axis = (
+            (m_hy_z, m_hx_z, m_ey_z, m_ex_z),
+            (m_hz_y, m_hx_y, m_ez_y, m_ex_y),
+            (m_hz_x, m_hy_x, m_ez_x, m_ey_x),
+        )
+        for axis, states in enumerate(states_by_axis):
+            for state in states:
+                compact_layout.zero_interior_(state, axis)
+
+    def callback_pml_state(state: torch.Tensor, axis: int) -> torch.Tensor:
+        return compact_layout.unpack(state, axis) if compact_cuda_states else state
 
     pml_ab_profiles, pml_k_profiles = staggered.set_pml_profiles_3d(
         pml_width=pml_width_list,
@@ -517,13 +537,6 @@ def maxwell3d_c_cuda(
     }
     if dispersion is not None:
         callback_models["dispersion"] = dispersion
-
-    pml_z0 = fd_pad_list[0] + pml_width_list[0]
-    pml_z1 = padded_nz - fd_pad_list[1] - pml_width_list[1]
-    pml_y0 = fd_pad_list[2] + pml_width_list[2]
-    pml_y1 = padded_ny - fd_pad_list[3] - pml_width_list[3]
-    pml_x0 = fd_pad_list[4] + pml_width_list[4]
-    pml_x1 = padded_nx - fd_pad_list[5] - pml_width_list[5]
 
     source_component_idx = _COMPONENT_TO_INDEX_3D[source_component]
     receiver_component_idx = _COMPONENT_TO_INDEX_3D[receiver_component]
@@ -806,18 +819,18 @@ def maxwell3d_c_cuda(
                     "Hx": Hx,
                     "Hy": Hy,
                     "Hz": Hz,
-                    "m_hz_y": m_hz_y,
-                    "m_hy_z": m_hy_z,
-                    "m_hx_z": m_hx_z,
-                    "m_hz_x": m_hz_x,
-                    "m_hy_x": m_hy_x,
-                    "m_hx_y": m_hx_y,
-                    "m_ey_z": m_ey_z,
-                    "m_ez_y": m_ez_y,
-                    "m_ez_x": m_ez_x,
-                    "m_ex_z": m_ex_z,
-                    "m_ex_y": m_ex_y,
-                    "m_ey_x": m_ey_x,
+                    "m_hz_y": callback_pml_state(m_hz_y, 1),
+                    "m_hy_z": callback_pml_state(m_hy_z, 0),
+                    "m_hx_z": callback_pml_state(m_hx_z, 0),
+                    "m_hz_x": callback_pml_state(m_hz_x, 2),
+                    "m_hy_x": callback_pml_state(m_hy_x, 2),
+                    "m_hx_y": callback_pml_state(m_hx_y, 1),
+                    "m_ey_z": callback_pml_state(m_ey_z, 0),
+                    "m_ez_y": callback_pml_state(m_ez_y, 1),
+                    "m_ez_x": callback_pml_state(m_ez_x, 2),
+                    "m_ex_z": callback_pml_state(m_ex_z, 0),
+                    "m_ex_y": callback_pml_state(m_ex_y, 1),
+                    "m_ey_x": callback_pml_state(m_ey_x, 2),
                 }
                 if has_dispersion:
                     callback_wavefields["polarization"] = torch.stack(
@@ -838,6 +851,7 @@ def maxwell3d_c_cuda(
                         grid_spacing=[dz, dy, dx],
                     )
                 )
+                del callback_wavefields
 
             window_end = min(nt_steps, window_start + callback_window)
             _launch_forward(
@@ -861,6 +875,25 @@ def maxwell3d_c_cuda(
         ),
     )
 
+    def unpad_pml_state(state: torch.Tensor, axis: int) -> torch.Tensor:
+        full_state = (
+            compact_layout.unpack(state, axis) if compact_cuda_states else state
+        )
+        return full_state[s]
+
+    m_hz_y = unpad_pml_state(m_hz_y, 1)
+    m_hy_z = unpad_pml_state(m_hy_z, 0)
+    m_hx_z = unpad_pml_state(m_hx_z, 0)
+    m_hz_x = unpad_pml_state(m_hz_x, 2)
+    m_hy_x = unpad_pml_state(m_hy_x, 2)
+    m_hx_y = unpad_pml_state(m_hx_y, 1)
+    m_ey_z = unpad_pml_state(m_ey_z, 0)
+    m_ez_y = unpad_pml_state(m_ez_y, 1)
+    m_ez_x = unpad_pml_state(m_ez_x, 2)
+    m_ex_z = unpad_pml_state(m_ex_z, 0)
+    m_ex_y = unpad_pml_state(m_ex_y, 1)
+    m_ey_x = unpad_pml_state(m_ey_x, 2)
+
     outputs = (
         Ex[s],
         Ey[s],
@@ -868,18 +901,18 @@ def maxwell3d_c_cuda(
         Hx[s],
         Hy[s],
         Hz[s],
-        m_hz_y[s],
-        m_hy_z[s],
-        m_hx_z[s],
-        m_hz_x[s],
-        m_hy_x[s],
-        m_hx_y[s],
-        m_ey_z[s],
-        m_ez_y[s],
-        m_ez_x[s],
-        m_ex_z[s],
-        m_ex_y[s],
-        m_ey_x[s],
+        m_hz_y,
+        m_hy_z,
+        m_hx_z,
+        m_hz_x,
+        m_hy_x,
+        m_hx_y,
+        m_ey_z,
+        m_ez_y,
+        m_ez_x,
+        m_ex_z,
+        m_ex_y,
+        m_ey_x,
         receiver_amplitudes,
     )
     return outputs

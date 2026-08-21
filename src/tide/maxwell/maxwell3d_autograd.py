@@ -3,6 +3,7 @@ from typing import Any
 import torch
 
 from ..callbacks import CallbackState
+from ..grid_utils import _CompactCPMLLayout
 from ..storage import (
     STORAGE_DEVICE,
     STORAGE_DISK,
@@ -104,6 +105,17 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         ca_batched = bool(meta.get("ca_batched", False))
         cb_batched = bool(meta.get("cb_batched", False))
         cq_batched = bool(meta.get("cq_batched", False))
+
+        compact_layout = _CompactCPMLLayout(
+            n_shots,
+            (nz, ny, nx),
+            ((pml_z0, pml_z1), (pml_y0, pml_y1), (pml_x0, pml_x1)),
+        )
+
+        def callback_pml_state(state: torch.Tensor, axis: int) -> torch.Tensor:
+            return (
+                compact_layout.unpack(state, axis) if device.type == "cuda" else state
+            )
 
         ca_requires_grad = bool(ca.requires_grad)
         cb_requires_grad = bool(cb.requires_grad)
@@ -216,18 +228,18 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                             "Hx": Hx,
                             "Hy": Hy,
                             "Hz": Hz,
-                            "m_hz_y": m_hz_y,
-                            "m_hy_z": m_hy_z,
-                            "m_hx_z": m_hx_z,
-                            "m_hz_x": m_hz_x,
-                            "m_hy_x": m_hy_x,
-                            "m_hx_y": m_hx_y,
-                            "m_ey_z": m_ey_z,
-                            "m_ez_y": m_ez_y,
-                            "m_ez_x": m_ez_x,
-                            "m_ex_z": m_ex_z,
-                            "m_ex_y": m_ex_y,
-                            "m_ey_x": m_ey_x,
+                            "m_hz_y": callback_pml_state(m_hz_y, 1),
+                            "m_hy_z": callback_pml_state(m_hy_z, 0),
+                            "m_hx_z": callback_pml_state(m_hx_z, 0),
+                            "m_hz_x": callback_pml_state(m_hz_x, 2),
+                            "m_hy_x": callback_pml_state(m_hy_x, 2),
+                            "m_hx_y": callback_pml_state(m_hx_y, 1),
+                            "m_ey_z": callback_pml_state(m_ey_z, 0),
+                            "m_ez_y": callback_pml_state(m_ez_y, 1),
+                            "m_ez_x": callback_pml_state(m_ez_x, 2),
+                            "m_ex_z": callback_pml_state(m_ex_z, 0),
+                            "m_ex_y": callback_pml_state(m_ex_y, 1),
+                            "m_ey_x": callback_pml_state(m_ey_x, 2),
                         },
                         models=models,
                         gradients={},
@@ -344,18 +356,18 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                     "Hx": Hx,
                     "Hy": Hy,
                     "Hz": Hz,
-                    "m_hz_y": m_hz_y,
-                    "m_hy_z": m_hy_z,
-                    "m_hx_z": m_hx_z,
-                    "m_hz_x": m_hz_x,
-                    "m_hy_x": m_hy_x,
-                    "m_hx_y": m_hx_y,
-                    "m_ey_z": m_ey_z,
-                    "m_ez_y": m_ez_y,
-                    "m_ez_x": m_ez_x,
-                    "m_ex_z": m_ex_z,
-                    "m_ex_y": m_ex_y,
-                    "m_ey_x": m_ey_x,
+                    "m_hz_y": callback_pml_state(m_hz_y, 1),
+                    "m_hy_z": callback_pml_state(m_hy_z, 0),
+                    "m_hx_z": callback_pml_state(m_hx_z, 0),
+                    "m_hz_x": callback_pml_state(m_hz_x, 2),
+                    "m_hy_x": callback_pml_state(m_hy_x, 2),
+                    "m_hx_y": callback_pml_state(m_hx_y, 1),
+                    "m_ey_z": callback_pml_state(m_ey_z, 0),
+                    "m_ez_y": callback_pml_state(m_ez_y, 1),
+                    "m_ez_x": callback_pml_state(m_ez_x, 2),
+                    "m_ex_z": callback_pml_state(m_ex_z, 0),
+                    "m_ex_y": callback_pml_state(m_ex_y, 1),
+                    "m_ey_x": callback_pml_state(m_ey_x, 2),
                 }
                 forward_callback(
                     CallbackState(
@@ -371,6 +383,7 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
                         grid_spacing=list(grid_spacing),
                     )
                 )
+                del callback_wavefields
 
         ctx.save_for_backward(
             ca,
@@ -557,21 +570,46 @@ class Maxwell3DForwardFunc(torch.autograd.Function):
         lambda_hy = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
         lambda_hz = torch.zeros(n_shots, nz, ny, nx, device=device, dtype=dtype)
 
-        m_lambda_ey_z = torch.zeros_like(lambda_ex)
-        m_lambda_ez_y = torch.zeros_like(lambda_ex)
-        m_lambda_ez_x = torch.zeros_like(lambda_ex)
-        m_lambda_ex_z = torch.zeros_like(lambda_ex)
-        m_lambda_ex_y = torch.zeros_like(lambda_ex)
-        m_lambda_ey_x = torch.zeros_like(lambda_ex)
-        m_lambda_hz_y = torch.zeros_like(lambda_ex)
-        m_lambda_hy_z = torch.zeros_like(lambda_ex)
-        m_lambda_hx_z = torch.zeros_like(lambda_ex)
-        m_lambda_hz_x = torch.zeros_like(lambda_ex)
-        m_lambda_hy_x = torch.zeros_like(lambda_ex)
-        m_lambda_hx_y = torch.zeros_like(lambda_ex)
-        adjoint_memory_scratch = torch.empty(
-            (12, *lambda_ex.shape), device=device, dtype=dtype
-        )
+        if device.type == "cuda":
+            compact_layout = _CompactCPMLLayout(
+                n_shots,
+                (nz, ny, nx),
+                ((pml_z0, pml_z1), (pml_y0, pml_y1), (pml_x0, pml_x1)),
+            )
+            m_lambda_ey_z = compact_layout.zeros(0, device=device, dtype=dtype)
+            m_lambda_ez_y = compact_layout.zeros(1, device=device, dtype=dtype)
+            m_lambda_ez_x = compact_layout.zeros(2, device=device, dtype=dtype)
+            m_lambda_ex_z = compact_layout.zeros(0, device=device, dtype=dtype)
+            m_lambda_ex_y = compact_layout.zeros(1, device=device, dtype=dtype)
+            m_lambda_ey_x = compact_layout.zeros(2, device=device, dtype=dtype)
+            m_lambda_hz_y = compact_layout.zeros(1, device=device, dtype=dtype)
+            m_lambda_hy_z = compact_layout.zeros(0, device=device, dtype=dtype)
+            m_lambda_hx_z = compact_layout.zeros(0, device=device, dtype=dtype)
+            m_lambda_hz_x = compact_layout.zeros(2, device=device, dtype=dtype)
+            m_lambda_hy_x = compact_layout.zeros(2, device=device, dtype=dtype)
+            m_lambda_hx_y = compact_layout.zeros(1, device=device, dtype=dtype)
+            scratch_numel = 4 * sum(
+                state.numel() for state in (m_lambda_ey_z, m_lambda_ez_y, m_lambda_ez_x)
+            )
+            adjoint_memory_scratch = torch.empty(
+                scratch_numel, device=device, dtype=dtype
+            )
+        else:
+            m_lambda_ey_z = torch.zeros_like(lambda_ex)
+            m_lambda_ez_y = torch.zeros_like(lambda_ex)
+            m_lambda_ez_x = torch.zeros_like(lambda_ex)
+            m_lambda_ex_z = torch.zeros_like(lambda_ex)
+            m_lambda_ex_y = torch.zeros_like(lambda_ex)
+            m_lambda_ey_x = torch.zeros_like(lambda_ex)
+            m_lambda_hz_y = torch.zeros_like(lambda_ex)
+            m_lambda_hy_z = torch.zeros_like(lambda_ex)
+            m_lambda_hx_z = torch.zeros_like(lambda_ex)
+            m_lambda_hz_x = torch.zeros_like(lambda_ex)
+            m_lambda_hy_x = torch.zeros_like(lambda_ex)
+            m_lambda_hx_y = torch.zeros_like(lambda_ex)
+            adjoint_memory_scratch = torch.empty(
+                (12, *lambda_ex.shape), device=device, dtype=dtype
+            )
 
         if n_sources > 0:
             grad_f = torch.zeros(nt, n_shots, n_sources, device=device, dtype=dtype)
