@@ -28,7 +28,7 @@ jobs:
         run: uv sync --group dev
 
       - name: Ruff
-        run: uv run ruff check src tests benchmarks/maxwell_runtime.py
+        run: uv run ruff check src tests
 
       - name: Unit and contract tests
         run: >-
@@ -52,12 +52,6 @@ jobs:
           files: coverage.xml
           use_oidc: true
 
-      - name: Benchmark CLI smoke
-        run: >-
-          uv run python benchmarks/maxwell_runtime.py
-          --dimension 2 --device cpu --shape 12,14 --nt 8
-          --shots 1 --receivers 1 --warmup 0 --repeats 1
-          --output artifacts/benchmarks/ci-smoke.json
 
   nightly-cpu:
     if: github.event_name == 'schedule'

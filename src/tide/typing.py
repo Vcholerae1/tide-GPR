@@ -23,9 +23,9 @@ Field2DLike = (
     | Float[Tensor, "batch shot field_y field_x"]
 )
 Field3DLike = (
-    Float[Tensor, "z y x"]
-    | Float[Tensor, "shot z y x"]
-    | Float[Tensor, "batch shot z y x"]
+    Float[Tensor, "field_z field_y field_x"]
+    | Float[Tensor, "shot field_z field_y field_x"]
+    | Float[Tensor, "batch shot field_z field_y field_x"]
 )
 
 WaveletBatch = (

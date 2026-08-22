@@ -4,6 +4,7 @@ import math
 import pytest
 import torch
 from tide import staggered, utils
+from tide.grid_utils import _CompactCPMLLayout
 from tide.cfl import cfl_condition
 from tide.padding import create_or_pad, reverse_pad, zero_interior
 from tide.resampling import downsample, downsample_and_movedim, upsample
@@ -125,6 +126,28 @@ def test_set_pml_profiles_coefficient_ranges():
     for profile in (ky, kyh, kx, kxh):
         assert torch.all(profile >= 1.0)
         assert profile.max() > 1.0
+
+
+def test_compact_cpml_layout_shapes() -> None:
+    layout = _CompactCPMLLayout(
+        2,
+        (67, 68, 69),
+        ((10, 58), (11, 59), (12, 60)),
+    )
+    assert tuple(layout.shape(axis) for axis in range(3)) == (
+        (2, 20, 68, 69),
+        (2, 67, 21, 69),
+        (2, 67, 68, 22),
+    )
+
+
+def test_compact_cpml_layout_pack_unpack_roundtrip() -> None:
+    layout = _CompactCPMLLayout(1, (6, 2, 2), ((2, 5), (0, 2), (0, 2)))
+    full = torch.arange(24, dtype=torch.float32).reshape(1, 6, 2, 2)
+    packed = layout.pack(full, 0)
+    restored = layout.unpack(packed, 0)
+    assert torch.equal(restored[:, [0, 1, 4, 5]], full[:, [0, 1, 4, 5]])
+    assert torch.count_nonzero(restored[:, 2:4]) == 0
 
 
 # --- test_cfl.py ---

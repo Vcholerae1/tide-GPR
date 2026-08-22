@@ -1,6 +1,9 @@
 """Grid-related helpers for padding and boundary bookkeeping."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
+
+import torch
 
 
 def _normalize_grid_spacing_2d(
@@ -87,3 +90,62 @@ def _normalize_pml_width_3d(
             f"3D pml_width must have length 1, 3, or 6, got {len(pml_width_list)}."
         )
     return [int(v) for v in pml_width_list]
+
+
+@dataclass(frozen=True, slots=True)
+class _CompactCPMLLayout:
+    """Internal shape bookkeeping for axis-compact CPML state."""
+
+    shots: int
+    spatial_shape: tuple[int, ...]
+    pml_bounds: tuple[tuple[int, int], ...]
+
+    def shape(self, axis: int) -> tuple[int, ...]:
+        size = self.spatial_shape[axis]
+        low, high = self.pml_bounds[axis]
+        shape = [self.shots, *self.spatial_shape]
+        shape[axis + 1] = low + size - max(low, high - 1)
+        return tuple(shape)
+
+    def coordinates(
+        self, axis: int, *, device: torch.device | None = None
+    ) -> torch.Tensor:
+        size = self.spatial_shape[axis]
+        low, high = self.pml_bounds[axis]
+        high_start = max(low, high - 1)
+        return torch.cat(
+            (
+                torch.arange(low, device=device, dtype=torch.int64),
+                torch.arange(high_start, size, device=device, dtype=torch.int64),
+            )
+        )
+
+    def pack(self, state: torch.Tensor, axis: int) -> torch.Tensor:
+        expected = (self.shots, *self.spatial_shape)
+        if tuple(state.shape) != expected:
+            raise ValueError(f"full CPML state must have shape {expected}")
+        return state.index_select(axis + 1, self.coordinates(axis, device=state.device))
+
+    def unpack(self, state: torch.Tensor, axis: int) -> torch.Tensor:
+        expected = self.shape(axis)
+        if tuple(state.shape) != expected:
+            raise ValueError(f"compact CPML state must have shape {expected}")
+        result = torch.zeros(
+            (self.shots, *self.spatial_shape),
+            device=state.device,
+            dtype=state.dtype,
+        )
+        return result.index_copy(
+            axis + 1, self.coordinates(axis, device=state.device), state
+        )
+
+    def zero_interior_(self, state: torch.Tensor, axis: int) -> None:
+        low, high = self.pml_bounds[axis]
+        slices = [slice(None)] * state.ndim
+        slices[axis + 1] = slice(low, max(low, high - 1))
+        state[tuple(slices)].zero_()
+
+    def zeros(
+        self, axis: int, *, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        return torch.zeros(self.shape(axis), device=device, dtype=dtype)
